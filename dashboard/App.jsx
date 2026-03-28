@@ -1,0 +1,1502 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+const C = {
+  bg:"#06060f", surface:"#0c0c1e", panel:"#10102a", border:"#1a1a35", borderHi:"#2a2a55",
+  accent:"#F0B429", accentDim:"#c0860f", green:"#10B981", red:"#EF4444",
+  blue:"#6366F1", purple:"#A855F7", teal:"#14B8A6", orange:"#F97316",
+  cyan:"#06B6D4", lime:"#84CC16",
+  muted:"#5a5a7a", text:"#dde0f0", textDim:"#8888aa",
+};
+
+const FONT_STYLE = `
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0;}
+  ::-webkit-scrollbar{width:3px;height:3px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  ::-webkit-scrollbar-thumb{background:#2a2a55;border-radius:2px;}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+  @keyframes dotBounce{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-6px)}}
+  @keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+  @keyframes glow{0%,100%{box-shadow:0 0 8px #F0B42933}50%{box-shadow:0 0 20px #F0B42966}}
+  @keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(400%)}}
+  @keyframes criticalPulse{0%,100%{box-shadow:0 0 0 0 #10B98144,0 0 12px #10B98133}50%{box-shadow:0 0 0 3px #10B98122,0 0 24px #10B98166}}
+  @keyframes dangerPulse{0%,100%{box-shadow:0 0 0 0 #EF444444,0 0 12px #EF444433}50%{box-shadow:0 0 0 3px #EF444422,0 0 24px #EF444466}}
+  @keyframes criticalBadge{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.85;transform:scale(1.04)}}
+  .aria-glow{box-shadow:0 0 24px #A855F733,0 0 48px #A855F711;}
+  .portfolio-alert{animation:glow 2s infinite;}
+  .research-card:hover{border-color:#F0B42966!important;transform:translateY(-1px);transition:all .15s;}
+  .critical-discovery{animation:criticalPulse 2.4s ease-in-out infinite;}
+  .critical-danger{animation:dangerPulse 2s ease-in-out infinite;}
+  .tabs-scroll::-webkit-scrollbar{display:none;}
+  .ticker-scroll::-webkit-scrollbar{display:none;}
+`;
+
+// ─── CRITICAL THRESHOLDS ─────────────────────────────────────────────────────
+// Discovery: flag if upsidePct >= 100 AND upsideConfidence >= 70
+// Portfolio danger: flag if dangerDropPct >= 70 AND dangerConfidence >= 65 within 2-3 months
+const isCriticalDiscovery = (s) => s.upsidePct >= 100 && s.upsideConfidence >= 70;
+const isCriticalDanger    = (h) => h.dangerDropPct >= 70 && h.dangerConfidence >= 65;
+
+// ─── LIVE PRICES ─────────────────────────────────────────────────────────────
+const LIVE_PRICES = {
+  RELIANCE:2847.5,HDFCBANK:1632.0,TCS:3489.0,INFY:1756.0,TATAMOTORS:812.0,
+  SUNPHARMA:1642.0,GOLDBEES:5824.0,CRUDEOIL:6240.0,WIPRO:445.0,ICICIBANK:1089.0,
+  AXISBANK:1124.0,BAJFINANCE:7240.0,MARUTI:12340.0,NESTLEIND:2456.0,LTIM:5620.0,
+  DIXON:15840.0,POLYCAB:6720.0,ABFRL:192.0,IRFC:186.0,ZOMATO:212.0,
+  ADANIPORTS:1340.0,COALINDIA:455.0,ONGC:274.0,NTPC:368.0,POWERGRID:322.0,
+};
+
+// ─── DISCOVERY UNIVERSE — stocks NOT in portfolio, screened by agents ─────────
+const DISCOVERY_UNIVERSE = [
+  {
+    id:"d1", symbol:"DIXON", name:"Dixon Technologies", sector:"Electronics/PLI",
+    price:15840, change:3.2, pe:68, mktCap:"₹95,400 Cr",
+    discoveryScore:87, discoveryReason:"PLI scheme electronics beneficiary + Apple supply chain entry",
+    action:"BUY", confidence:81, riskScore:38, horizon:"4–7 months",
+    entry:"₹15,200–₹15,800", target:"₹19,500", stoploss:"₹13,800",
+    validTill:"2025-07-31",
+    // Critical upside fields
+    upsidePct:123, upsideConfidence:76,
+    upsideHorizon:"9–12 months",
+    upsideBasis:"PLI full-cycle revenue ₹35,000 Cr by FY27 at current growth. Apple India supply chain localisation hitting 25% by FY26. Historical: Amber Enterprises 4x in 14 months on identical trigger. Consensus analyst target: ₹35,200 (median of 8 analysts).",
+    screenTriggers:["FII net buy ₹840 Cr in 30d","Revenue +94% YoY","Apple iPhone component order confirmed","PLI payout Q3 FY25 received"],
+    agents:{
+      technical:    {signal:"BUY",         score:79, detail:"Weekly breakout above ₹15,500 resistance. Volume 3.2x average. RSI 64 — room to run."},
+      fundamental:  {signal:"BUY",         score:88, detail:"Revenue ₹17,690 Cr FY25 vs ₹9,100 Cr FY24. EBITDA margin expanding. PLI incentive ₹400 Cr recognised."},
+      sentiment:    {signal:"BUY",         score:74, detail:"Google Trends for 'Dixon Technologies' +280% MoM. 6 analyst upgrades in 30 days. Management tone bullish."},
+      institutional:{signal:"BUY",         score:83, detail:"3 major MFs added 2.1% stake. FII ownership at 18.4% (up from 14.2% in Dec). No promoter selling."},
+      macro:        {signal:"POSITIVE",    score:72, detail:"China+1 supply chain shift accelerating. India PLI electronics ₹41,000 Cr scheme. USD/INR stable = export benefit."},
+      historical:   {signal:"BUY",         score:76, detail:"Amber Enterprises ran +180% in 12 months after similar PLI trigger in 2021. Dixon setup closely mirrors it."},
+    },
+    risks:["High PE (68x) — priced for perfection","Apple order size smaller than expected","Component import cost rise if INR depreciates","Competition from Tata Electronics"],
+    catalysts:["Q1 FY26 results (July 25)","New PLI tranche announcement","Apple India supply chain expansion news"],
+    govCheck:{verified:true, hallucinations:0, sourceQuality:89, lastChecked:"09:10 IST", flags:[]},
+    notInPortfolio:true,
+  },
+  {
+    id:"d2", symbol:"POLYCAB", name:"Polycab India", sector:"Cables & Wires",
+    price:6720, change:1.1, pe:42, mktCap:"₹1.01L Cr",
+    discoveryScore:82, discoveryReason:"Infrastructure capex supercycle + EV charging grid buildout",
+    action:"BUY", confidence:74, riskScore:31, horizon:"5–8 months",
+    entry:"₹6,400–₹6,700", target:"₹8,200", stoploss:"₹5,900",
+    validTill:"2025-08-15",
+    // No critical upside flag (upside ~22% to target — solid but not 100%+)
+    upsidePct:22, upsideConfidence:74,
+    upsideHorizon:"5–8 months",
+    upsideBasis:"Target ₹8,200 represents 22% upside from current levels driven by infra capex. Strong but below the 100% critical threshold.",
+    screenTriggers:["Govt capex ₹11L Cr FY25 on track","EV charging infra tenders ₹8,400 Cr","FII net buy 8 consecutive sessions","FMEG segment revenue doubled YoY"],
+    agents:{
+      technical:    {signal:"BUY",         score:74, detail:"Cup-and-handle pattern on weekly chart. 50 DMA acting as support. RSI 57 — healthy."},
+      fundamental:  {signal:"BUY",         score:84, detail:"Market share 25% in wires. EBITDA ₹1,890 Cr (+22% YoY). Debt-free. ROCE 31%. FMEG growing 42% YoY."},
+      sentiment:    {signal:"POSITIVE",    score:68, detail:"Infra sector sentiment elevated post Budget capex reaffirmation. Polycab mentioned in 4 govt tender documents."},
+      institutional:{signal:"BUY",         score:79, detail:"LIC increased holding to 6.4%. HDFC MF largest MF holder. Promoter buying on dips (₹12 Cr in March)."},
+      macro:        {signal:"POSITIVE",    score:77, detail:"India power sector ₹4L Cr investments planned FY25–27. EV penetration at 6.4% driving charging infra demand."},
+      historical:   {signal:"POSITIVE",    score:71, detail:"Havells ran +130% during 2017–2018 infra capex supercycle. Polycab at comparable stage in its own cycle now."},
+    },
+    risks:["Copper price spike (key input)","Govt capex delay","FMEG competitive pressure from Havells/Legrand","GST rate change on cables"],
+    catalysts:["Q4 FY25 results (May 15)","Govt infra tender wins","EV charging tender awards"],
+    govCheck:{verified:true, hallucinations:0, sourceQuality:92, lastChecked:"09:05 IST", flags:[]},
+    notInPortfolio:true,
+  },
+  {
+    id:"d3", symbol:"IRFC", name:"Indian Railway Finance Corp", sector:"PSU Finance",
+    price:186, change:-0.5, pe:29, mktCap:"₹2.43L Cr",
+    discoveryScore:73, discoveryReason:"Railway capex ₹2.65L Cr FY25 — IRFC is the funding arm",
+    action:"BUY", confidence:69, riskScore:22, horizon:"6–9 months",
+    entry:"₹178–₹190", target:"₹240", stoploss:"₹158",
+    validTill:"2025-09-30",
+    // Moderate upside — not critical
+    upsidePct:29, upsideConfidence:69,
+    upsideHorizon:"6–9 months",
+    upsideBasis:"₹240 target = 29% upside. PFC/REC analog suggests potential for larger move over 18–24 months but near-term upside below critical threshold.",
+    screenTriggers:["Railway budget ₹2.65L Cr — highest ever","Borrowing programme fully subscribed","Dividend yield 1.1% at CMP","Zero NPA model — pure pass-through"],
+    agents:{
+      technical:    {signal:"NEUTRAL",     score:52, detail:"Range-bound ₹175–₹200 for 3 months. Needs breakout above ₹200 to confirm next leg. Accumulation pattern."},
+      fundamental:  {signal:"BUY",         score:82, detail:"NIM 1.4% (narrow but guaranteed). Zero credit risk — lends only to Railways. Book value growing 18% YoY."},
+      sentiment:    {signal:"POSITIVE",    score:65, detail:"Railway infra narrative strong post Budget. 3 analyst initiations in March with target ₹230–₹260."},
+      institutional:{signal:"BUY",         score:76, detail:"LIC holds 2.8%. DII net buyers. Retail investor SIP flows into PSU ETFs continue to support."},
+      macro:        {signal:"POSITIVE",    score:74, detail:"Rate cut cycle = lower borrowing cost for IRFC = margin expansion. Govt committed to railway modernisation."},
+      historical:   {signal:"POSITIVE",    score:68, detail:"PFC/REC rallied 200%+ during 2022–2024 power sector capex cycle. IRFC at similar early stage."},
+    },
+    risks:["Govt capex slowdown pre-election","Rate reversal","Illiquidity vs other PSU financials","Slow NIM expansion timeline"],
+    catalysts:["RBI rate cut (margin expansion)","Q4 FY25 book value update","New railway capex announcement"],
+    govCheck:{verified:true, hallucinations:1, sourceQuality:86, lastChecked:"08:55 IST", flags:["Railway budget figure sourced from press release — verify on indiabudget.gov.in"]},
+    notInPortfolio:true,
+  },
+  {
+    id:"d4", symbol:"ZOMATO", name:"Zomato", sector:"Consumer Internet",
+    price:212, change:2.8, pe:280, mktCap:"₹1.87L Cr",
+    discoveryScore:68, discoveryReason:"Quick commerce Blinkit hitting profitability + food delivery monopoly",
+    action:"HOLD", confidence:58, riskScore:61, horizon:"3–5 months",
+    entry:"₹195–₹215", target:"₹265", stoploss:"₹172",
+    validTill:"2025-06-15",
+    upsidePct:25, upsideConfidence:58,
+    upsideHorizon:"3–5 months",
+    upsideBasis:"₹265 target from current ₹212 = 25% upside. Low conviction — HOLD, not BUY. High PE risk limits confidence in larger moves.",
+    screenTriggers:["Blinkit GMV +100% YoY","Food delivery order frequency at ATH","B2B Hyperpure revenue tripling","FII momentum buying"],
+    agents:{
+      technical:    {signal:"BUY",         score:71, detail:"Breaking above ₹210 resistance. 200 DMA at ₹172 is distant support. RSI 66 approaching overbought."},
+      fundamental:  {signal:"NEUTRAL",     score:44, detail:"PAT positive for 3 quarters but PE of 280x prices in perfection. Blinkit burn rate still elevated. Cash runway 18 months."},
+      sentiment:    {signal:"POSITIVE",    score:72, detail:"Consumer tech sentiment improving. Blinkit brand recognition surpassing Zepto in surveys. Social buzz elevated."},
+      institutional:{signal:"BUY",         score:68, detail:"Tiger Global, Ant Group partial exits absorbed by FIIs. Domestic MF buying continued. Float remains high."},
+      macro:        {signal:"NEUTRAL",     score:55, detail:"Urban consumption strong but premium. Rising food inflation could pressure order frequency. Dark store expansion needs permits."},
+      historical:   {signal:"NEUTRAL",     score:48, detail:"High-PE consumer internet stocks globally compressed 60–80% in 2022. Zomato already corrected 70% — base is low."},
+    },
+    risks:["Extremely high valuation (280x PE)","Swiggy ONDC competition","Regulatory risk for dark stores","Profitability not yet structural"],
+    catalysts:["Q4 FY25 results (May 12)","Blinkit EBITDA break-even","New city expansion"],
+    govCheck:{verified:true, hallucinations:0, sourceQuality:83, lastChecked:"09:00 IST", flags:[]},
+    notInPortfolio:true,
+  },
+];
+
+// ─── PORTFOLIO ────────────────────────────────────────────────────────────────
+const DEFAULT_PORTFOLIO = [
+  {
+    id:"p1",symbol:"RELIANCE",name:"Reliance Industries",sector:"Energy",
+    qty:15,avgBuy:2680,currentPrice:2847.5,buyDate:"2024-11-12",linkedRecId:null,
+    notes:"Core holding",targetPrice:3100,stoplossPrice:2450,status:"holding",
+    // No critical danger
+    dangerDropPct:0, dangerConfidence:0, dangerTrigger:null, dangerWindow:null,
+  },
+  {
+    id:"p2",symbol:"TATAMOTORS",name:"Tata Motors",sector:"Auto",
+    qty:50,avgBuy:808,currentPrice:812.0,buyDate:"2025-03-10",linkedRecId:1,
+    notes:"Acting on BUY rec",targetPrice:980,stoplossPrice:740,status:"holding",
+    // No critical danger
+    dangerDropPct:0, dangerConfidence:0, dangerTrigger:null, dangerWindow:null,
+  },
+  {
+    id:"p3",symbol:"GOLDBEES",name:"Gold BeES ETF",sector:"Commodity",
+    qty:8,avgBuy:5790,currentPrice:5824.0,buyDate:"2025-02-28",linkedRecId:3,
+    notes:"Gold allocation",targetPrice:6800,stoplossPrice:5400,status:"holding",
+    dangerDropPct:0, dangerConfidence:0, dangerTrigger:null, dangerWindow:null,
+  },
+  {
+    id:"p4",symbol:"PAYTM",name:"One97 Communications (Paytm)",sector:"Fintech",
+    qty:120,avgBuy:620,currentPrice:415.0,buyDate:"2024-08-05",linkedRecId:null,
+    notes:"Bought on dip after PPBL ban",targetPrice:750,stoplossPrice:320,status:"holding",
+    // ⚠ CRITICAL DANGER — 70%+ drop predicted within 2-3 months
+    dangerDropPct:74, dangerConfidence:71,
+    dangerWindow:"6–10 weeks",
+    dangerTrigger:"SEBI investigation into KYC violations confirmed. RBI reviewing remaining payment aggregator licence. FII holding collapsed from 18% → 4.2% in 60 days. 3 major MFs fully exited. Revenue -38% YoY as merchant partners migrate to Razorpay/PhonePe. If payment aggregator licence is revoked, book value support disappears — stock could retest ₹108 (FY23 lows). Governance cross-checked: SEBI SCORES portal shows 3 pending regulatory notices. High conviction danger signal.",
+    dangerSources:["SEBI enforcement order dated Mar 18 (BSE filing)","RBI payment aggregator review circular","MF portfolio disclosures Feb 2025 — 4 exits","NSE bulk deal data — FII selling ₹1,840 Cr in 45 days"],
+  },
+];
+
+// ─── EXISTING RECOMMENDATIONS (from portfolio stocks) ────────────────────────
+const PORTFOLIO_RECOMMENDATIONS = [
+  {
+    id:1,symbol:"TATAMOTORS",action:"BUY",confidence:78,horizon:"3–6 months",
+    entry:"₹790–₹820",entryLow:790,entryHigh:820,target:"₹980",targetNum:980,stoploss:"₹740",stoplossNum:740,
+    riskScore:42,validTill:"2025-06-30",headline:"EV cycle upturn + strong JLR order book",
+    summary:"Tata Motors is at an inflection point — JLR reported record order book of 150,000 units. Domestic EV market share at 61%. PLI scheme tailwinds.",
+    agents:{
+      technical:{signal:"BUY",score:72,detail:"Weekly Inverse H&S breakout above ₹800. RSI(14) at 58. 200 DMA ₹740 = strong floor."},
+      fundamental:{signal:"BUY",score:82,detail:"Revenue +18% YoY. EBITDA margin +200bps. JLR D/E improved 1.4x→0.9x. EV volumes +42% QoQ."},
+      sentiment:{signal:"NEUTRAL",score:55,detail:"News 62% positive. Social mentions +35% WoW. Concall NLP tone score 7.4/10."},
+      institutional:{signal:"BUY",score:81,detail:"FII net buy ₹1,240 Cr last 30d. 3 MFs increased stake. Promoter holding stable 46.4%."},
+      macro:{signal:"POSITIVE",score:70,detail:"Crude $78 manageable. INR 83.5 stable. RBI cut likely Q2. EV supply chain easing."},
+      historical:{signal:"POSITIVE",score:76,detail:"Apr 2021 analog: stock +140% over 8 months post earnings beat."},
+    },
+    risks:["JLR production disruption","Commodity cost spike","UK recession risk","EV competition Hyundai/MG"],
+    catalysts:["Q4 FY25 earnings Apr 25","JLR monthly sales","PLI disbursements"],
+    govCheck:{verified:true,hallucinations:0,sourceQuality:91,lastChecked:"09:15 IST",flags:[]},
+  },
+  {
+    id:2,symbol:"SUNPHARMA",action:"HOLD",confidence:64,horizon:"2–4 months",
+    entry:"₹1,580–₹1,620",entryLow:1580,entryHigh:1620,target:"₹1,820",targetNum:1820,stoploss:"₹1,480",stoplossNum:1480,
+    riskScore:31,validTill:"2025-05-15",headline:"US specialty pharma traction + India branded generics strength",
+    summary:"Sun Pharma US specialty pipeline gaining traction. India business +12% vs industry 8%. EBITDA margins 27% — best in class.",
+    agents:{
+      technical:{signal:"NEUTRAL",score:50,detail:"Consolidating ₹1,580–₹1,680 for 6 weeks. MACD crossover expected within 2 weeks."},
+      fundamental:{signal:"BUY",score:80,detail:"US specialty $450M run rate. Ilumya +30% YoY in US. India Rx market share #1. ROCE 22%."},
+      sentiment:{signal:"POSITIVE",score:72,detail:"USFDA approval for Winlevi extension. Zero warning letters. 4 analyst upgrades last 30d."},
+      institutional:{signal:"HOLD",score:58,detail:"FII slight net sell ₹320 Cr. DIIs accumulating. MF SIP steady."},
+      macro:{signal:"POSITIVE",score:68,detail:"INR depreciation benefits pharma exporters. US healthcare stable. China+1 play."},
+      historical:{signal:"NEUTRAL",score:55,detail:"Sun consolidates 3–4 months after 30%+ run. Pattern matches 2018 and 2021 cycles."},
+    },
+    risks:["USFDA inspection Halol plant","INR appreciation","US generics pricing pressure","Guidance miss"],
+    catalysts:["Q4 FY25 results May 10","New USFDA approvals","India pharma policy"],
+    govCheck:{verified:true,hallucinations:1,sourceQuality:84,lastChecked:"08:50 IST",flags:["Halol inspection date unverified"]},
+  },
+  {
+    id:3,symbol:"GOLDBEES",action:"BUY",confidence:71,horizon:"4–8 months",
+    entry:"₹5,750–₹5,850",entryLow:5750,entryHigh:5850,target:"₹6,800",targetNum:6800,stoploss:"₹5,400",stoplossNum:5400,
+    riskScore:28,validTill:"2025-08-30",headline:"Gold in structural bull run — Fed cuts + geopolitical premium",
+    summary:"Gold driven by de-dollarization, Fed rate cut cycle, geopolitical uncertainty. INR gold has additional currency depreciation tailwind.",
+    agents:{
+      technical:{signal:"BUY",score:78,detail:"International gold broke $2,450 ATH. MCX Gold above all EMAs. RSI 65."},
+      fundamental:{signal:"BUY",score:75,detail:"Central bank buying 50yr high (1,037t). India imports 750–800t/yr. ETF flows positive."},
+      sentiment:{signal:"BUY",score:70,detail:"Google Trends 'buy gold India' +45% MoM. WGC Q1 FY25 jewelry demand +11% YoY."},
+      institutional:{signal:"BUY",score:82,detail:"RBI added 19t in March. SGBs oversubscribed 3x. FIIs increasing gold ETF allocations."},
+      macro:{signal:"VERY POSITIVE",score:85,detail:"US real yields declining. DXY weakening. Fed 2–3 cuts 2025. Middle East premium."},
+      historical:{signal:"BUY",score:80,detail:"2019–2020 Fed cut cycle: gold +40%. India gold ₹35k→₹56k in 18 months."},
+    },
+    risks:["Sharp USD strengthening","RBI gold import duty cut","INR appreciation","Risk-on rally"],
+    catalysts:["Next FOMC meeting","US CPI data","Union Budget import duty"],
+    govCheck:{verified:true,hallucinations:0,sourceQuality:95,lastChecked:"09:20 IST",flags:[]},
+  },
+];
+
+const MARKET_PULSE = [
+  {key:"NIFTY 50",value:"22,147",change:"+0.6%",up:true},
+  {key:"SENSEX",value:"73,088",change:"+0.5%",up:true},
+  {key:"NIFTY BANK",value:"47,320",change:"-0.3%",up:false},
+  {key:"GOLD MCX",value:"₹72,840",change:"+0.3%",up:true},
+  {key:"CRUDE MCX",value:"₹6,240",change:"-0.5%",up:false},
+  {key:"INR/USD",value:"83.47",change:"-0.1%",up:false},
+  {key:"FII NET",value:"+₹1,840 Cr",change:"buy",up:true},
+  {key:"INDIA VIX",value:"14.2",change:"-0.8",up:false},
+];
+
+const NEWS_FEED = [
+  {time:"11:32",src:"ET Markets",text:"RBI MPC minutes signal accommodative stance — rate cut likely in June",sector:"Banking",tone:"positive"},
+  {time:"10:58",src:"Moneycontrol",text:"JLR March retail sales up 22% YoY — Tata Motors in focus",sector:"Auto",tone:"positive"},
+  {time:"10:22",src:"Business Standard",text:"FII flows positive for 8th consecutive session — Nifty IT leads",sector:"IT",tone:"positive"},
+  {time:"09:45",src:"SEBI Notice",text:"SEBI tightens F&O position limits for individual stocks",sector:"Derivatives",tone:"neutral"},
+  {time:"09:15",src:"Reuters",text:"Brent crude falls to $79.2 on OPEC+ concerns — aviation/paint stocks benefit",sector:"Commodity",tone:"mixed"},
+];
+
+const GOV_ALERTS = [
+  {id:"G1",severity:"warning",module:"Sentiment Agent",title:"Coordinated misinformation detected — TATAMOTORS",detail:"3 Reddit posts about TATAMOTORS UK factory closure appear coordinated. Cross-referenced with BSE filings — no such announcement. Signal down-weighted 40%.",action:"Source quarantined. Confidence maintained at 78%.",time:"10:44 IST",resolved:true},
+  {id:"G2",severity:"info",module:"Historical Analogy Engine",title:"Low confidence historical match — SUNPHARMA 2018",detail:"Pattern match confidence 61% (threshold 70%). 2018 context differed — applied with reduced weighting.",action:"Historical score reduced from 72 to 55.",time:"09:30 IST",resolved:true},
+  {id:"G3",severity:"critical",module:"Fundamental Agent",title:"Stale data — HDFCBANK Q3 FY25 balance sheet used",detail:"Q4 FY25 results published yesterday. Analysis must be rerun before recommendation issued.",action:"HDFCBANK recommendation withheld pending refresh.",time:"08:15 IST",resolved:false},
+];
+
+// ─── GOVERNANCE RESEARCH AGENT DATA ──────────────────────────────────────────
+const AI_RESEARCH_FEED = [
+  {
+    id:"r1", type:"whitepaper", date:"2025-03-18",
+    source:"arXiv / Stanford CRFM",
+    title:"FinAgent-v2: Multi-Modal Financial Reasoning with Structured Tool Use",
+    relevance:94,
+    summary:"Introduces structured tool-calling chains for financial agents — separating data retrieval, analysis, and synthesis into discrete verifiable steps. Shows 31% reduction in hallucination rate vs end-to-end LLM approaches.",
+    proposedChange:"Refactor all 7 analysis agents to use tool-calling chains (data→analyse→synthesise) instead of single LLM calls. Expected: hallucination rate drops from 2.1% to ~1.4%.",
+    impactedAgents:["Sentiment Agent","Fundamental Agent","Historical RAG"],
+    costImpact:"Free — architectural change only, no new subscriptions",
+    debateStatus:"pending",
+    votes:{for:3,against:1,abstain:2},
+    tag:"Architecture",
+  },
+  {
+    id:"r2", type:"industry_report", date:"2025-03-15",
+    source:"Morgan Stanley Research",
+    title:"India 2025: Sector Rotation Map — From Consumption to Capex",
+    relevance:91,
+    summary:"Morgan Stanley identifies 4 sectors for next 18-month outperformance: Power & Renewables, Railways/Infra, Defense, Specialty Chemicals. Their quant model uses different factor weights than current Bharat Intelligence setup.",
+    proposedChange:"Add Morgan Stanley sector rotation weights as a new 'Institutional Consensus' signal layer in the Macro Agent. High-alpha sectors get +10 confidence boost when aligned with MS consensus.",
+    impactedAgents:["Macro Agent","Orchestrator"],
+    costImpact:"Free — prompt engineering change only",
+    debateStatus:"approved",
+    votes:{for:5,against:0,abstain:1},
+    tag:"Signal Quality",
+  },
+  {
+    id:"r3", type:"whitepaper", date:"2025-03-10",
+    source:"Google DeepMind",
+    title:"Debate as a Verification Mechanism for LLM Factual Claims",
+    relevance:87,
+    summary:"DeepMind shows that structured multi-agent debate (where one agent argues FOR a claim and another argues AGAINST before a judge LLM decides) reduces factual errors by 44% vs single-model responses. Applied to financial claims specifically.",
+    proposedChange:"Upgrade Governance fact-checker from single-model verification to full debate loop: Verifier Agent argues claim is true + Devil's Advocate Agent argues it's false → Judge Haiku decides. Adds ~$2/month in tokens.",
+    impactedAgents:["Governance — Fact Checker"],
+    costImpact:"~$2/month additional Haiku tokens",
+    debateStatus:"debating",
+    votes:{for:2,against:2,abstain:2},
+    tag:"Governance",
+  },
+  {
+    id:"r4", type:"news", date:"2025-03-20",
+    source:"Anthropic Blog",
+    title:"Claude Tool Use Latency Improvements — 40% Faster Function Calling",
+    relevance:82,
+    summary:"Anthropic reduced tool use latency by 40% in claude-haiku-4-5. This directly impacts the Governance fact-checker and sentiment agent which make many sequential tool calls during morning analysis runs.",
+    proposedChange:"Migrate Governance fact-checker and Sentiment Agent from claude-sonnet to claude-haiku-4-5 for the tool-calling layer. Same quality, 40% faster, lower cost.",
+    impactedAgents:["Governance — Fact Checker","Sentiment Agent"],
+    costImpact:"Saves ~$3/month",
+    debateStatus:"approved",
+    votes:{for:6,against:0,abstain:0},
+    tag:"Performance",
+  },
+  {
+    id:"r5", type:"whitepaper", date:"2025-03-05",
+    source:"SSRN / IIM Ahmedabad",
+    title:"FII Flow Predictability in Indian Markets Using Sentiment-Momentum Fusion",
+    relevance:88,
+    summary:"IIM-A study finds that combining FII net flow data with social sentiment creates a 3-day leading indicator for Nifty direction with 67% accuracy (vs 58% for either alone). Specifically validates the fusion approach used by our Institutional + Sentiment agents.",
+    proposedChange:"Formalise the FII+Sentiment fusion signal as a dedicated cross-agent output in the orchestrator. Weight this composite signal 1.5x the individual agent signals when both agree.",
+    impactedAgents:["Institutional Flow Agent","Sentiment Agent","Orchestrator"],
+    costImpact:"Free — orchestrator logic change only",
+    debateStatus:"pending",
+    votes:{for:4,against:1,abstain:1},
+    tag:"Signal Quality",
+  },
+];
+
+const AGENT_DEBATE_LOG = [
+  {agent:"Macro Agent",stance:"FOR",paper:"r3",argument:"DeepMind debate paper shows 44% error reduction. Our Governance fact-checker has 2.1% hallucination rate in Sentiment — this directly addresses that. $2/month is justified."},
+  {agent:"Governance Engine",stance:"FOR",paper:"r3",argument:"Current single-model verification has known failure modes on numerical claims. Debate structure catches contradictions the single model misses."},
+  {agent:"Historical RAG Agent",stance:"AGAINST",paper:"r3",argument:"Debate loop adds 800ms latency per claim. With 40+ claims per daily run, morning analysis could be delayed 30+ minutes. Latency cost outweighs accuracy benefit."},
+  {agent:"Technical Agent",stance:"AGAINST",paper:"r3",argument:"DeepMind paper tested on general knowledge claims, not financial data. Financial facts are verifiable via source lookup — debate adds complexity without proportional benefit."},
+  {agent:"Fundamental Agent",stance:"ABSTAIN",paper:"r3",argument:"Neutral — would benefit from debate on balance sheet claims but concern about latency valid. Suggest testing on 20% of claims first before full rollout."},
+  {agent:"Sentiment Agent",stance:"ABSTAIN",paper:"r3",argument:"Would help my hallucination rate specifically. But Historical RAG's latency concern is valid. Suggest async debate — doesn't block main run."},
+];
+
+const ENHANCEMENT_PROPOSALS = [
+  {id:"E1",title:"Screener.in Pro API — Real-time fundamentals",proposedBy:"Fundamental Agent + Governance",rationale:"Free tier has 200 req/day, 24h lag. Pro API: real-time results, concall transcripts, peer comparison. Governance estimates +10% Fundamental Agent accuracy.",costImpact:{monthly:"₹2,499/month (~$30)",annual:"₹29,988/year"},isPaid:true,riskOfNotDoing:"Stale fundamentals post-earnings",status:"pending_review",steps:[{n:1,who:"You",action:"Visit screener.in/plans → select Pro"},{n:2,who:"You",action:"Pay ₹2,499/month — system cannot pay for you"},{n:3,who:"You",action:"Account → Settings → API Keys → Generate"},{n:4,who:"System",action:"Paste key: SCREENER_API_KEY=<key>"},{n:5,who:"Governance",action:"Validates within 48h, reports via ARIA"}]},
+  {id:"E2",title:"NSE Live Option Chain PCR Signal",proposedBy:"Technical Agent",rationale:"Put-Call Ratio leads price moves by 1–3 sessions. NSE is public — free. Governance estimates +9% Technical Agent accuracy.",costImpact:{monthly:"₹0",annual:"₹0"},isPaid:false,riskOfNotDoing:"Missing F&O expiry week signals",status:"pending_review",steps:[{n:1,who:"You",action:"Confirm deployment — say 'approve' to ARIA"},{n:2,who:"System",action:"NSE scraper auto-deploys next scheduler run"},{n:3,who:"Governance",action:"Validates over 5 sessions before integrating"}]},
+];
+
+const AGENT_PERF = [
+  {name:"Technical",accuracy:74,trend:"+2%",hallucRate:"0.3%",status:"healthy"},
+  {name:"Fundamental",accuracy:81,trend:"+1%",hallucRate:"0.8%",status:"healthy"},
+  {name:"Sentiment",accuracy:63,trend:"-4%",hallucRate:"2.1%",status:"warning"},
+  {name:"Institutional",accuracy:88,trend:"+3%",hallucRate:"0.1%",status:"healthy"},
+  {name:"Macro",accuracy:77,trend:"0%",hallucRate:"0.5%",status:"healthy"},
+  {name:"Historical RAG",accuracy:69,trend:"-2%",hallucRate:"1.2%",status:"monitor"},
+  {name:"Discovery Screener",accuracy:71,trend:"+5%",hallucRate:"0.9%",status:"healthy"},
+];
+
+// ─── COMPUTE PORTFOLIO ALERTS ─────────────────────────────────────────────────
+const computePortfolioAlerts = (portfolio) => {
+  const alerts = [];
+  portfolio.forEach(h => {
+    const pnlPct = ((h.currentPrice - h.avgBuy) / h.avgBuy) * 100;
+    const toTarget = ((h.targetPrice - h.currentPrice) / h.currentPrice) * 100;
+    const toStop = ((h.currentPrice - h.stoplossPrice) / h.currentPrice) * 100;
+    // Critical danger — highest priority
+    if(isCriticalDanger(h)){
+      alerts.unshift({
+        id:`danger-${h.id}`, symbol:h.symbol, severity:"critical_danger",
+        type:"critical_danger",
+        title:`🚨 CRITICAL DANGER — ${h.symbol} predicted -${h.dangerDropPct}% in ${h.dangerWindow}`,
+        detail:h.dangerTrigger,
+        action:`EXIT RECOMMENDED — Governance confidence: ${h.dangerConfidence}%. Review immediately.`,
+        portfolioId:h.id,
+        holding:h,
+      });
+    }
+    if(toStop < 8 && toStop > 0) alerts.push({id:`stop-${h.id}`,symbol:h.symbol,severity:"critical",type:"stoploss_proximity",title:`${h.symbol} approaching stop-loss`,detail:`Current ₹${h.currentPrice} is ${toStop.toFixed(1)}% above stop ₹${h.stoplossPrice}.`,action:"Review or reduce position",portfolioId:h.id});
+    if(toTarget < 12 && toTarget > 0) alerts.push({id:`tgt-${h.id}`,symbol:h.symbol,severity:"info",type:"target_proximity",title:`${h.symbol} approaching target`,detail:`${toTarget.toFixed(1)}% from target ₹${h.targetPrice}. Consider partial profits.`,action:"Review profit booking",portfolioId:h.id});
+    if(pnlPct > 15 && h.linkedRecId) alerts.push({id:`mile-${h.id}`,symbol:h.symbol,severity:"info",type:"rec_milestone",title:`${h.symbol} +${pnlPct.toFixed(1)}% since recommendation`,detail:`P&L: ₹${((h.currentPrice-h.avgBuy)*h.qty).toLocaleString("en-IN",{maximumFractionDigits:0})}. Original target still ahead.`,action:"Review thesis validity",portfolioId:h.id});
+  });
+  return alerts;
+};
+
+// ─── ATOMS ───────────────────────────────────────────────────────────────────
+const Tag=({children,color=C.accent,small=false})=>(
+  <span style={{background:color+"22",color,border:`1px solid ${color}44`,borderRadius:4,padding:small?"1px 5px":"2px 7px",fontSize:small?9:11,fontWeight:700,letterSpacing:.3,whiteSpace:"nowrap"}}>{children}</span>
+);
+const Bar=({pct,color=C.accent,h=5})=>(
+  <div style={{background:C.border,borderRadius:4,height:h,overflow:"hidden"}}>
+    <div style={{width:`${Math.min(pct,100)}%`,height:"100%",background:color,borderRadius:4,transition:"width 1s ease"}}/>
+  </div>
+);
+const Dot=({color=C.green,pulse=false})=>(
+  <span style={{display:"inline-block",width:7,height:7,borderRadius:"50%",background:color,animation:pulse?"pulse 2s infinite":undefined,flexShrink:0}}/>
+);
+const GovShield=({size=18})=>(
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <path d="M12 2L4 6v6c0 5.5 3.8 10.7 8 12 4.2-1.3 8-6.5 8-12V6L12 2z" fill={C.blue+"22"} stroke={C.blue} strokeWidth="1.5" strokeLinejoin="round"/>
+    <path d="M9 12l2 2 4-4" stroke={C.blue} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>
+);
+
+// ─── CRITICAL OPPORTUNITY BANNER ─────────────────────────────────────────────
+function CriticalOpportunityBanner({stocks, onSelect, onOpenARIA}){
+  if(!stocks.length) return null;
+  return(
+    <div className="critical-discovery" style={{
+      background:`linear-gradient(135deg,${C.green}12,${C.lime}08)`,
+      border:`1.5px solid ${C.green}88`,
+      borderRadius:10,padding:14,marginBottom:14,
+    }}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+        <div style={{width:28,height:28,borderRadius:6,background:C.green,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>🚀</div>
+        <div style={{flex:1}}>
+          <div style={{display:"flex",alignItems:"center",gap:7}}>
+            <span style={{fontSize:13,fontWeight:800,color:C.green,letterSpacing:-.2}}>CRITICAL OPPORTUNITY</span>
+            <span style={{background:C.green,color:"#031a0e",borderRadius:4,padding:"1px 7px",fontSize:10,fontWeight:800,animation:"criticalBadge 2s ease-in-out infinite"}}>
+              100%+ UPSIDE · HIGH CONVICTION
+            </span>
+          </div>
+          <div style={{fontSize:10,color:"#80d0a0",marginTop:1}}>
+            {stocks.length} idea{stocks.length>1?"s":""} flagged with 100%+ predicted growth in 6–12 months at ≥70% confidence — requires immediate attention
+          </div>
+        </div>
+        <button onClick={()=>onOpenARIA("discovery_critical")} style={{background:C.green+"22",border:`1px solid ${C.green}55`,borderRadius:6,padding:"5px 11px",color:C.green,fontSize:10,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+          ✦ Deep Dive with ARIA
+        </button>
+      </div>
+      <div style={{display:"flex",gap:9,flexWrap:"wrap"}}>
+        {stocks.map(s=>(
+          <div key={s.id} onClick={()=>onSelect(s.id)} style={{
+            background:C.bg,border:`1px solid ${C.green}55`,borderRadius:8,
+            padding:"10px 13px",flex:1,minWidth:220,cursor:"pointer",
+            transition:"all .15s",
+          }}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                  <span style={{fontSize:13,fontWeight:800,color:"white",fontFamily:"JetBrains Mono"}}>{s.symbol}</span>
+                  <span style={{background:C.green+"22",color:C.green,border:`1px solid ${C.green}44`,borderRadius:4,padding:"1px 6px",fontSize:10,fontWeight:800}}>+{s.upsidePct}%</span>
+                </div>
+                <div style={{fontSize:10,color:C.textDim}}>{s.name}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:11,fontWeight:700,color:C.green,fontFamily:"JetBrains Mono"}}>{s.upsideConfidence}%</div>
+                <div style={{fontSize:8,color:C.muted}}>confidence</div>
+              </div>
+            </div>
+            <div style={{fontSize:9,color:"#80d0a0",lineHeight:1.5,marginBottom:7}}>{s.upsideBasis.slice(0,90)}...</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:9,color:C.muted}}>⏱ {s.upsideHorizon}</span>
+              <span style={{fontSize:9,color:C.muted}}>Entry: {s.entry}</span>
+            </div>
+            <div style={{marginTop:6,background:C.green+"15",borderRadius:3,height:4,overflow:"hidden"}}>
+              <div style={{width:`${s.upsideConfidence}%`,height:"100%",background:C.green,borderRadius:3}}/>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── CRITICAL DANGER BANNER ───────────────────────────────────────────────────
+function CriticalDangerBanner({holdings, onOpenARIA}){
+  if(!holdings.length) return null;
+  return(
+    <div className="critical-danger" style={{
+      background:`linear-gradient(135deg,${C.red}12,#7f1d1d08)`,
+      border:`1.5px solid ${C.red}99`,
+      borderRadius:10,padding:14,marginBottom:14,
+    }}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+        <div style={{width:28,height:28,borderRadius:6,background:C.red,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0,animation:"criticalBadge 1.5s ease-in-out infinite"}}>🚨</div>
+        <div style={{flex:1}}>
+          <div style={{display:"flex",alignItems:"center",gap:7}}>
+            <span style={{fontSize:13,fontWeight:800,color:C.red,letterSpacing:-.2}}>CRITICAL DANGER</span>
+            <span style={{background:C.red,color:"white",borderRadius:4,padding:"1px 7px",fontSize:10,fontWeight:800,animation:"criticalBadge 1.5s ease-in-out infinite"}}>
+              ACT NOW — HIGH CONFIDENCE DROP ALERT
+            </span>
+          </div>
+          <div style={{fontSize:10,color:"#fca5a5",marginTop:1}}>
+            {holdings.length} holding{holdings.length>1?"s":""} flagged with 70%+ predicted drop in 2–3 months at ≥65% confidence — immediate review required
+          </div>
+        </div>
+        <button onClick={()=>onOpenARIA("portfolio_danger")} style={{background:C.red+"22",border:`1px solid ${C.red}55`,borderRadius:6,padding:"5px 11px",color:C.red,fontSize:10,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+          ✦ Get ARIA Advice
+        </button>
+      </div>
+      {holdings.map(h=>(
+        <div key={h.id} style={{background:C.bg,border:`1px solid ${C.red}55`,borderRadius:8,padding:12,marginBottom:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+            <div>
+              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:2}}>
+                <span style={{fontSize:13,fontWeight:800,color:"white",fontFamily:"JetBrains Mono"}}>{h.symbol}</span>
+                <span style={{background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,borderRadius:4,padding:"1px 7px",fontSize:11,fontWeight:800}}>-{h.dangerDropPct}% PREDICTED</span>
+                <span style={{background:C.red+"15",color:"#fca5a5",borderRadius:4,padding:"1px 6px",fontSize:9,fontWeight:700}}>{h.dangerWindow}</span>
+              </div>
+              <div style={{fontSize:10,color:C.textDim}}>{h.name} · {h.qty} shares @ avg ₹{h.avgBuy} · Current ₹{h.currentPrice}</div>
+              <div style={{fontSize:9,color:"#fca5a5",marginTop:1}}>
+                Predicted floor: ~₹{Math.round(h.currentPrice*(1-h.dangerDropPct/100)).toLocaleString()} · Portfolio at risk: ₹{(h.currentPrice*h.qty).toLocaleString("en-IN",{maximumFractionDigits:0})}
+              </div>
+            </div>
+            <div style={{textAlign:"right",flexShrink:0}}>
+              <div style={{fontSize:16,fontWeight:800,color:C.red,fontFamily:"JetBrains Mono"}}>{h.dangerConfidence}%</div>
+              <div style={{fontSize:8,color:C.muted}}>confidence</div>
+            </div>
+          </div>
+          {/* Danger detail */}
+          <div style={{background:C.red+"09",border:`1px solid ${C.red}22`,borderRadius:6,padding:"8px 10px",marginBottom:8}}>
+            <div style={{fontSize:9,fontWeight:700,color:C.red,marginBottom:3}}>Why the agents flagged this:</div>
+            <div style={{fontSize:10,color:"#fca5a5",lineHeight:1.65}}>{h.dangerTrigger}</div>
+          </div>
+          {/* Sources */}
+          {h.dangerSources&&(
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:9,color:C.muted,marginBottom:3}}>Verified sources:</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                {h.dangerSources.map(src=>(
+                  <span key={src} style={{background:C.red+"0f",border:`1px solid ${C.red}22`,borderRadius:3,padding:"1px 6px",fontSize:8,color:"#fca5a5"}}>{src}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* Confidence bar */}
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:8,color:C.muted,whiteSpace:"nowrap"}}>Danger confidence</span>
+            <div style={{flex:1,background:C.border,borderRadius:3,height:5,overflow:"hidden"}}>
+              <div style={{width:`${h.dangerConfidence}%`,height:"100%",background:C.red,borderRadius:3}}/>
+            </div>
+            <span style={{fontSize:9,fontWeight:700,color:C.red,fontFamily:"JetBrains Mono"}}>{h.dangerConfidence}%</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+function RiskGauge({score}){
+  const color=score<33?C.green:score<66?C.accent:C.red;
+  const rad=((score/100)*180-90)*Math.PI/180;
+  return(
+    <div style={{textAlign:"center",flexShrink:0}}>
+      <svg width="66" height="40" viewBox="0 0 66 40">
+        <defs><linearGradient id={`rg${score}`} x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor={C.green}/><stop offset="50%" stopColor={C.accent}/><stop offset="100%" stopColor={C.red}/>
+        </linearGradient></defs>
+        <path d="M4 34 A29 29 0 0 1 62 34" fill="none" stroke={`url(#rg${score})`} strokeWidth="6" strokeLinecap="round"/>
+        <line x1="33" y1="34" x2={33+19*Math.cos(rad)} y2={34+19*Math.sin(rad)} stroke="white" strokeWidth="1.5" strokeLinecap="round"/>
+        <circle cx="33" cy="34" r="3" fill="white"/>
+      </svg>
+      <div style={{fontSize:13,fontWeight:800,color,marginTop:-3,fontFamily:"JetBrains Mono"}}>{score}</div>
+      <div style={{fontSize:8,color:C.muted}}>{score<33?"Low":score<66?"Mod":"High"}</div>
+    </div>
+  );
+}
+
+// ─── DISCOVERY CARD ───────────────────────────────────────────────────────────
+function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
+  const ac = stock.action==="BUY"?C.green:stock.action==="SELL"?C.red:C.accent;
+  const dsColor = stock.discoveryScore>=80?C.green:stock.discoveryScore>=65?C.accent:C.muted;
+  const isCritical = isCriticalDiscovery(stock);
+  return(
+    <div className={`research-card${isCritical?" critical-discovery":""}`} onClick={onClick} style={{
+      background:selected?C.panel:C.surface,
+      border:`1.5px solid ${selected?(isCritical?C.green+"99":C.accent+"66"):(isCritical?C.green+"66":C.border)}`,
+      borderRadius:10,padding:13,cursor:"pointer",marginBottom:9,transition:"all .15s",
+      borderLeft:`3px solid ${isCritical?C.green:C.cyan}`,
+    }}>
+      {/* Critical badge strip */}
+      {isCritical&&(
+        <div style={{
+          background:`linear-gradient(90deg,${C.green}22,${C.lime}11)`,
+          border:`1px solid ${C.green}44`,borderRadius:5,
+          padding:"4px 9px",marginBottom:8,
+          display:"flex",alignItems:"center",justifyContent:"space-between",
+        }}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{fontSize:11,fontWeight:800,color:C.green,animation:"criticalBadge 2s ease-in-out infinite"}}>🚀 CRITICAL OPPORTUNITY</span>
+            <span style={{background:C.green,color:"#031a0e",borderRadius:3,padding:"0px 6px",fontSize:10,fontWeight:800}}>+{stock.upsidePct}% predicted</span>
+          </div>
+          <span style={{fontSize:9,color:"#80d0a0"}}>{stock.upsideConfidence}% confidence · {stock.upsideHorizon}</span>
+        </div>
+      )}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+        <div style={{flex:1}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3,flexWrap:"wrap"}}>
+            <span style={{fontSize:13,fontWeight:700,color:"white",fontFamily:"JetBrains Mono"}}>{stock.symbol}</span>
+            <Tag color={ac}>{stock.action}</Tag>
+            {isCritical
+              ? <Tag color={C.green} small>🚀 100%+ UPSIDE</Tag>
+              : <Tag color={C.cyan} small>🔍 NEW IDEA</Tag>
+            }
+            <span style={{display:"flex",alignItems:"center",gap:3,background:dsColor+"15",border:`1px solid ${dsColor}44`,borderRadius:4,padding:"1px 5px"}}>
+              <span style={{fontSize:9,color:dsColor,fontWeight:700}}>Score {stock.discoveryScore}</span>
+            </span>
+            {stock.govCheck.flags.length>0&&<Tag color={C.accent} small>⚠ flagged</Tag>}
+          </div>
+          <div style={{fontSize:11,color:C.textDim,marginBottom:2}}>{stock.name} · {stock.sector}</div>
+          <div style={{fontSize:10,color:isCritical?C.green:C.cyan,lineHeight:1.5}}>💡 {stock.discoveryReason}</div>
+          <div style={{fontSize:9,color:C.muted,marginTop:2}}>conf {stock.confidence}% · valid till {stock.validTill} · {stock.horizon}</div>
+        </div>
+        <RiskGauge score={stock.riskScore}/>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:5,marginBottom:8}}>
+        {[["Price",`₹${stock.price.toLocaleString()}`,"white"],["Entry",stock.entry,C.accent],["Target",stock.target,C.green],["Stop",stock.stoploss,C.red]].map(([l,v,col])=>(
+          <div key={l} style={{background:C.bg,borderRadius:4,padding:"4px 7px"}}>
+            <div style={{fontSize:8,color:C.muted,textTransform:"uppercase"}}>{l}</div>
+            <div style={{fontSize:9,fontWeight:700,color:col,fontFamily:"JetBrains Mono"}}>{v}</div>
+          </div>
+        ))}
+      </div>
+      {/* Screen triggers */}
+      <div style={{marginBottom:7}}>
+        <div style={{fontSize:9,color:C.muted,marginBottom:3}}>Why it screened today:</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+          {stock.screenTriggers.map(t=>(
+            <span key={t} style={{background:C.cyan+"12",border:`1px solid ${C.cyan}33`,borderRadius:3,padding:"1px 6px",fontSize:9,color:C.cyan}}>{t}</span>
+          ))}
+        </div>
+      </div>
+      {/* Confidence bar */}
+      <div style={{marginBottom:8}}>
+        <Bar pct={stock.confidence} color={isCritical?C.green:ac}/>
+      </div>
+      <div style={{display:"flex",gap:6}}>
+        <button onClick={e=>{e.stopPropagation();onAddToPortfolio(stock);}} style={{
+          background:`linear-gradient(135deg,${C.teal},#0d9488)`,border:"none",
+          borderRadius:5,padding:"5px 10px",color:"white",fontSize:10,fontWeight:700,cursor:"pointer",flex:1}}>
+          + Add to Portfolio
+        </button>
+        <button onClick={e=>{e.stopPropagation();onClick();}} style={{
+          background:isCritical?C.green+"18":C.cyan+"18",border:`1px solid ${isCritical?C.green:C.cyan}44`,
+          borderRadius:5,padding:"5px 10px",color:isCritical?C.green:C.cyan,fontSize:10,fontWeight:700,cursor:"pointer",flex:1}}>
+          Deep Dive →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── RESEARCH DISCOVERY TAB ───────────────────────────────────────────────────
+function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA}){
+  const [selectedId, setSelectedId] = useState("d1");
+  const [filter, setFilter] = useState("All");
+  const selected = DISCOVERY_UNIVERSE.find(s=>s.id===selectedId);
+  const sectors = ["All",...new Set(DISCOVERY_UNIVERSE.map(s=>s.sector))];
+  const criticalStocks = DISCOVERY_UNIVERSE.filter(isCriticalDiscovery);
+  // Sort: critical first, then by discoveryScore
+  const sorted = [...DISCOVERY_UNIVERSE].sort((a,b)=>{
+    const ac=isCriticalDiscovery(a)?1:0, bc=isCriticalDiscovery(b)?1:0;
+    if(ac!==bc) return bc-ac;
+    return b.discoveryScore-a.discoveryScore;
+  });
+  const filtered = filter==="All"?sorted:sorted.filter(s=>s.sector===filter);
+  const icons={technical:"📊",fundamental:"🏭",sentiment:"📰",institutional:"🏛",macro:"🌍",historical:"📜"};
+  const sc=s=>({BUY:C.green,SELL:C.red,NEUTRAL:C.muted,POSITIVE:C.green,"VERY POSITIVE":C.green,HOLD:C.accent}[s]||C.muted);
+
+  return(
+    <div style={{animation:"fadeUp .3s ease"}}>
+      {/* Critical opportunity banner — always first */}
+      <CriticalOpportunityBanner
+        stocks={criticalStocks}
+        onSelect={id=>{setSelectedId(id); setFilter("All");}}
+        onOpenARIA={onOpenARIA}
+      />
+
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:2}}>
+            <div style={{width:7,height:7,borderRadius:"50%",background:C.cyan,animation:"pulse 2s infinite"}}/>
+            <span style={{fontSize:14,fontWeight:700,color:"white"}}>Research Discovery Engine</span>
+            <Tag color={C.cyan} small>PROACTIVE SCREENING</Tag>
+          </div>
+          <div style={{fontSize:10,color:C.muted}}>Stocks NOT in your portfolio — surfaced daily by the agent network scanning NSE/BSE universe · {DISCOVERY_UNIVERSE.length} ideas today</div>
+        </div>
+        <button onClick={()=>onOpenARIA("discovery")} style={{background:C.purple+"22",border:`1px solid ${C.purple}44`,borderRadius:7,padding:"6px 12px",color:C.purple,fontSize:11,fontWeight:700,cursor:"pointer"}}>
+          ✦ Ask ARIA
+        </button>
+      </div>
+
+      {/* How it works */}
+      <div style={{background:C.cyan+"08",border:`1px solid ${C.cyan}33`,borderRadius:8,padding:10,marginBottom:14}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.cyan,marginBottom:6}}>🔍 How the Discovery Engine Works</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+          {[
+            ["Universe Scan","Every morning, Technical + Fundamental agents scan 200+ NSE/BSE stocks across all sectors"],
+            ["Multi-Signal Screen","Stocks passing 4+ simultaneous signals (momentum, FII buying, earnings quality, macro tailwind) make the shortlist"],
+            ["Full Agent Analysis","Each shortlisted stock runs through all 7 agents — same rigour as portfolio stocks"],
+            ["Governance Verified","Governance fact-checks every claim. Only verified, high-conviction ideas reach you"],
+          ].map(([t,d])=>(
+            <div key={t} style={{background:C.bg,borderRadius:6,padding:8}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.cyan,marginBottom:2}}>{t}</div>
+              <div style={{fontSize:9,color:C.textDim,lineHeight:1.5}}>{d}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Sector filter */}
+      <div style={{display:"flex",gap:5,marginBottom:12,flexWrap:"wrap"}}>
+        {sectors.map(s=>(
+          <button key={s} onClick={()=>setFilter(s)} style={{
+            background:filter===s?C.cyan+"22":C.panel,
+            border:`1px solid ${filter===s?C.cyan+"55":C.border}`,
+            borderRadius:20,padding:"3px 10px",color:filter===s?C.cyan:C.muted,fontSize:10,cursor:"pointer"}}>
+            {s}
+          </button>
+        ))}
+      </div>
+
+      {/* Two-column layout */}
+      <div style={{display:"grid",gridTemplateColumns:"360px 1fr",gap:16}}>
+        {/* Left: cards */}
+        <div>
+          {filtered.map(s=>(
+            <DiscoveryCard key={s.id} stock={s}
+              selected={selectedId===s.id}
+              onClick={()=>setSelectedId(s.id)}
+              onAddToPortfolio={onAddToPortfolio}
+            />
+          ))}
+        </div>
+
+        {/* Right: deep dive */}
+        {selected&&(
+          <div style={{animation:"fadeUp .2s ease"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+              <div>
+                <div style={{fontSize:14,fontWeight:700,color:"white",marginBottom:1}}>{selected.symbol} — {selected.name}</div>
+                <div style={{fontSize:10,color:C.textDim,lineHeight:1.5,maxWidth:420}}>{selected.discoveryReason}</div>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <button onClick={()=>onAddToPortfolio(selected)} style={{background:`linear-gradient(135deg,${C.teal},#0d9488)`,border:"none",borderRadius:6,padding:"6px 12px",color:"white",fontSize:10,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                  + Add to Portfolio
+                </button>
+              </div>
+            </div>
+
+            {/* 6-agent breakdown */}
+            <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:7,textTransform:"uppercase",letterSpacing:1}}>6-Agent Analysis</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+              {Object.entries(selected.agents).map(([k,a])=>(
+                <div key={k} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:9}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                    <span style={{fontSize:10,fontWeight:600,color:"white"}}>{icons[k]} {k.charAt(0).toUpperCase()+k.slice(1)}</span>
+                    <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                      <Tag color={sc(a.signal)} small>{a.signal}</Tag>
+                      <span style={{fontSize:9,color:C.muted,fontFamily:"JetBrains Mono"}}>{a.score}</span>
+                    </div>
+                  </div>
+                  <div style={{fontSize:10,color:C.textDim,lineHeight:1.5,marginBottom:3}}>{a.detail}</div>
+                  <Bar pct={a.score}/>
+                </div>
+              ))}
+            </div>
+
+            {/* Risks + Catalysts */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+              <div>
+                <div style={{fontSize:10,fontWeight:700,color:C.red,marginBottom:4}}>⚠ Risks</div>
+                {selected.risks.map(r=><div key={r} style={{fontSize:9,color:"#f0a0a0",background:C.red+"0f",border:`1px solid ${C.red}22`,borderRadius:3,padding:"2px 6px",marginBottom:3}}>{r}</div>)}
+              </div>
+              <div>
+                <div style={{fontSize:10,fontWeight:700,color:C.green,marginBottom:4}}>🚀 Catalysts</div>
+                {selected.catalysts.map(c=><div key={c} style={{fontSize:9,color:"#80d0a0",background:C.green+"0f",border:`1px solid ${C.green}22`,borderRadius:3,padding:"2px 6px",marginBottom:3}}>{c}</div>)}
+              </div>
+            </div>
+
+            {/* Gov check */}
+            <div style={{background:C.blue+"08",border:`1px solid ${C.blue}33`,borderRadius:7,padding:9}}>
+              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:5}}>
+                <GovShield size={12}/><span style={{fontSize:10,fontWeight:700,color:C.blue}}>Governance Check</span>
+                <span style={{fontSize:8,color:C.muted,marginLeft:"auto"}}>{selected.govCheck.lastChecked}</span>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:5}}>
+                {[["Source Quality",`${selected.govCheck.sourceQuality}%`],["Hallucinations",`${selected.govCheck.hallucinations}`],["Status",selected.govCheck.verified?"Verified":"Pending"]].map(([l,v])=>(
+                  <div key={l} style={{background:C.surface,borderRadius:4,padding:"4px 7px"}}>
+                    <div style={{fontSize:8,color:C.muted}}>{l}</div>
+                    <div style={{fontSize:11,fontWeight:700,color:C.blue,fontFamily:"JetBrains Mono"}}>{v}</div>
+                  </div>
+                ))}
+              </div>
+              {selected.govCheck.flags.length>0&&<div style={{marginTop:5,fontSize:9,color:C.accent,background:C.accent+"0f",borderRadius:3,padding:"2px 6px"}}>⚠ {selected.govCheck.flags[0]}</div>}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── GOVERNANCE RESEARCH AGENT TAB ───────────────────────────────────────────
+function GovernanceResearchTab({onOpenARIA}){
+  const [sec,setSec]=useState("research");
+  const [selectedPaper,setSelectedPaper]=useState("r1");
+  const paper = AI_RESEARCH_FEED.find(r=>r.id===selectedPaper);
+  const tagColors={Architecture:C.blue,"Signal Quality":C.green,Governance:C.purple,Performance:C.teal};
+  const debateColors={for:C.green,against:C.red,abstain:C.muted};
+  const statusColors={approved:C.green,debating:C.accent,pending_review:C.blue};
+
+  return(
+    <div style={{animation:"fadeUp .3s ease"}}>
+      <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:16}}>
+        <div style={{width:34,height:34,borderRadius:8,background:C.purple+"18",border:`1px solid ${C.purple}44`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🧬</div>
+        <div>
+          <div style={{fontSize:13,fontWeight:700,color:"white"}}>Governance Research & Self-Improvement Agent</div>
+          <div style={{fontSize:9,color:C.muted}}>Continuously monitors AI research, whitepapers, and market analysis literature to propose system upgrades · Agent debate before user review</div>
+        </div>
+        <div style={{marginLeft:"auto",background:C.purple+"12",border:`1px solid ${C.purple}33`,borderRadius:5,padding:"3px 9px",display:"flex",alignItems:"center",gap:4}}>
+          <Dot color={C.purple} pulse/><span style={{fontSize:9,color:C.purple,fontWeight:600}}>Scanning · Last run 04:00 IST</span>
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:3,marginBottom:14,borderBottom:`1px solid ${C.border}`}}>
+        {[["research",`Research Feed (${AI_RESEARCH_FEED.length})`],["debate",`Agent Debates (${AGENT_DEBATE_LOG.length} entries)`],["health","Agent Health"]].map(([id,lbl])=>(
+          <button key={id} onClick={()=>setSec(id)} style={{background:sec===id?C.panel:"transparent",border:`1px solid ${sec===id?C.purple+"44":"transparent"}`,borderRadius:"5px 5px 0 0",padding:"6px 12px",color:sec===id?C.purple:C.muted,fontSize:10,fontWeight:sec===id?700:400,cursor:"pointer",marginBottom:-1}}>{lbl}</button>
+        ))}
+      </div>
+
+      {/* RESEARCH FEED */}
+      {sec==="research"&&(
+        <div style={{display:"grid",gridTemplateColumns:"340px 1fr",gap:16}}>
+          <div>
+            <div style={{fontSize:10,color:C.muted,marginBottom:8}}>Sources monitored: arXiv, SSRN, Google Scholar, Anthropic blog, Morgan Stanley Research, SEBI circulars, RBI papers, DeepMind, OpenAI, academic finance journals</div>
+            {AI_RESEARCH_FEED.map(r=>{
+              const tc=tagColors[r.tag]||C.muted;
+              const sc2=statusColors[r.debateStatus]||C.muted;
+              return(
+                <div key={r.id} onClick={()=>setSelectedPaper(r.id)} style={{
+                  background:selectedPaper===r.id?C.panel:C.surface,
+                  border:`1px solid ${selectedPaper===r.id?C.purple+"55":C.border}`,
+                  borderRadius:8,padding:11,cursor:"pointer",marginBottom:7,
+                  borderLeft:`3px solid ${tc}`,
+                }}>
+                  <div style={{display:"flex",gap:5,marginBottom:4,flexWrap:"wrap"}}>
+                    <Tag color={tc} small>{r.tag}</Tag>
+                    <Tag color={sc2} small>{r.debateStatus.replace("_"," ").toUpperCase()}</Tag>
+                    <span style={{fontSize:9,color:C.muted,marginLeft:"auto"}}>{r.date}</span>
+                  </div>
+                  <div style={{fontSize:11,fontWeight:600,color:"white",marginBottom:2,lineHeight:1.4}}>{r.title}</div>
+                  <div style={{fontSize:9,color:C.muted,marginBottom:5}}>{r.source} · Relevance: <span style={{color:C.accent,fontWeight:700}}>{r.relevance}%</span></div>
+                  <div style={{display:"flex",gap:10}}>
+                    <span style={{fontSize:9,color:C.green}}>👍 {r.votes.for}</span>
+                    <span style={{fontSize:9,color:C.red}}>👎 {r.votes.against}</span>
+                    <span style={{fontSize:9,color:C.muted}}>🤷 {r.votes.abstain}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Paper detail */}
+          {paper&&(
+            <div style={{animation:"fadeUp .2s ease"}}>
+              <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+                <Tag color={tagColors[paper.tag]||C.muted}>{paper.tag}</Tag>
+                <Tag color={statusColors[paper.debateStatus]||C.muted}>{paper.debateStatus.replace("_"," ").toUpperCase()}</Tag>
+                <span style={{fontSize:9,color:C.muted,alignSelf:"center"}}>{paper.source} · {paper.date}</span>
+              </div>
+              <div style={{fontSize:13,fontWeight:700,color:"white",marginBottom:5,lineHeight:1.4}}>{paper.title}</div>
+
+              <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:10,marginBottom:10}}>
+                <div style={{fontSize:10,fontWeight:700,color:C.textDim,marginBottom:4}}>Summary</div>
+                <div style={{fontSize:11,color:C.textDim,lineHeight:1.65}}>{paper.summary}</div>
+              </div>
+
+              <div style={{background:C.purple+"08",border:`1px solid ${C.purple}33`,borderRadius:7,padding:10,marginBottom:10}}>
+                <div style={{fontSize:10,fontWeight:700,color:C.purple,marginBottom:4}}>🔧 Proposed System Change</div>
+                <div style={{fontSize:11,color:C.text,lineHeight:1.65,marginBottom:7}}>{paper.proposedChange}</div>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  <div>
+                    <div style={{fontSize:9,color:C.muted,marginBottom:3}}>Impacted Agents</div>
+                    <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                      {paper.impactedAgents.map(a=><Tag key={a} color={C.blue} small>{a}</Tag>)}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{fontSize:9,color:C.muted,marginBottom:3}}>Cost Impact</div>
+                    <Tag color={paper.costImpact.includes("Free")||paper.costImpact.includes("Saves")?C.green:C.accent}>{paper.costImpact}</Tag>
+                  </div>
+                </div>
+              </div>
+
+              {/* Agent votes */}
+              <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:10,marginBottom:10}}>
+                <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:6}}>Agent Vote Tally</div>
+                <div style={{display:"flex",gap:12,marginBottom:8}}>
+                  {[["For",paper.votes.for,C.green],["Against",paper.votes.against,C.red],["Abstain",paper.votes.abstain,C.muted]].map(([l,v,col])=>(
+                    <div key={l} style={{textAlign:"center"}}>
+                      <div style={{fontSize:20,fontWeight:800,color:col,fontFamily:"JetBrains Mono"}}>{v}</div>
+                      <div style={{fontSize:9,color:C.muted}}>{l}</div>
+                    </div>
+                  ))}
+                </div>
+                <Bar pct={(paper.votes.for/(paper.votes.for+paper.votes.against+paper.votes.abstain))*100} color={C.green} h={4}/>
+              </div>
+
+              {/* Actions */}
+              <div style={{display:"flex",gap:7}}>
+                {paper.debateStatus==="pending"&&(
+                  <button onClick={()=>onOpenARIA("research_paper",paper)} style={{background:`linear-gradient(135deg,${C.purple},#7e22ce)`,border:"none",borderRadius:6,padding:"8px 14px",color:"white",fontSize:11,fontWeight:700,cursor:"pointer",flex:1}}>
+                    ✦ Discuss with ARIA
+                  </button>
+                )}
+                {paper.debateStatus==="debating"&&(
+                  <button onClick={()=>onOpenARIA("research_debate",paper)} style={{background:`linear-gradient(135deg,${C.accent},${C.accentDim})`,border:"none",borderRadius:6,padding:"8px 14px",color:C.bg,fontSize:11,fontWeight:700,cursor:"pointer",flex:1}}>
+                    ⚡ Cast Your Vote / Approve
+                  </button>
+                )}
+                {paper.debateStatus==="approved"&&(
+                  <button onClick={()=>onOpenARIA("research_approved",paper)} style={{background:`linear-gradient(135deg,${C.green},#059669)`,border:"none",borderRadius:6,padding:"8px 14px",color:"white",fontSize:11,fontWeight:700,cursor:"pointer",flex:1}}>
+                    📋 View Implementation Steps
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* AGENT DEBATE LOG */}
+      {sec==="debate"&&(
+        <div>
+          <div style={{fontSize:11,color:C.textDim,lineHeight:1.7,marginBottom:12}}>
+            When a research proposal is contentious (votes split), agents formally debate before it reaches you. Each agent provides a structured argument based on its domain expertise. You are the final decision-maker.
+          </div>
+          <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:12}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.accent,marginBottom:2}}>Active Debate: DeepMind Debate Paper (r3)</div>
+            <div style={{fontSize:9,color:C.muted,marginBottom:8}}>Topic: Should Governance fact-checker use multi-agent debate loops? · Current: 2 FOR · 2 AGAINST · 2 ABSTAIN</div>
+            <div style={{display:"flex",flexDirection:"column",gap:7}}>
+              {AGENT_DEBATE_LOG.map((entry,i)=>(
+                <div key={i} style={{background:C.bg,border:`1px solid ${debateColors[entry.stance]}33`,borderRadius:7,padding:10,borderLeft:`3px solid ${debateColors[entry.stance]}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                    <span style={{fontSize:11,fontWeight:700,color:"white"}}>{entry.agent}</span>
+                    <Tag color={debateColors[entry.stance]} small>{entry.stance.toUpperCase()}</Tag>
+                  </div>
+                  <div style={{fontSize:10,color:C.textDim,lineHeight:1.6}}>{entry.argument}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{marginTop:12}}>
+              <button onClick={()=>onOpenARIA("research_debate",AI_RESEARCH_FEED.find(r=>r.id==="r3"))} style={{background:`linear-gradient(135deg,${C.accent},${C.accentDim})`,border:"none",borderRadius:6,padding:"8px 14px",color:C.bg,fontSize:11,fontWeight:700,cursor:"pointer",width:"100%"}}>
+                ⚡ You are the Tiebreaker — Discuss with ARIA to Decide
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AGENT HEALTH */}
+      {sec==="health"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:7}}>
+          {AGENT_PERF.map(a=>{
+            const sc={healthy:C.green,warning:C.accent,monitor:C.blue}[a.status]||C.muted;
+            return(
+              <div key={a.name} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:12,display:"flex",alignItems:"center",gap:12}}>
+                <div style={{width:130,flexShrink:0}}><div style={{fontSize:11,fontWeight:600,color:"white"}}>{a.name}</div><Tag color={sc} small>{a.status.toUpperCase()}</Tag></div>
+                <div style={{flex:1}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:9,color:C.muted}}>90-day accuracy</span><span style={{fontSize:10,fontWeight:700,color:"white",fontFamily:"JetBrains Mono"}}>{a.accuracy}%</span></div><Bar pct={a.accuracy} color={sc}/></div>
+                <div style={{width:60,textAlign:"center",flexShrink:0}}><div style={{fontSize:9,color:C.muted}}>Trend</div><div style={{fontSize:11,fontWeight:700,color:a.trend.startsWith("+")?C.green:a.trend==="0%"?C.muted:C.red}}>{a.trend}</div></div>
+                <div style={{width:80,textAlign:"center",flexShrink:0}}><div style={{fontSize:9,color:C.muted}}>Halluc. rate</div><div style={{fontSize:11,fontWeight:700,color:parseFloat(a.hallucRate)>1.5?C.red:parseFloat(a.hallucRate)>0.8?C.accent:C.green,fontFamily:"JetBrains Mono"}}>{a.hallucRate}</div></div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── PORTFOLIO TAB ────────────────────────────────────────────────────────────
+function PortfolioTab({portfolio,setPortfolio,onOpenARIA}){
+  const alerts=computePortfolioAlerts(portfolio);
+  const dangerHoldings=portfolio.filter(isCriticalDanger);
+  // Sort portfolio: danger holdings first
+  const sortedPortfolio=[...portfolio].sort((a,b)=>{
+    const ad=isCriticalDanger(a)?1:0, bd=isCriticalDanger(b)?1:0;
+    return bd-ad;
+  });
+  const totalInvested=portfolio.reduce((s,h)=>s+(h.avgBuy*h.qty),0);
+  const totalCurrent=portfolio.reduce((s,h)=>s+(h.currentPrice*h.qty),0);
+  const totalPnL=totalCurrent-totalInvested;
+  const totalPnLPct=totalInvested>0?(totalPnL/totalInvested)*100:0;
+  const sectorMap={};
+  portfolio.forEach(h=>{const v=h.currentPrice*h.qty;sectorMap[h.sector]=(sectorMap[h.sector]||0)+v;});
+  const sectorColors=[C.accent,C.blue,C.teal,C.purple,C.orange,C.green,C.cyan];
+  return(
+    <div style={{animation:"fadeUp .3s ease"}}>
+      {/* Critical danger banner — always first */}
+      <CriticalDangerBanner holdings={dangerHoldings} onOpenARIA={onOpenARIA}/>
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div>
+          <div style={{fontSize:13,fontWeight:700,color:"white"}}>My Portfolio</div>
+          <div style={{fontSize:9,color:C.muted,marginTop:1}}>System monitors holdings against agent signals · Critical danger detection active</div>
+        </div>
+        <div style={{display:"flex",gap:7}}>
+          <button onClick={()=>onOpenARIA("portfolio")} style={{background:C.teal+"22",border:`1px solid ${C.teal}44`,borderRadius:7,padding:"6px 12px",color:C.teal,fontSize:11,fontWeight:700,cursor:"pointer"}}>+ Add Holding</button>
+          <button onClick={()=>onOpenARIA("portfolio")} style={{background:C.purple+"22",border:`1px solid ${C.purple}44`,borderRadius:7,padding:"6px 12px",color:C.purple,fontSize:11,fontWeight:700,cursor:"pointer"}}>✦ Tell ARIA</button>
+        </div>
+      </div>
+
+      {/* Non-danger alerts */}
+      {alerts.filter(a=>a.severity!=="critical_danger").length>0&&(
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:6}}>⚡ Portfolio Alerts ({alerts.filter(a=>a.severity!=="critical_danger").length})</div>
+          {alerts.filter(a=>a.severity!=="critical_danger").map(a=>{
+            const sc={critical:C.red,info:C.blue,warning:C.accent}[a.severity];
+            return(
+              <div key={a.id} style={{background:sc+"0d",border:`1px solid ${sc}44`,borderRadius:6,padding:"8px 11px",marginBottom:5,display:"flex",gap:8,alignItems:"flex-start"}}>
+                <Tag color={sc} small>{a.severity.toUpperCase()}</Tag>
+                <div style={{flex:1}}><div style={{fontSize:10,fontWeight:600,color:"white"}}>{a.title}</div><div style={{fontSize:9,color:C.textDim}}>{a.detail}</div></div>
+                <button onClick={()=>onOpenARIA("holding",portfolio.find(h=>h.id===a.portfolioId))} style={{background:C.purple+"22",border:`1px solid ${C.purple}44`,borderRadius:4,padding:"2px 7px",color:C.purple,fontSize:9,cursor:"pointer"}}>✦ ARIA</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:9,marginBottom:14}}>
+        {[["Invested",`₹${totalInvested.toLocaleString("en-IN",{maximumFractionDigits:0})}`,"white"],["Current",`₹${totalCurrent.toLocaleString("en-IN",{maximumFractionDigits:0})}`,"white"],["P&L",`${totalPnL>=0?"+":""}₹${Math.abs(totalPnL).toLocaleString("en-IN",{maximumFractionDigits:0})}`,totalPnL>=0?C.green:C.red],["Return",`${totalPnLPct>=0?"+":""}${totalPnLPct.toFixed(1)}%`,totalPnLPct>=0?C.green:C.red]].map(([l,v,col])=>(
+          <div key={l} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:"9px 12px"}}>
+            <div style={{fontSize:8,color:C.muted,textTransform:"uppercase",marginBottom:3}}>{l}</div>
+            <div style={{fontSize:15,fontWeight:800,color:col,fontFamily:"JetBrains Mono"}}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"180px 1fr",gap:14}}>
+        <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:11}}>
+          <div style={{fontSize:9,fontWeight:700,color:C.muted,textTransform:"uppercase",marginBottom:8}}>Allocation</div>
+          {Object.entries(sectorMap).sort((a,b)=>b[1]-a[1]).map(([sector,val],i)=>{
+            const pct=(val/totalCurrent*100);
+            return(<div key={sector} style={{marginBottom:7}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}><span style={{fontSize:9,color:C.textDim}}>{sector}</span><span style={{fontSize:9,color:"white",fontFamily:"JetBrains Mono"}}>{pct.toFixed(0)}%</span></div>
+              <Bar pct={pct} color={sectorColors[i%sectorColors.length]} h={4}/>
+            </div>);
+          })}
+        </div>
+        <div>
+          <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1.4fr 50px 65px 65px 75px 80px 55px",background:C.panel,padding:"6px 11px",gap:4}}>
+              {["Symbol","Qty","Avg Buy","Current","P&L%","Status / Risk","Action"].map(h=><div key={h} style={{fontSize:8,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</div>)}
+            </div>
+            {sortedPortfolio.map((h,i)=>{
+              const pnlPct=((h.currentPrice-h.avgBuy)/h.avgBuy)*100;
+              const toTarget=((h.targetPrice-h.currentPrice)/h.currentPrice)*100;
+              const toStop=((h.currentPrice-h.stoplossPrice)/h.currentPrice)*100;
+              const isDanger=isCriticalDanger(h);
+              return(
+                <div key={h.id} className={isDanger?"critical-danger":""} style={{
+                  display:"grid",gridTemplateColumns:"1.4fr 50px 65px 65px 75px 80px 55px",
+                  padding:"8px 11px",
+                  background:isDanger?`${C.red}0d`:i%2===0?C.bg:C.surface,
+                  borderTop:`1px solid ${isDanger?C.red+"55":C.border}`,
+                  gap:4,alignItems:"center",
+                  borderLeft:isDanger?`3px solid ${C.red}`:toStop<8?`2px solid ${C.red}`:toTarget<12&&toTarget>0?`2px solid ${C.green}`:"2px solid transparent",
+                }}>
+                  <div>
+                    <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+                      <span style={{fontSize:10,fontWeight:700,color:isDanger?"#fca5a5":"white",fontFamily:"JetBrains Mono"}}>{h.symbol}</span>
+                      {isDanger&&<span style={{background:C.red,color:"white",borderRadius:3,padding:"0px 4px",fontSize:8,fontWeight:800,animation:"criticalBadge 1.5s ease-in-out infinite"}}>🚨</span>}
+                    </div>
+                    <div style={{fontSize:8,color:C.muted}}>{h.sector}</div>
+                  </div>
+                  <span style={{fontSize:10,color:C.textDim,fontFamily:"JetBrains Mono"}}>{h.qty}</span>
+                  <span style={{fontSize:10,color:C.textDim,fontFamily:"JetBrains Mono"}}>₹{h.avgBuy.toLocaleString()}</span>
+                  <span style={{fontSize:10,color:isDanger?"#fca5a5":"white",fontFamily:"JetBrains Mono"}}>₹{h.currentPrice.toLocaleString()}</span>
+                  <div>
+                    <div style={{fontSize:10,fontWeight:700,color:pnlPct>=0?C.green:C.red,fontFamily:"JetBrains Mono"}}>{pnlPct>=0?"+":""}{pnlPct.toFixed(1)}%</div>
+                    <div style={{fontSize:8,color:C.muted}}>₹{Math.round((h.currentPrice-h.avgBuy)*h.qty).toLocaleString()}</div>
+                  </div>
+                  <div>
+                    {isDanger
+                      ? <div><div style={{fontSize:9,fontWeight:700,color:C.red}}>-{h.dangerDropPct}% risk</div><div style={{fontSize:8,color:"#fca5a5"}}>{h.dangerWindow}</div></div>
+                      : <div><div style={{fontSize:9,color:toTarget>0?C.textDim:C.green}}>{toTarget>0?`+${toTarget.toFixed(0)}% to tgt`:"✓ past tgt"}</div><div style={{fontSize:8,color:toStop<8?C.red:C.muted}}>{toStop.toFixed(0)}% to stop</div></div>
+                    }
+                  </div>
+                  <button onClick={()=>onOpenARIA("holding",h)} style={{
+                    background:isDanger?C.red+"22":C.purple+"22",
+                    border:`1px solid ${isDanger?C.red:C.purple}33`,
+                    borderRadius:4,padding:"3px 6px",
+                    color:isDanger?C.red:C.purple,fontSize:9,cursor:"pointer",fontWeight:isDanger?800:400,
+                  }}>{isDanger?"🚨 ACT":"✦ ARIA"}</button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ARIA PANEL ───────────────────────────────────────────────────────────────
+function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolioUpdate,discoveryStock}){
+  const [messages,setMessages]=useState([{role:"assistant",text:"Hello — I'm **ARIA**, your Adaptive Research Intelligence Assistant.\n\nI'm the bridge between you and every module of Bharat Intelligence:\n\n• **Explain** any recommendation or discovery idea\n• **Update your portfolio** — just tell me what you traded\n• **Vote or decide** on Governance research proposals\n• **Deep dive** on any stock, sector, or macro theme\n• **Fact-check** any claim in real time\n\nWhat would you like to explore?"}]);
+  const [input,setInput]=useState("");
+  const [loading,setLoading]=useState(false);
+  const bottomRef=useRef(null);
+  const prevCtxRef=useRef(null);
+
+  useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[messages]);
+
+  useEffect(()=>{
+    const key=ariaContext?.type+ariaContext?.id;
+    if(!ariaContext||key===prevCtxRef.current)return;
+    prevCtxRef.current=key;
+    let intro="";
+    if(ariaContext.type==="discovery"&&discoveryStock){
+      intro=`I've pulled up the discovery idea for **${discoveryStock.symbol}** (${discoveryStock.name}).\n\nThis is a **new idea not yet in your portfolio** — surfaced by the research agents because: ${discoveryStock.discoveryReason}\n\n**Discovery Score: ${discoveryStock.discoveryScore}/100** · Confidence: ${discoveryStock.confidence}% · Risk: ${discoveryStock.riskScore}/100\n\nEntry: ${discoveryStock.entry} · Target: ${discoveryStock.target} · Stop-loss: ${discoveryStock.stoploss}\n\nWould you like me to walk through the full thesis, explain the risk score, or compare it to your existing holdings?`;
+    } else if(ariaContext.type==="research_paper"&&ariaContext.paper){
+      const p=ariaContext.paper;
+      intro=`The Governance Research Agent has flagged a new paper for your review:\n\n**${p.title}** (${p.source})\n\nRelevance score: **${p.relevance}%**\n\nProposed change: ${p.proposedChange}\n\nCost impact: **${p.costImpact}**\n\nAgent votes so far: ${p.votes.for} FOR · ${p.votes.against} AGAINST · ${p.votes.abstain} ABSTAIN\n\nWould you like me to summarise the paper's key finding, explain the proposed change in plain terms, or walk you through the agent debate?`;
+    } else if(ariaContext.type==="research_debate"&&ariaContext.paper){
+      const p=ariaContext.paper;
+      intro=`This proposal is currently **tied in agent debate** — your vote is the tiebreaker.\n\n**${p.title}**\n\nThe core disagreement:\n• **FOR camp**: ${AGENT_DEBATE_LOG.filter(d=>d.stance==="for"&&d.paper===p.id).map(d=>d.agent).join(", ")} argue it reduces errors significantly\n• **AGAINST camp**: ${AGENT_DEBATE_LOG.filter(d=>d.stance==="against"&&d.paper===p.id).map(d=>d.agent).join(", ")} argue latency impact outweighs benefit\n\nTell me "approve", "reject", or ask me to walk through each side's argument before you decide.`;
+    } else if(ariaContext.type==="research_approved"&&ariaContext.paper){
+      intro=`This enhancement has been **approved by the agents**: **${ariaContext.paper.title}**\n\nReady to walk through the implementation steps. Cost: **${ariaContext.paper.costImpact}**\n\nShall I begin with Step 1?`;
+    } else if(ariaContext.type==="portfolio"){
+      intro=`Portfolio context open. Your ${portfolio.length} holdings have a total value of ₹${portfolio.reduce((s,h)=>s+(h.currentPrice*h.qty),0).toLocaleString("en-IN",{maximumFractionDigits:0})}.\n\nYou can:\n• Tell me about a trade ("I bought DIXON at 15,800 — 20 shares")\n• Ask me to analyse any position\n• Tell me you've exited ("Sold my GOLDBEES at 6,100")\n\nWhat would you like to do?`;
+    } else if(ariaContext.type==="holding"&&ariaContext.holding){
+      const h=ariaContext.holding;
+      const pct=((h.currentPrice-h.avgBuy)/h.avgBuy*100).toFixed(1);
+      intro=`Looking at your **${h.symbol}** position:\n• ${h.qty} shares at avg ₹${h.avgBuy} → now ₹${h.currentPrice} (${pct>=0?"+":""}${pct}%)\n• P&L: ₹${Math.round((h.currentPrice-h.avgBuy)*h.qty).toLocaleString()}\n• Target ₹${h.targetPrice} · Stop ₹${h.stoplossPrice}\n\nWhat would you like to know — or have you made a change to this position?`;
+    }
+    if(intro)setMessages(p=>[...p,{role:"assistant",text:intro}]);
+  },[ariaContext,discoveryStock,portfolio]);
+
+  const portfolioSummary=portfolio.map(h=>`${h.symbol}:${h.qty}@₹${h.avgBuy}(now ₹${h.currentPrice},${((h.currentPrice-h.avgBuy)/h.avgBuy*100).toFixed(1)}%),tgt₹${h.targetPrice},stop₹${h.stoplossPrice}`).join("|");
+  const discoverySummary=DISCOVERY_UNIVERSE.map(s=>`${s.symbol}:${s.action} conf${s.confidence}% tgt${s.target} risk${s.riskScore}`).join("|");
+
+  const SYSTEM=`You are ARIA (Adaptive Research Intelligence Assistant) for Bharat Intelligence — Indian stock and commodity market multi-agent system.
+
+Personality: Senior analyst + trusted advisor. Precise, data-driven, warm, never sensational.
+
+YOUR 6 ROLES:
+
+1. DISCOVERY EXPLAINER: Explain stocks not in the user's portfolio that the research engine has surfaced. Highlight WHY the system found them interesting, the specific screen triggers, full risk/reward. Compare to existing portfolio for overlap or diversification. Help user decide whether to add to watchlist or portfolio.
+
+2. RECOMMENDATION EXPLAINER: Explain portfolio stock recommendations, risk scores (0=safest, 100=highest risk), agent signals.
+
+3. PORTFOLIO UPDATER: When user mentions a trade, extract and update portfolio. Output <portfolio_action> JSON at end. For new discovery stocks being added: {"action":"add","symbol":"DIXON","qty":20,"avgBuy":15800,"targetPrice":19500,"stoplossPrice":13800,"sector":"Electronics/PLI","name":"Dixon Technologies","notes":"Added from Discovery Engine","linkedRecId":null}
+
+4. GOVERNANCE RESEARCH GUIDE: Explain AI research papers and their proposed system changes in plain English. Walk through agent debate arguments. When user approves/rejects, confirm and explain next step (GitHub PR creation, deployment, etc.). NEVER deploy without user saying "approve".
+
+5. ENHANCEMENT GUIDE: Paid = state cost, get approval, walk steps. Free = guide directly.
+
+6. FACT CHECKER: Reason carefully, flag uncertainty.
+
+CURRENT PORTFOLIO: ${portfolioSummary||"None"}
+DISCOVERY IDEAS TODAY: ${discoverySummary}
+ACTIVE CONTEXT: ${ariaContext?JSON.stringify({type:ariaContext.type,paper:ariaContext.paper?.title,holding:ariaContext.holding?.symbol,discovery:discoveryStock?.symbol}):"none"}
+Market: Nifty 22,147 (+0.6%), FII net buy ₹1,840 Cr, Gold ₹72,840, INR/USD 83.47, VIX 14.2.
+
+FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_action> JSON only when certain of trade intent.`;
+
+  const send=async()=>{
+    if(!input.trim()||loading)return;
+    const txt=input.trim();setInput("");
+    setMessages(p=>[...p,{role:"user",text:txt}]);setLoading(true);
+    try{
+      const history=messages.slice(-14).map(m=>({role:m.role,content:m.text}));
+      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:SYSTEM,messages:[...history,{role:"user",content:txt}]})});
+      const data=await res.json();
+      const raw=data.content?.[0]?.text||"Error.";
+      const actionMatch=raw.match(/<portfolio_action>([\s\S]*?)<\/portfolio_action>/);
+      const displayText=raw.replace(/<portfolio_action>[\s\S]*?<\/portfolio_action>/g,"").trim();
+      if(actionMatch){try{onPortfolioUpdate(JSON.parse(actionMatch[1].trim()));}catch(e){}}
+      setMessages(p=>[...p,{role:"assistant",text:displayText,hasAction:!!actionMatch}]);
+    }catch(e){setMessages(p=>[...p,{role:"assistant",text:"Connection error — check API configuration."}]);}
+    setLoading(false);
+  };
+
+  const QUICK=ariaContext?.type==="discovery"
+    ?["Explain why it screened","Compare to my portfolio","What's the main risk?","Add to my portfolio"]
+    :ariaContext?.type?.includes("research")
+    ?["Summarise the paper","Walk me through the debate","Approve this change","What's the implementation cost?"]
+    :ariaContext?.type==="holding"
+    ?["Should I hold or sell?","How close is my stop-loss?","I sold this today","Add more at current price?"]
+    :["Show me today's discovery ideas","Analyse my portfolio","What's the best new opportunity?","Explain a governance proposal"];
+
+  const renderMsg=txt=>txt.split('\n').map((line,i)=>{
+    const parts=line.split(/(\*\*[^*]+\*\*)/g);
+    return<div key={i} style={{marginBottom:line===''?4:1,lineHeight:1.65}}>
+      {parts.map((p,j)=>p.startsWith("**")?<b key={j} style={{color:"white"}}>{p.slice(2,-2)}</b>:<span key={j}>{p}</span>)}
+    </div>;
+  });
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",background:C.bg}}>
+      <div style={{padding:"10px 13px",borderBottom:`1px solid ${C.border}`,background:`linear-gradient(135deg,${C.purple}08,${C.blue}08)`,flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div className="aria-glow" style={{width:28,height:28,borderRadius:"50%",background:`linear-gradient(135deg,${C.purple},${C.blue})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12}}>✦</div>
+          <div style={{flex:1}}><div style={{fontSize:11,fontWeight:700,color:"white"}}>ARIA</div><div style={{fontSize:8,color:C.purple}}>Adaptive Research Intelligence Assistant</div></div>
+          <Dot color={C.purple} pulse/>
+        </div>
+        {ariaContext&&(
+          <div style={{display:"flex",gap:5,marginTop:5,flexWrap:"wrap",alignItems:"center"}}>
+            {ariaContext.type==="discovery"&&discoveryStock&&<Tag color={C.cyan} small>🔍 {discoveryStock.symbol}</Tag>}
+            {ariaContext.type?.includes("research")&&ariaContext.paper&&<Tag color={C.purple} small>📄 Research</Tag>}
+            {ariaContext.type==="holding"&&ariaContext.holding&&<Tag color={C.teal} small>💼 {ariaContext.holding.symbol}</Tag>}
+            {ariaContext.type==="portfolio"&&<Tag color={C.teal} small>💼 Portfolio</Tag>}
+            <button onClick={onClearContext} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:10,marginLeft:"auto"}}>✕</button>
+          </div>
+        )}
+      </div>
+
+      <div style={{flex:1,overflowY:"auto",padding:11,display:"flex",flexDirection:"column",gap:8}}>
+        {messages.map((m,i)=>(
+          <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start",animation:"fadeUp .2s ease"}}>
+            {m.role==="assistant"&&<div style={{width:17,height:17,borderRadius:"50%",background:`linear-gradient(135deg,${C.purple},${C.blue})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,marginRight:5,marginTop:3,flexShrink:0}}>✦</div>}
+            <div style={{maxWidth:"88%",padding:"7px 10px",borderRadius:m.role==="user"?"10px 10px 2px 10px":"2px 10px 10px 10px",
+              background:m.role==="user"?`linear-gradient(135deg,${C.accent}ee,${C.accentDim}ee)`:C.panel,
+              color:m.role==="user"?"#0a0a1a":C.text,fontSize:11,border:m.role==="assistant"?`1px solid ${C.border}`:"none"}}>
+              {m.role==="assistant"?renderMsg(m.text):m.text}
+              {m.hasAction&&<div style={{marginTop:5,background:C.teal+"12",border:`1px solid ${C.teal}33`,borderRadius:4,padding:"3px 7px",fontSize:9,color:C.teal,fontWeight:700}}>✓ Portfolio updated</div>}
+            </div>
+          </div>
+        ))}
+        {loading&&<div style={{display:"flex",gap:3,paddingLeft:23}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:C.purple,animation:`dotBounce 1.2s ${i*.15}s infinite`}}/>)}</div>}
+        <div ref={bottomRef}/>
+      </div>
+
+      <div style={{padding:"4px 9px",display:"flex",gap:4,flexWrap:"wrap",borderTop:`1px solid ${C.border}`,flexShrink:0}}>
+        {QUICK.map(q=><button key={q} onClick={()=>setInput(q)} style={{background:C.panel,border:`1px solid ${C.borderHi}`,borderRadius:20,padding:"2px 8px",color:C.textDim,fontSize:9,cursor:"pointer"}}>{q}</button>)}
+      </div>
+      <div style={{padding:"5px 9px 9px",display:"flex",gap:5,flexShrink:0}}>
+        <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()}
+          placeholder={ariaContext?.type==="discovery"?"Ask about this discovery idea...":ariaContext?.type?.includes("research")?"Discuss or approve this research proposal...":"Ask ARIA anything..."}
+          style={{flex:1,background:C.panel,border:`1px solid ${C.borderHi}`,borderRadius:6,padding:"7px 10px",color:"white",fontSize:11,outline:"none",fontFamily:"Space Grotesk"}}/>
+        <button onClick={send} disabled={loading||!input.trim()} style={{background:loading?C.panel:`linear-gradient(135deg,${C.purple},${C.blue})`,border:"none",borderRadius:6,padding:"7px 12px",color:loading?C.muted:"white",fontWeight:700,fontSize:12,cursor:loading?"default":"pointer"}}>→</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+export default function App(){
+  const [tab,setTab]=useState("discovery");
+  const [selDiscoveryId,setSelDiscoveryId]=useState("d1");
+  const [selRecId,setSelRecId]=useState(1);
+  const [ariaOpen,setAriaOpen]=useState(false);
+  const [ariaContext,setAriaContext]=useState(null);
+  const [portfolio,setPortfolio]=useState(DEFAULT_PORTFOLIO);
+  const [govBanner,setGovBanner]=useState(true);
+  const [now,setNow]=useState(new Date());
+
+  useEffect(()=>{const t=setInterval(()=>setNow(new Date()),30000);return()=>clearInterval(t);},[]);
+  const openAlerts=GOV_ALERTS.filter(a=>!a.resolved).length;
+  const portfolioAlerts=computePortfolioAlerts(portfolio);
+  const discoveryStock=DISCOVERY_UNIVERSE.find(s=>s.id===selDiscoveryId);
+
+  const openARIA=useCallback((type,extra=null)=>{
+    if(type==="discovery"){setAriaContext({type:"discovery",id:selDiscoveryId});setSelDiscoveryId(selDiscoveryId);}
+    else if(type==="research_paper"||type==="research_debate"||type==="research_approved"){setAriaContext({type,id:extra?.id,paper:extra});}
+    else if(type==="holding"){setAriaContext({type:"holding",id:extra?.id,holding:extra});}
+    else if(type==="portfolio"){setAriaContext({type:"portfolio",id:"portfolio",alert:extra});}
+    setAriaOpen(true);
+  },[selDiscoveryId]);
+
+  const handlePortfolioUpdate=useCallback(action=>{
+    if(action.action==="add"){
+      setPortfolio(p=>{
+        if(p.find(h=>h.symbol===action.symbol&&h.status==="holding"))return p;
+        return[...p,{id:"p"+Date.now(),symbol:action.symbol,name:action.name||action.symbol,sector:action.sector||"—",qty:Number(action.qty)||1,avgBuy:Number(action.avgBuy),currentPrice:LIVE_PRICES[action.symbol]||Number(action.avgBuy),buyDate:new Date().toISOString().slice(0,10),linkedRecId:action.linkedRecId||null,notes:action.notes||"Added via ARIA",targetPrice:Number(action.targetPrice)||Number(action.avgBuy)*1.25,stoplossPrice:Number(action.stoplossPrice)||Number(action.avgBuy)*0.88,status:"holding"}];
+      });
+    } else if(action.action==="exit"){
+      setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="holding"?{...h,status:"exited",currentPrice:Number(action.exitPrice)||h.currentPrice,notes:action.notes||"Exited"}:h));
+    }
+  },[]);
+
+  const TABS=[
+    {id:"discovery",icon:"🔍",label:"Discovery",badge:DISCOVERY_UNIVERSE.length,badgeColor:C.cyan},
+    {id:"recommendations",icon:"🎯",label:"Portfolio Recs"},
+    {id:"portfolio",icon:"💼",label:"Portfolio",badge:portfolioAlerts.length,badgeColor:C.orange},
+    {id:"market",icon:"📡",label:"Market"},
+    {id:"governance_research",icon:"🧬",label:"Gov Research",badge:AI_RESEARCH_FEED.filter(r=>r.debateStatus==="pending").length,badgeColor:C.purple},
+    {id:"governance",icon:"🛡",label:"Governance",badge:openAlerts,badgeColor:C.red},
+  ];
+
+  return(
+    <div style={{fontFamily:"Space Grotesk,system-ui,sans-serif",background:C.bg,color:C.text,height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <style>{FONT_STYLE}</style>
+
+      {/* TOP BAR */}
+      <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,padding:"0 15px",display:"flex",alignItems:"center",gap:12,height:46,flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:7}}>
+          <div style={{width:26,height:26,borderRadius:6,background:`linear-gradient(135deg,${C.accent},${C.accentDim})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>⚡</div>
+          <span style={{fontSize:12,fontWeight:800,color:"white",letterSpacing:-.3}}>Bharat Intelligence</span>
+          <span style={{fontSize:8,color:C.muted}}>v3.0</span>
+        </div>
+        <div className="ticker-scroll" style={{flex:1,display:"flex",gap:12,overflowX:"auto",msOverflowStyle:"none",scrollbarWidth:"none"}}>
+          {MARKET_PULSE.slice(0,6).map(m=>(
+            <div key={m.key} style={{display:"flex",gap:4,alignItems:"center",whiteSpace:"nowrap"}}>
+              <span style={{fontSize:8,color:C.muted}}>{m.key}</span>
+              <span style={{fontSize:9,fontWeight:700,color:"white",fontFamily:"JetBrains Mono"}}>{m.value}</span>
+              <span style={{fontSize:8,color:m.up?C.green:C.red}}>{m.change}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:7}}>
+          {openAlerts>0&&<button onClick={()=>setTab("governance")} style={{background:C.red+"12",border:`1px solid ${C.red}44`,borderRadius:4,padding:"2px 7px",color:C.red,fontSize:9,fontWeight:700,cursor:"pointer"}}>⚠ {openAlerts}</button>}
+          {portfolioAlerts.length>0&&<button onClick={()=>setTab("portfolio")} style={{background:C.orange+"12",border:`1px solid ${C.orange}44`,borderRadius:4,padding:"2px 7px",color:C.orange,fontSize:9,fontWeight:700,cursor:"pointer"}}>💼 {portfolioAlerts.length}</button>}
+          <div style={{fontSize:8,color:C.green,display:"flex",alignItems:"center",gap:2}}><Dot color={C.green} pulse/>Open</div>
+          <span style={{fontSize:8,color:C.muted}}>{now.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})} IST</span>
+          <button onClick={()=>setAriaOpen(o=>!o)} style={{background:ariaOpen?`linear-gradient(135deg,${C.purple},${C.blue})`:C.panel,border:`1px solid ${ariaOpen?C.purple+"66":C.borderHi}`,borderRadius:6,padding:"5px 11px",color:"white",fontSize:10,fontWeight:700,cursor:"pointer",boxShadow:ariaOpen?`0 0 12px ${C.purple}44`:"none"}}>{ariaOpen?"✕ ARIA":"✦ ARIA"}</button>
+        </div>
+      </div>
+
+      {govBanner&&openAlerts>0&&(
+        <div style={{background:C.red+"0d",borderBottom:`1px solid ${C.red}33`,padding:"3px 15px",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+          <span style={{fontSize:9,color:C.red,fontWeight:700}}>⚠ Governance:</span>
+          <span style={{fontSize:9,color:C.textDim,flex:1}}>{GOV_ALERTS.find(a=>!a.resolved)?.title}</span>
+          <button onClick={()=>setTab("governance")} style={{background:C.red+"18",border:`1px solid ${C.red}44`,borderRadius:3,padding:"1px 6px",color:C.red,fontSize:8,cursor:"pointer"}}>View</button>
+          <button onClick={()=>setGovBanner(false)} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:9}}>✕</button>
+        </div>
+      )}
+
+      <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          {/* TABS */}
+          <div className="tabs-scroll" style={{
+            padding:"0 15px",display:"flex",gap:2,
+            background:C.surface,borderBottom:`1px solid ${C.border}`,
+            flexShrink:0,overflowX:"auto",overflowY:"visible",
+          }}>
+            {TABS.map(t=>(
+              <button key={t.id} onClick={()=>setTab(t.id)} style={{
+                background:tab===t.id?C.panel:"transparent",
+                border:`1px solid ${tab===t.id?(t.badgeColor||C.accent)+"44":"transparent"}`,
+                borderRadius:"5px 5px 0 0",padding:"6px 10px",
+                color:tab===t.id?(t.badgeColor||C.accent):C.muted,
+                fontSize:9,fontWeight:tab===t.id?700:400,cursor:"pointer",marginBottom:-1,
+                flexShrink:0,whiteSpace:"nowrap",
+              }}>
+                {t.icon} {t.label}
+                {t.badge>0&&<span style={{marginLeft:3,background:t.badgeColor||C.accent,color:t.id==="discovery"?"#0a0a1a":"white",borderRadius:8,padding:"0px 4px",fontSize:8,fontWeight:700}}>{t.badge}</span>}
+              </button>
+            ))}
+          </div>
+
+          <div style={{flex:1,overflowY:"auto",padding:15}}>
+
+            {/* DISCOVERY TAB — THE PRIMARY TAB */}
+            {tab==="discovery"&&(
+              <ResearchDiscoveryTab
+                portfolio={portfolio}
+                onAddToPortfolio={(stock)=>{
+                  setAriaContext({type:"discovery",id:stock.id});
+                  setSelDiscoveryId(stock.id);
+                  setAriaOpen(true);
+                  setSelDiscoveryId(stock.id);
+                }}
+                onOpenARIA={(type,extra)=>openARIA(type,extra)}
+              />
+            )}
+
+            {/* PORTFOLIO RECOMMENDATIONS */}
+            {tab==="recommendations"&&(
+              <div style={{animation:"fadeUp .3s ease"}}>
+                <div style={{marginBottom:12}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"white"}}>Portfolio Stock Recommendations</div>
+                  <div style={{fontSize:9,color:C.muted,marginTop:1}}>Ongoing signals for stocks you already hold · Updated daily by the agent network</div>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:14}}>
+                  <div>
+                    {PORTFOLIO_RECOMMENDATIONS.map(r=>{
+                      const ac=r.action==="BUY"?C.green:r.action==="SELL"?C.red:C.accent;
+                      const inPort=portfolio.some(h=>h.symbol===r.symbol&&h.status==="holding");
+                      return(
+                        <div key={r.id} onClick={()=>setSelRecId(r.id)} style={{background:selRecId===r.id?C.panel:C.surface,border:`1px solid ${selRecId===r.id?C.accent+"55":C.border}`,borderRadius:8,padding:11,cursor:"pointer",marginBottom:7}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:7}}>
+                            <div style={{flex:1}}>
+                              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
+                                <span style={{fontSize:12,fontWeight:700,color:"white",fontFamily:"JetBrains Mono"}}>{r.symbol}</span>
+                                <Tag color={ac}>{r.action}</Tag>
+                                {inPort&&<Tag color={C.teal} small>📌 held</Tag>}
+                                <span style={{fontSize:9,color:C.muted}}>conf <b style={{color:C.accent}}>{r.confidence}%</b></span>
+                              </div>
+                              <div style={{fontSize:9,color:C.textDim}}>{r.headline}</div>
+                              <div style={{fontSize:8,color:C.muted,marginTop:1}}>Till {r.validTill} · {r.horizon}</div>
+                            </div>
+                            <RiskGauge score={r.riskScore}/>
+                          </div>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:4,marginBottom:6}}>
+                            {[["Entry",r.entry,"white"],["Target",r.target,C.green],["Stop",r.stoploss,C.red]].map(([l,v,col])=>(
+                              <div key={l} style={{background:C.bg,borderRadius:3,padding:"3px 6px"}}>
+                                <div style={{fontSize:7,color:C.muted,textTransform:"uppercase"}}>{l}</div>
+                                <div style={{fontSize:9,fontWeight:700,color:col,fontFamily:"JetBrains Mono"}}>{v}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <Bar pct={r.confidence} color={ac}/>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {PORTFOLIO_RECOMMENDATIONS.find(r=>r.id===selRecId)&&(
+                    <div style={{animation:"fadeUp .2s ease"}}>
+                      {(()=>{const r=PORTFOLIO_RECOMMENDATIONS.find(x=>x.id===selRecId);const icons={technical:"📊",fundamental:"🏭",sentiment:"📰",institutional:"🏛",macro:"🌍",historical:"📜"};const sc=s=>({BUY:C.green,SELL:C.red,NEUTRAL:C.muted,POSITIVE:C.green,"VERY POSITIVE":C.green,HOLD:C.accent}[s]||C.muted);return(<>
+                        <div style={{fontSize:12,fontWeight:700,color:"white",marginBottom:2}}>{r.symbol} — Full Analysis</div>
+                        <div style={{fontSize:10,color:C.textDim,lineHeight:1.55,marginBottom:11}}>{r.summary}</div>
+                        <div style={{fontSize:9,fontWeight:700,color:C.accent,marginBottom:7,textTransform:"uppercase",letterSpacing:1}}>Agent Breakdown</div>
+                        <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                          {Object.entries(r.agents).map(([k,a])=>(
+                            <div key={k} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:5,padding:8}}>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                                <span style={{fontSize:9,fontWeight:600,color:"white"}}>{icons[k]} {k.charAt(0).toUpperCase()+k.slice(1)}</span>
+                                <div style={{display:"flex",gap:4,alignItems:"center"}}><Tag color={sc(a.signal)} small>{a.signal}</Tag><span style={{fontSize:8,color:C.muted,fontFamily:"JetBrains Mono"}}>{a.score}</span></div>
+                              </div>
+                              <div style={{fontSize:9,color:C.textDim,lineHeight:1.5,marginBottom:3}}>{a.detail}</div>
+                              <Bar pct={a.score}/>
+                            </div>
+                          ))}
+                        </div>
+                      </>);})()}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {tab==="portfolio"&&<PortfolioTab portfolio={portfolio} setPortfolio={setPortfolio} onOpenARIA={openARIA}/>}
+
+            {tab==="market"&&(
+              <div style={{animation:"fadeUp .3s ease"}}>
+                <div style={{fontSize:12,fontWeight:700,color:"white",marginBottom:11}}>Live Market Pulse</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
+                  {MARKET_PULSE.map(m=>(
+                    <div key={m.key} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:9}}>
+                      <div style={{fontSize:7,color:C.muted,marginBottom:2,textTransform:"uppercase"}}>{m.key}</div>
+                      <div style={{fontSize:14,fontWeight:800,color:"white",fontFamily:"JetBrains Mono"}}>{m.value}</div>
+                      <div style={{fontSize:8,color:m.up?C.green:C.red,marginTop:2}}>{m.change}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{fontSize:11,fontWeight:700,color:"white",marginBottom:7}}>📰 Today's News</div>
+                {NEWS_FEED.map((n,i)=>(
+                  <div key={i} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:5,padding:"7px 11px",marginBottom:5,display:"flex",gap:8}}>
+                    <span style={{fontSize:8,color:C.muted,whiteSpace:"nowrap",marginTop:1}}>{n.time}</span>
+                    <div><div style={{fontSize:10,color:"white",lineHeight:1.5,marginBottom:2}}>{n.text}</div>
+                    <div style={{display:"flex",gap:4}}><span style={{fontSize:8,color:C.muted}}>{n.src}</span><Tag color={n.tone==="positive"?C.green:n.tone==="negative"?C.red:C.accent} small>{n.sector}</Tag></div></div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {tab==="governance_research"&&<GovernanceResearchTab onOpenARIA={openARIA}/>}
+
+            {tab==="governance"&&(
+              <div style={{animation:"fadeUp .3s ease"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                  <GovShield size={18}/><div style={{fontSize:13,fontWeight:700,color:"white"}}>Governance Engine</div>
+                  <div style={{marginLeft:"auto",background:C.green+"12",border:`1px solid ${C.green}33`,borderRadius:5,padding:"3px 8px",display:"flex",alignItems:"center",gap:4}}><Dot color={C.green} pulse/><span style={{fontSize:9,color:C.green,fontWeight:600}}>Running</span></div>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
+                  {GOV_ALERTS.map(a=>{const sc={critical:C.red,warning:C.accent,info:C.blue}[a.severity];return(
+                    <div key={a.id} style={{background:C.surface,border:`1px solid ${sc}33`,borderRadius:7,padding:11}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><div style={{display:"flex",gap:5,alignItems:"center"}}><Tag color={sc}>{a.severity.toUpperCase()}</Tag><span style={{fontSize:9,color:C.muted}}>{a.module} · {a.time}</span></div><Tag color={a.resolved?C.green:C.red}>{a.resolved?"RESOLVED":"OPEN"}</Tag></div>
+                      <div style={{fontSize:11,fontWeight:600,color:"white",marginBottom:3}}>{a.title}</div>
+                      <div style={{fontSize:9,color:C.textDim,lineHeight:1.6,marginBottom:4}}>{a.detail}</div>
+                      <div style={{fontSize:8,color:sc,background:sc+"0f",borderRadius:3,padding:"2px 6px"}}>⚡ {a.action}</div>
+                    </div>
+                  );})}
+                </div>
+                <div style={{fontSize:11,fontWeight:700,color:C.accent,marginBottom:8}}>Enhancement Proposals</div>
+                {ENHANCEMENT_PROPOSALS.map(ep=>(
+                  <div key={ep.id} style={{background:C.surface,border:`1px solid ${ep.isPaid?C.accent+"44":C.border}`,borderRadius:8,padding:12,marginBottom:8}}>
+                    <div style={{display:"flex",gap:5,marginBottom:5}}><Tag color={ep.isPaid?C.accent:C.green}>{ep.isPaid?"💰 PAID":"✅ FREE"}</Tag><Tag color={C.accent}>{ep.status.replace("_"," ").toUpperCase()}</Tag></div>
+                    <div style={{fontSize:11,fontWeight:700,color:"white",marginBottom:3}}>{ep.title}</div>
+                    <div style={{fontSize:9,color:C.textDim,lineHeight:1.6,marginBottom:6}}>{ep.rationale}</div>
+                    {ep.isPaid&&<div style={{fontSize:9,color:C.accent,background:C.accent+"0a",borderRadius:4,padding:"3px 7px",marginBottom:6}}>Cost: {ep.costImpact.monthly} · {ep.costImpact.annual}</div>}
+                    <button onClick={()=>openARIA("enhancement",ep)} style={{background:`linear-gradient(135deg,${C.blue},#4338ca)`,border:"none",borderRadius:5,padding:"6px 12px",color:"white",fontSize:10,fontWeight:700,cursor:"pointer",width:"100%"}}>
+                      {ep.isPaid?"🔍 Review with ARIA":"⚡ Deploy with ARIA"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {ariaOpen&&(
+          <div style={{width:340,borderLeft:`1px solid ${C.border}`,flexShrink:0,display:"flex",flexDirection:"column",animation:"slideIn .2s ease"}}>
+            <ARIAPanel
+              selectedRec={PORTFOLIO_RECOMMENDATIONS.find(r=>r.id===selRecId)}
+              ariaContext={ariaContext}
+              onClearContext={()=>setAriaContext(null)}
+              portfolio={portfolio}
+              onPortfolioUpdate={handlePortfolioUpdate}
+              discoveryStock={ariaContext?.type==="discovery"?DISCOVERY_UNIVERSE.find(s=>s.id===(ariaContext.id||selDiscoveryId)):null}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
