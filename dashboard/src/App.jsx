@@ -1163,7 +1163,7 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
     setMessages(p=>[...p,{role:"user",text:txt}]);setLoading(true);
     try{
       const history=messages.slice(-14).map(m=>({role:m.role,content:m.text}));
-      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
+      const res=await fetch("/api/aria",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:SYSTEM,messages:[...history,{role:"user",content:txt}]})});
       const data=await res.json();
       const raw=data.content?.[0]?.text||"Error.";
