@@ -199,6 +199,8 @@ def get_screener_data(symbol: str) -> dict | None:
             "debt_equity": None,
             "roce": None,
             "promoter_holding": None,
+            "promoter_pledging": None,   # % of promoter shares pledged
+            "revenue_growth_qoq": None,  # most recent quarter-on-quarter %
         }
 
         # ── Top ratios bar ──────────────────────────────────────────────────
@@ -217,16 +219,58 @@ def get_screener_data(symbol: str) -> dict | None:
             elif "roce" in name_txt:
                 result["roce"] = val
 
-        # ── Promoter holding from shareholding table ────────────────────────
+        # ── Promoter holding + pledging from shareholding table ─────────────
+        found_promoter = False
         for row in soup.select("table.data-table tbody tr"):
             cells = row.find_all("td")
-            if cells and "promoter" in cells[0].get_text(strip=True).lower():
+            if not cells:
+                continue
+            row_label = cells[0].get_text(strip=True).lower()
+            if not found_promoter and "promoter" in row_label and "pledg" not in row_label:
                 last_val = None
                 for td in cells[1:]:
                     v = _safe_float(td.get_text(strip=True).replace("%", ""))
                     if v is not None:
                         last_val = v
                 result["promoter_holding"] = last_val
+                found_promoter = True
+            elif "pledg" in row_label:
+                # Take the most recent quarter (last non-None value)
+                vals = []
+                for td in cells[1:]:
+                    v = _safe_float(td.get_text(strip=True).replace("%", ""))
+                    if v is not None:
+                        vals.append(v)
+                if vals:
+                    result["promoter_pledging"] = vals[-1]
+                break  # pledging row found — stop scanning
+
+        # ── QoQ revenue growth from quarterly sales table ────────────────────
+        # Look for the quarterly P&L section (Sales row) and compute QoQ
+        for table in soup.select("table.data-table"):
+            header_row = table.select_one("thead tr")
+            if not header_row:
+                continue
+            headers = [th.get_text(strip=True).lower() for th in header_row.find_all("th")]
+            # We want quarterly tables (months like "Sep 2023", "Dec 2023")
+            if not any("sep" in h or "dec" in h or "mar" in h or "jun" in h for h in headers):
+                continue
+            for row in table.select("tbody tr"):
+                cells = row.find_all("td")
+                if not cells:
+                    continue
+                if "sales" in cells[0].get_text(strip=True).lower():
+                    qtrs = []
+                    for td in cells[1:]:
+                        v = _safe_float(td.get_text(strip=True).replace(",", ""))
+                        if v is not None:
+                            qtrs.append(v)
+                    if len(qtrs) >= 2 and qtrs[-2] > 0:
+                        result["revenue_growth_qoq"] = round(
+                            (qtrs[-1] - qtrs[-2]) / qtrs[-2] * 100, 2
+                        )
+                    break
+            if result["revenue_growth_qoq"] is not None:
                 break
 
         # ── Revenue growth and EBITDA margin from financial ratios section ──
