@@ -8,13 +8,16 @@ Usage:
     python db/seed_historical_events.py
 
 Requires:
-    pip install supabase
+    pip install "supabase==2.10.0" python-dotenv
     (optional, for embeddings) pip install openai
 """
 
 import os
 import sys
 from datetime import date
+
+from dotenv import load_dotenv
+load_dotenv()  # loads SUPABASE_URL, SUPABASE_SERVICE_KEY etc. from .env
 
 # ---------------------------------------------------------------------------
 # 50 curated NSE / macro events
