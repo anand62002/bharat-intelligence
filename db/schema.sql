@@ -27,12 +27,14 @@ CREATE TABLE IF NOT EXISTS recommendations (
     gov_check        JSONB,                  -- governance / red-flag checks
     upside_pct       NUMERIC(7,2),
     upside_confidence NUMERIC(5,2),          -- 0–100
+    is_discovery     BOOLEAN NOT NULL DEFAULT FALSE,   -- TRUE = found by discovery_screener
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_rec_symbol     ON recommendations (symbol);
-CREATE INDEX IF NOT EXISTS idx_rec_created_at ON recommendations (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_rec_action     ON recommendations (action);
+CREATE INDEX IF NOT EXISTS idx_rec_symbol       ON recommendations (symbol);
+CREATE INDEX IF NOT EXISTS idx_rec_created_at   ON recommendations (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rec_action       ON recommendations (action);
+CREATE INDEX IF NOT EXISTS idx_rec_is_discovery ON recommendations (is_discovery) WHERE is_discovery = TRUE;
 
 -- ============================================================
 -- portfolio_holdings
