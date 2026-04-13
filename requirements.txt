@@ -5,3 +5,4 @@ beautifulsoup4>=4.12.3
 lxml>=5.2.0
 supabase==2.10.0
 python-dotenv>=1.0.0
+openai>=1.0.0
