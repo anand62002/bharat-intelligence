@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS historical_events (
 
 CREATE INDEX IF NOT EXISTS idx_he_event_type  ON historical_events (event_type);
 CREATE INDEX IF NOT EXISTS idx_he_event_date  ON historical_events (event_date DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_he_unique_event ON historical_events (event_date, event_type, LEFT(description, 80));
 
 -- IVFFlat index for approximate nearest-neighbour search on embeddings
 -- (run AFTER table is populated for best index quality)

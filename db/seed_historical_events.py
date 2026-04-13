@@ -722,7 +722,7 @@ def serialize_event(ev: dict) -> dict:
     }
 
 
-def seed(dry_run: bool = False):
+def seed(dry_run: bool = False, force: bool = False):
     print(f"Preparing to seed {len(EVENTS)} historical events …")
 
     if dry_run:
@@ -733,18 +733,31 @@ def seed(dry_run: bool = False):
 
     client = get_supabase_client()
 
+    # ── Guard against duplicate runs ─────────────────────────────────────────
+    existing = client.table("historical_events").select("id", count="exact").execute()
+    existing_count = existing.count or 0
+
+    if existing_count > 0 and not force:
+        print(
+            f"\n⚠️  Table already has {existing_count} rows. Skipping seed.\n"
+            f"   To wipe and re-seed, run:  python seed_historical_events.py --force\n"
+            f"   To add embeddings only, run: python seed_historical_events.py --embed"
+        )
+        return
+
+    if existing_count > 0 and force:
+        print(f"  --force flag set: truncating {existing_count} existing rows …")
+        client.table("historical_events").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+        print("  Table cleared.")
+
     rows = [serialize_event(ev) for ev in EVENTS]
 
-    # Upsert in batches of 20 to stay within Supabase request size limits
+    # Insert in batches of 20 to stay within Supabase request size limits
     batch_size = 20
     inserted = 0
     for start in range(0, len(rows), batch_size):
         batch = rows[start : start + batch_size]
-        resp = (
-            client.table("historical_events")
-            .insert(batch)
-            .execute()
-        )
+        client.table("historical_events").insert(batch).execute()
         inserted += len(batch)
         print(f"  Inserted batch {start // batch_size + 1}: {len(batch)} rows")
 
@@ -810,9 +823,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Generate and store OpenAI embeddings after seeding",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Wipe existing rows and re-seed from scratch",
+    )
     args = parser.parse_args()
 
-    seed(dry_run=args.dry_run)
+    seed(dry_run=args.dry_run, force=args.force)
 
     if args.embed and not args.dry_run:
         embed_events()
