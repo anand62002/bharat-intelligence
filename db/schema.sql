@@ -140,6 +140,27 @@ CREATE INDEX IF NOT EXISTS idx_he_event_date  ON historical_events (event_date D
 --     ON historical_events USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50);
 
 -- ============================================================
+-- institutional_flows
+-- Daily FII/DII net flow cache used by agents/institutional.py
+-- for rolling 5/10-session window calculations.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS institutional_flows (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_date DATE NOT NULL UNIQUE,          -- one row per trading session
+    fii_net      NUMERIC(14,2),                 -- FII net flow in ₹ Crores
+    dii_net      NUMERIC(14,2),                 -- DII net flow in ₹ Crores
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_inst_flows_date ON institutional_flows (session_date DESC);
+
+DROP TRIGGER IF EXISTS trg_inst_flows_updated_at ON institutional_flows;
+CREATE TRIGGER trg_inst_flows_updated_at
+    BEFORE UPDATE ON institutional_flows
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- ============================================================
 -- daily_runs
 -- Audit log for scheduled pipeline executions
 -- ============================================================
