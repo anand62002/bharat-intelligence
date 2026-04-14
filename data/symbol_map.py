@@ -60,12 +60,19 @@ YF_SYMBOL_MAP: dict[str, Optional[str]] = {
     # ── Company renames / mergers ─────────────────────────────────────────────
     "INTERGLOBE":       "INDIGO.NS",          # InterGlobe Aviation = IndiGo airline
     "WELSPUNIND":       "WELSPUNLIV.NS",      # Welspun India → Welspun Living (2022)
-    "MINDTREE":         "LTIMINDTREE.NS",     # Mindtree merged into LTIMindtree (2022)
-    "L&TINFOTECH":      "LTIMINDTREE.NS",     # L&T Infotech merged into LTIMindtree
-    "LTINFOTECH":       "LTIMINDTREE.NS",
+    "MINDTREE":         "LTIM.NS",            # Mindtree merged into LTIMindtree; YF ticker = LTIM
+    "L&TINFOTECH":      "LTIM.NS",            # L&T Infotech merged into LTIMindtree
+    "LTINFOTECH":       "LTIM.NS",
+    "LTIMINDTREE":      "LTIM.NS",            # NSE brand name; YF uses shorter LTIM.NS
+    # ── Corporate rebrands ────────────────────────────────────────────────────
+    "ZOMATO":           "ETERNAL.NS",         # Zomato rebranded → Eternal (2025); NSE ticker = ETERNAL
+    # ── Old/short NSE symbols that differ from Yahoo Finance ─────────────────
+    "KPIT":             "KPITTECH.NS",        # KPIT Technologies NSE symbol = KPITTECH
+    "CSB":              "CSBBANK.NS",         # CSB Bank NSE symbol = CSBBANK
+    "DALMIA":           "DALBHARAT.NS",       # Dalmia Bharat NSE symbol = DALBHARAT
 
     # ── Yahoo Finance uses longer/different form ───────────────────────────────
-    "DEEPAKNITR":       "DEEPAKNITRITE.NS",   # Deepak Nitrite (full name on YF)
+    "DEEPAKNITRITE":    "DEEPAKNITR.NS",       # NSE list sometimes uses full name; YF uses DEEPAKNITR
     "AARTI":            "AARTIIND.NS",        # Aarti Industries
     "BARBEQUE":         "BARBEQUE-N.NS",      # Barbeque Nation (NSE: BARBEQUE-N)
     "FINOLEX":          "FINOLEXCAB.NS",      # Finolex Cables (vs. FINOLEXIND)
@@ -118,6 +125,12 @@ SCREENER_SLUG_MAP: dict[str, str] = {
     "JSWENERGY":        "JSWENERGY",
     "JSWSTEEL":         "JSWSTEEL",
     "INDIGO":           "INTERGLOBE",     # screener uses INTERGLOBE for IndiGo
+    # ── Post-rename / ticker change mappings ─────────────────────────────────
+    "KPITTECH":         "KPITTECH",
+    "CSBBANK":          "CSBBANK",
+    "DALBHARAT":        "DALBHARAT",      # Dalmia Bharat
+    "ETERNAL":          "ZOMATO",         # Zomato → Eternal rebrand; screener still uses ZOMATO slug
+    "DEEPAKNITR":       "DEEPAKNITR",     # screener.in uses DEEPAKNITR
 }
 
 # ──────────────────────────────────────────────────────────────────────────────

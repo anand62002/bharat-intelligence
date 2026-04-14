@@ -174,11 +174,19 @@ class TestFIINetBuying:
     def test_zero_fii_returns_false(self):
         assert _fii_net_buying({"fii_net": 0.0}) is False
 
-    def test_none_fii_data_returns_false(self):
-        assert _fii_net_buying(None) is False
+    def test_none_fii_data_returns_none(self):
+        # None means API unavailable — must be None, not False, so caller
+        # can distinguish "not buying" vs "we don't know"
+        result = _fii_net_buying(None)
+        assert result is None
 
     def test_missing_key_returns_false(self):
+        # Empty dict means the API responded but net = 0 (not buying)
         assert _fii_net_buying({}) is False
+
+    def test_malformed_value_returns_none(self):
+        # Unparseable payload → unknown, not False
+        assert _fii_net_buying({"fii_net": "n/a"}) is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -258,7 +266,10 @@ class TestPrescreen:
         monkeypatch.setattr("agents.discovery_screener.get_screener_data",
                             lambda s: None)
         passes, triggers = prescreen("TEST.NS", fii_data=_good_fii())
-        # Without screener, only EMA200, RSI, and FII can fire (≤3) → should fail
+        # FII data IS available (positive) → strict 4-of-5 threshold applies.
+        # Without screener, only EMA200 + RSI + FII can fire (≤3 real hits) → fails.
+        real_hits = sum(1 for t in triggers if not t.startswith("["))
+        assert real_hits <= 3
         assert passes is False
 
     def test_triggers_are_strings(self, monkeypatch):
@@ -270,6 +281,87 @@ class TestPrescreen:
         for t in triggers:
             assert isinstance(t, str)
             assert len(t) > 5
+
+    # ── FII-unavailable threshold relaxation ─────────────────────────────────
+
+    def test_fii_none_adds_meta_note_to_triggers(self, monkeypatch):
+        """When FII API is blocked, a [meta] note must appear in triggers."""
+        monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
+                            lambda s, period: _make_df(252, drift=0.05))
+        monkeypatch.setattr("agents.discovery_screener.get_screener_data",
+                            lambda s: _good_screener())
+        _, triggers = prescreen("TEST.NS", fii_data=None)
+        meta = [t for t in triggers if t.startswith("[")]
+        assert len(meta) == 1
+        assert "FII data unavailable" in meta[0]
+
+    def test_fii_none_uses_relaxed_threshold_passes(self, monkeypatch):
+        """3-of-4 known filters should be enough when FII API is blocked."""
+        # Setup: RSI good + EMA200 good + screener good (PE + revenue) → 4 real hits
+        # Even without FII, 4 > threshold=3, so must pass
+        monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
+                            lambda s, period: _make_df(252, drift=0.05))
+        monkeypatch.setattr("agents.discovery_screener.get_screener_data",
+                            lambda s: _good_screener())
+        passes, triggers = prescreen("TEST.NS", fii_data=None)
+        real_hits = sum(1 for t in triggers if not t.startswith("["))
+        assert real_hits >= 3
+        assert passes is True
+
+    def test_fii_none_with_only_2_real_hits_fails(self, monkeypatch):
+        """2-of-4 known filters is still below relaxed threshold of 3."""
+        # Only EMA200 + RSI fire; screener returns None → no PE/revenue triggers
+        monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
+                            lambda s, period: _make_df(252, drift=0.05))
+        monkeypatch.setattr("agents.discovery_screener.get_screener_data",
+                            lambda s: None)
+        passes, triggers = prescreen("TEST.NS", fii_data=None)
+        real_hits = sum(1 for t in triggers if not t.startswith("["))
+        assert real_hits <= 2
+        assert passes is False
+
+    def test_fii_available_false_still_uses_strict_threshold(self, monkeypatch):
+        """
+        FII API responded with net selling → strict 4-of-5 threshold applies.
+        Same data that passes the relaxed (3-of-4) threshold should FAIL the
+        strict (4-of-5) threshold when FII is known-negative.
+
+        Setup: drift=0.05 gives RSI > 65 (all gains) so filter 1 doesn't fire.
+        EMA200 + PE + revenue_growth = 3 real hits.
+          - fii_data=None   → relaxed threshold=3 → PASSES
+          - fii_data negative → strict threshold=4 → FAILS
+        """
+        monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
+                            lambda s, period: _make_df(252, drift=0.05))
+        monkeypatch.setattr("agents.discovery_screener.get_screener_data",
+                            lambda s: _good_screener())
+
+        # FII unavailable → relaxed → should pass
+        passes_relaxed, t_relaxed = prescreen("TEST.NS", fii_data=None)
+        # FII available but negative → strict → should fail
+        passes_strict, t_strict = prescreen("TEST.NS", fii_data={"fii_net": -500.0})
+
+        # No meta note when FII is known
+        meta = [t for t in t_strict if t.startswith("[")]
+        assert len(meta) == 0
+
+        # The same underlying real hits should cause different outcomes
+        real_hits_strict = sum(1 for t in t_strict if not t.startswith("["))
+        assert real_hits_strict < 4          # less than strict threshold
+        assert passes_relaxed is True        # relaxed: 3-of-4 passes
+        assert passes_strict is False        # strict: 3-of-5 fails
+
+    def test_meta_note_not_counted_as_filter_hit(self, monkeypatch):
+        """The [meta] note must never be counted as a passing filter."""
+        monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
+                            lambda s, period: _make_df(252, drift=0.05))
+        monkeypatch.setattr("agents.discovery_screener.get_screener_data",
+                            lambda s: _good_screener())
+        passes, triggers = prescreen("TEST.NS", fii_data=None)
+        # Count real hits manually and verify it matches what the function decided
+        real_hits = sum(1 for t in triggers if not t.startswith("["))
+        expected = real_hits >= 3   # relaxed threshold
+        assert passes is expected
 
 
 # ──────────────────────────────────────────────────────────────────────────────

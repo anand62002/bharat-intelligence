@@ -51,7 +51,8 @@ _RSI_HIGH           = 65.0
 _PE_MAX             = 50.0
 _GROWTH_PE_OVERRIDE = 30.0   # revenue growth % that justifies PE > 50
 _REVENUE_GROWTH_MIN = 15.0   # YoY %
-_MIN_PRESCREEN_PASS = 4      # must pass this many of 5 filters
+_MIN_PRESCREEN_PASS        = 4   # must pass this many of 5 filters (FII data available)
+_MIN_PRESCREEN_PASS_NO_FII = 3   # relaxed threshold when FII API is blocked (3-of-4 known filters)
 
 _CRITICAL_UPSIDE    = 100.0
 _CRITICAL_CONF      = 70.0
@@ -81,11 +82,11 @@ NIFTY500_SYMBOLS: list[str] = [
     "HEROMOTOCO.NS","ADANIPORTS.NS","SBILIFE.NS","HDFCLIFE.NS","ICICIPRULI.NS",
     "PIDILITIND.NS","DABUR.NS","SIEMENS.NS","ABB.NS","HAVELLS.NS",
     # ── IT & Technology ───────────────────────────────────────────────────────
-    "LTIMINDTREE.NS","MPHASIS.NS","COFORGE.NS","LTTS.NS","PERSISTENT.NS",
-    "OFSS.NS","KPIT.NS","TATAELXSI.NS","HEXAWARE.NS","CYIENT.NS",
+    "LTIM.NS","MPHASIS.NS","COFORGE.NS","LTTS.NS","PERSISTENT.NS",
+    "OFSS.NS","KPITTECH.NS","TATAELXSI.NS","CYIENT.NS",
     # ── Banking & Finance ─────────────────────────────────────────────────────
     "BANKBARODA.NS","PNB.NS","CANBK.NS","FEDERALBNK.NS","IDFCFIRSTB.NS",
-    "AUBANK.NS","RBLBANK.NS","BANDHANBNK.NS","KARURVYSYA.NS","CSB.NS",
+    "AUBANK.NS","RBLBANK.NS","BANDHANBNK.NS","KARURVYSYA.NS","CSBBANK.NS",
     "CHOLAFIN.NS","MUTHOOTFIN.NS","MANAPPURAM.NS","BAJAJHLDNG.NS","M&MFIN.NS",
     "SHRIRAMFIN.NS","LICHSGFIN.NS","CANFINHOME.NS","AAVAS.NS","HOMEFIRST.NS",
     "CAMS.NS","CDSL.NS","BSE.NS","MCX.NS","IEX.NS","ANGELONE.NS",
@@ -102,16 +103,16 @@ NIFTY500_SYMBOLS: list[str] = [
     "BRIGADE.NS","SOBHA.NS","LODHA.NS","SUNTECK.NS",
     # ── Consumer & Retail ────────────────────────────────────────────────────
     "CROMPTON.NS","POLYCAB.NS","KANSAINER.NS","BERGEPAINT.NS","INDIGO.NS",
-    "IRCTC.NS","CONCOR.NS","ZOMATO.NS","NYKAA.NS","POLICYBZR.NS",
+    "IRCTC.NS","CONCOR.NS","ETERNAL.NS","NYKAA.NS","POLICYBZR.NS",
     "DMART.NS","TRENT.NS","ABFRL.NS","BATAINDIA.NS","VMART.NS",
     "SHOPERSTOP.NS","JUBLFOOD.NS","WESTLIFE.NS","DEVYANI.NS","SAPPHIRE.NS",
     "VGUARD.NS","BLUESTARCO.NS","VOLTAS.NS","SYMPHONY.NS","RAJESHEXPO.NS",
     # ── Cement ────────────────────────────────────────────────────────────────
     "JKCEMENT.NS","RAMCOCEM.NS","SHREECEM.NS","AMBUJACEM.NS","ACC.NS",
-    "DALMIA.NS","HEIDELBERG.NS","BIRLACORP.NS",
+    "DALBHARAT.NS","HEIDELBERG.NS","BIRLACORP.NS",
     # ── FMCG & Consumer Staples ───────────────────────────────────────────────
     "GODREJCP.NS","EMAMILTD.NS","JYOTHYLAB.NS","MARICO.NS","COLPAL.NS",
-    "VBL.NS","TATACONSUM.NS",
+    "VBL.NS",
     # ── Power & Utilities ─────────────────────────────────────────────────────
     "TATAPOWER.NS","TORNTPOWER.NS","CESC.NS","JSWENERGY.NS","ADANIGREEN.NS",
     "RECLTD.NS","PFC.NS","IRFC.NS","NHPC.NS","SJVN.NS","HUDCO.NS",
@@ -119,7 +120,7 @@ NIFTY500_SYMBOLS: list[str] = [
     "SAIL.NS","NATIONALUM.NS","VEDL.NS","HINDZINC.NS","MOIL.NS",
     "APLAPOLLO.NS","RATNAMANI.NS","WELSPUNLIV.NS","GPIL.NS","JINDALSAW.NS",
     # ── Chemicals & Specialty ────────────────────────────────────────────────
-    "DEEPAKNITRITE.NS","AARTIIND.NS","NAVINFLUOR.NS","SRF.NS","PIIND.NS",
+    "DEEPAKNITR.NS","AARTIIND.NS","NAVINFLUOR.NS","SRF.NS","PIIND.NS",
     "VINATIORG.NS","FINEORG.NS","ALKYLAMINE.NS","ROSSARI.NS","ANUPAMRAS.NS",
     # ── Fertilizers & Agro ────────────────────────────────────────────────────
     "CHAMBLFERT.NS","COROMANDEL.NS","GSFC.NS","GNFC.NS","RCF.NS",
@@ -228,17 +229,22 @@ def _price_above_ema200(close) -> bool:
     return float(close.iloc[-1]) > float(ema200.iloc[-1])
 
 
-def _fii_net_buying(fii_data: Optional[dict]) -> bool:
+def _fii_net_buying(fii_data: Optional[dict]) -> Optional[bool]:
     """
-    True if the most recent FII data shows net buying (positive net flow).
-    fii_data comes from get_nse_fii_dii() → {'fii_net': float, ...}
+    Returns:
+        True  — FII data available and shows net buying  (positive net flow)
+        False — FII data available but net selling / neutral
+        None  — FII data unavailable (NSE API blocked / network error)
+
+    Returning None lets the caller distinguish "not buying" from "we don't know",
+    so the pre-screen threshold can be relaxed appropriately.
     """
     if fii_data is None:
-        return False
+        return None   # API unavailable — treat as unknown, not as "not buying"
     try:
         return float(fii_data.get("fii_net", 0)) > 0
     except (TypeError, ValueError):
-        return False
+        return None   # malformed payload → also unknown
 
 
 def prescreen(
@@ -248,13 +254,17 @@ def prescreen(
     """
     Run the 5 quick pre-screen filters against a single symbol.
 
+    Threshold logic:
+      - FII API available  → must pass 4-of-5 filters  (_MIN_PRESCREEN_PASS)
+      - FII API blocked    → FII filter is skipped; must pass 3-of-4 remaining
+                             filters  (_MIN_PRESCREEN_PASS_NO_FII)
+
     Returns:
         (passes: bool, triggers: list[str])
-        passes = True if 4+ of 5 filters are met.
     """
     triggers: list[str] = []
 
-    # ── Fetch OHLCV (3-month window for speed) ────────────────────────────────
+    # ── Fetch OHLCV ───────────────────────────────────────────────────────────
     df = get_ohlcv(symbol, period="1y")
     if df is None or len(df) < 30:
         return False, []
@@ -266,7 +276,7 @@ def prescreen(
     if rsi_val is not None and _RSI_LOW <= rsi_val <= _RSI_HIGH:
         triggers.append(f"RSI {rsi_val:.1f} in 40–65 sweet spot")
 
-    # Filter 5: Price above 200 EMA (compute now, PE needs screener call below)
+    # Filter 5: Price above 200 EMA
     above_200 = _price_above_ema200(close)
     if above_200:
         triggers.append("Price above 200-day EMA (uptrend confirmed)")
@@ -279,7 +289,7 @@ def prescreen(
         revenue_growth = raw.get("revenue_growth")
 
         # Filter 2: PE < 50 OR revenue growth > 30% (growth justification)
-        pe_ok = (pe is not None and pe < _PE_MAX)
+        pe_ok        = (pe is not None and pe < _PE_MAX)
         growth_pe_ok = (revenue_growth is not None and revenue_growth > _GROWTH_PE_OVERRIDE)
         if pe_ok:
             triggers.append(f"PE {pe:.1f} < 50 (reasonable valuation)")
@@ -292,11 +302,27 @@ def prescreen(
         if revenue_growth is not None and revenue_growth > _REVENUE_GROWTH_MIN:
             triggers.append(f"Revenue growth YoY {revenue_growth:.1f}% > 15%")
 
-    # Filter 3: FII net buying last 5 sessions (market-wide indicator)
-    if _fii_net_buying(fii_data):
-        triggers.append("FII net buyer last session (market-wide flow positive)")
+    # Filter 3: FII net buying (market-wide indicator)
+    # _fii_net_buying returns None when the NSE API is blocked, True/False when available.
+    fii_result = _fii_net_buying(fii_data)
+    fii_available = fii_result is not None
 
-    passes = len(triggers) >= _MIN_PRESCREEN_PASS
+    if fii_available:
+        # API responded — count the filter normally
+        if fii_result:
+            triggers.append("FII net buyer last session (market-wide flow positive)")
+        threshold = _MIN_PRESCREEN_PASS            # 4-of-5
+    else:
+        # NSE API blocked — skip FII filter, relax threshold to 3-of-4
+        triggers_meta = ["[FII data unavailable — threshold relaxed to 3-of-4 known filters]"]
+        log.debug("prescreen(%s): FII API unavailable, using relaxed 3-of-4 threshold", symbol)
+        # We prepend the meta note but don't count it as a passing filter
+        triggers = triggers_meta + triggers
+        threshold = _MIN_PRESCREEN_PASS_NO_FII     # 3-of-4
+
+    # Count only real filter hits (not the meta note)
+    real_hits = sum(1 for t in triggers if not t.startswith("["))
+    passes = real_hits >= threshold
     return passes, triggers
 
 
