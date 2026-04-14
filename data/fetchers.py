@@ -38,16 +38,27 @@ def get_ohlcv(symbol: str, period: str = "1y"):
     Returns:
         pandas.DataFrame with columns [Open, High, Low, Close, Volume], or None on failure.
     """
+    from data.symbol_map import resolve_yf, is_excluded
+    if is_excluded(symbol):
+        log.debug("get_ohlcv: skipping excluded symbol %s", symbol)
+        return None
+    resolved = resolve_yf(symbol)
+    if resolved is None:
+        log.debug("get_ohlcv: %s resolved to None (excluded)", symbol)
+        return None
+    if resolved != symbol:
+        log.debug("get_ohlcv: symbol resolved %s → %s", symbol, resolved)
+
     try:
-        ticker = yf.Ticker(symbol)
+        ticker = yf.Ticker(resolved)
         df = ticker.history(period=period)
         if df.empty:
-            log.warning("get_ohlcv: no data returned for %s (period=%s)", symbol, period)
+            log.warning("get_ohlcv: no data returned for %s (period=%s)", resolved, period)
             return None
         df.index = df.index.tz_localize(None)
         return df[["Open", "High", "Low", "Close", "Volume"]]
     except Exception as e:
-        log.error("get_ohlcv(%s): %s", symbol, e)
+        log.error("get_ohlcv(%s): %s", resolved, e)
         return None
 
 
@@ -182,13 +193,41 @@ def get_screener_data(symbol: str) -> dict | None:
         dict with keys: pe, revenue_growth, ebitda_margin, debt_equity, roce,
         promoter_holding — values are floats or None if not found. Returns None on request failure.
     """
-    clean = symbol.replace(".NS", "").replace(".BO", "").upper()
-    url = f"https://www.screener.in/company/{clean}/"
+    from data.symbol_map import resolve_screener, is_excluded
+    if is_excluded(symbol):
+        log.debug("get_screener_data: skipping excluded symbol %s", symbol)
+        return None
+    slug = resolve_screener(symbol)
+    if slug != symbol.replace(".NS", "").replace(".BO", "").upper():
+        log.debug("get_screener_data: slug resolved %s → %s", symbol, slug)
+
+    # Try standalone view first, then consolidated; also retry with original
+    # base symbol if the slug override still 404s (graceful fallback chain)
+    base_fallback = symbol.replace(".NS", "").replace(".BO", "").upper()
+    candidates = [slug]
+    if base_fallback != slug:
+        candidates.append(base_fallback)   # fallback to raw NSE symbol
+
+    resp = None
+    for candidate in candidates:
+        for variant in ("", "consolidated/"):
+            url = f"https://www.screener.in/company/{candidate}/{variant}"
+            try:
+                r = requests.get(url, headers=_HEADERS, timeout=12)
+                if r.status_code == 200:
+                    resp = r
+                    break
+                log.debug("get_screener_data: %s → HTTP %s", url, r.status_code)
+            except Exception as req_exc:
+                log.debug("get_screener_data: request error %s: %s", url, req_exc)
+        if resp is not None:
+            break
+
+    if resp is None:
+        log.error("get_screener_data(%s): all URL variants returned non-200", symbol)
+        return None
+
     try:
-        resp = requests.get(url, headers=_HEADERS, timeout=12)
-        if resp.status_code == 404:
-            # Try consolidated view
-            resp = requests.get(url + "consolidated/", headers=_HEADERS, timeout=12)
         resp.raise_for_status()
 
         soup = BeautifulSoup(resp.text, "html.parser")

@@ -69,7 +69,7 @@ _INTER_STOCK_DELAY  = 0.5    # seconds between yfinance calls to avoid rate-limi
 # Call fetch_nifty500_symbols() to download the live list.
 
 NIFTY500_SYMBOLS: list[str] = [
-    # Large-cap anchors
+    # ── NIFTY 50 — large-cap anchors ─────────────────────────────────────────
     "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS",
     "HINDUNILVR.NS","KOTAKBANK.NS","SBIN.NS","BHARTIARTL.NS","ITC.NS",
     "AXISBANK.NS","LT.NS","ASIANPAINT.NS","MARUTI.NS","NESTLEIND.NS",
@@ -80,39 +80,59 @@ NIFTY500_SYMBOLS: list[str] = [
     "TATASTEEL.NS","INDUSINDBK.NS","TATACONSUM.NS","BRITANNIA.NS","EICHERMOT.NS",
     "HEROMOTOCO.NS","ADANIPORTS.NS","SBILIFE.NS","HDFCLIFE.NS","ICICIPRULI.NS",
     "PIDILITIND.NS","DABUR.NS","SIEMENS.NS","ABB.NS","HAVELLS.NS",
-    # Mid-cap growth
-    "AUROPHARMA.NS","LUPIN.NS","BIOCON.NS","TORNTPHARM.NS","ALKEM.NS",
-    "PERSISTENT.NS","LTIM.NS","MPHASIS.NS","COFORGE.NS","LTTS.NS",
+    # ── IT & Technology ───────────────────────────────────────────────────────
+    "LTIMINDTREE.NS","MPHASIS.NS","COFORGE.NS","LTTS.NS","PERSISTENT.NS",
+    "OFSS.NS","KPIT.NS","TATAELXSI.NS","HEXAWARE.NS","CYIENT.NS",
+    # ── Banking & Finance ─────────────────────────────────────────────────────
     "BANKBARODA.NS","PNB.NS","CANBK.NS","FEDERALBNK.NS","IDFCFIRSTB.NS",
-    "M&MFIN.NS","BAJAJHLDNG.NS","CHOLAFIN.NS","MUTHOOTFIN.NS","MANAPPURAM.NS",
+    "AUBANK.NS","RBLBANK.NS","BANDHANBNK.NS","KARURVYSYA.NS","CSB.NS",
+    "CHOLAFIN.NS","MUTHOOTFIN.NS","MANAPPURAM.NS","BAJAJHLDNG.NS","M&MFIN.NS",
+    "SHRIRAMFIN.NS","LICHSGFIN.NS","CANFINHOME.NS","AAVAS.NS","HOMEFIRST.NS",
+    "CAMS.NS","CDSL.NS","BSE.NS","MCX.NS","IEX.NS","ANGELONE.NS",
+    # ── Pharma & Healthcare ───────────────────────────────────────────────────
+    "AUROPHARMA.NS","LUPIN.NS","BIOCON.NS","TORNTPHARM.NS","ALKEM.NS",
+    "LAURUSLABS.NS","GRANULES.NS","NATCOPHARM.NS","IPCALAB.NS","AJANTPHARM.NS",
+    "GLAND.NS","LALPATHLAB.NS","METROPOLIS.NS","SYNGENE.NS","ERIS.NS",
+    # ── Auto & Auto-Ancillaries ───────────────────────────────────────────────
     "ESCORTS.NS","ASHOKLEY.NS","TVSMOTOR.NS","BALKRISIND.NS","MRF.NS",
+    "BHARATFORG.NS","BOSCHLTD.NS","MOTHERSON.NS","APOLLOTYRE.NS","CEATLTD.NS",
+    "ENDURANCE.NS","SUPRAJIT.NS","CRAFTSMAN.NS","SONACOMS.NS",
+    # ── Realty ────────────────────────────────────────────────────────────────
     "DLF.NS","GODREJPROP.NS","PRESTIGE.NS","OBEROIRLTY.NS","PHOENIXLTD.NS",
+    "BRIGADE.NS","SOBHA.NS","LODHA.NS","SUNTECK.NS",
+    # ── Consumer & Retail ────────────────────────────────────────────────────
     "CROMPTON.NS","POLYCAB.NS","KANSAINER.NS","BERGEPAINT.NS","INDIGO.NS",
-    "INTERGLOBE.NS","IRCTC.NS","CONCOR.NS","ZOMATO.NS","NYKAA.NS",
-    "PAYTM.NS","POLICYBZR.NS","DMART.NS","TRENT.NS","ABFRL.NS",
-    "GLAND.NS","LALPATHLAB.NS","METROPOLIS.NS","VIJAYA.NS","AAVAS.NS",
-    "CAMS.NS","CDSL.NS","BSE.NS","MCX.NS","IEX.NS",
-    "SYNGENE.NS","LAURUSLABS.NS","GRANULES.NS","NATCOPHARM.NS","IPCA.NS",
-    "ASTRAL.NS","AAPL.NS","SUPREMEIND.NS","PRINCEPIPE.NS","FINOLEX.NS",
-    "IPCALAB.NS","JKCEMENT.NS","RAMCOCEM.NS","SHREECEM.NS","AMBUJACEM.NS",
-    "ACC.NS","GODREJCP.NS","EMAMILTD.NS","JYOTHYLAB.NS","MARICO.NS",
-    "TATAPOWER.NS","TORNTPOWER.NS","CESC.NS","JSW ENERGY.NS","ADANIGREEN.NS",
-    "RECLTD.NS","PFC.NS","IRFC.NS","HUDCO.NS","NHPC.NS",
+    "IRCTC.NS","CONCOR.NS","ZOMATO.NS","NYKAA.NS","POLICYBZR.NS",
+    "DMART.NS","TRENT.NS","ABFRL.NS","BATAINDIA.NS","VMART.NS",
+    "SHOPERSTOP.NS","JUBLFOOD.NS","WESTLIFE.NS","DEVYANI.NS","SAPPHIRE.NS",
+    "VGUARD.NS","BLUESTARCO.NS","VOLTAS.NS","SYMPHONY.NS","RAJESHEXPO.NS",
+    # ── Cement ────────────────────────────────────────────────────────────────
+    "JKCEMENT.NS","RAMCOCEM.NS","SHREECEM.NS","AMBUJACEM.NS","ACC.NS",
+    "DALMIA.NS","HEIDELBERG.NS","BIRLACORP.NS",
+    # ── FMCG & Consumer Staples ───────────────────────────────────────────────
+    "GODREJCP.NS","EMAMILTD.NS","JYOTHYLAB.NS","MARICO.NS","COLPAL.NS",
+    "VBL.NS","TATACONSUM.NS",
+    # ── Power & Utilities ─────────────────────────────────────────────────────
+    "TATAPOWER.NS","TORNTPOWER.NS","CESC.NS","JSWENERGY.NS","ADANIGREEN.NS",
+    "RECLTD.NS","PFC.NS","IRFC.NS","NHPC.NS","SJVN.NS","HUDCO.NS",
+    # ── Metals & Mining ───────────────────────────────────────────────────────
     "SAIL.NS","NATIONALUM.NS","VEDL.NS","HINDZINC.NS","MOIL.NS",
-    "APLAPOLLO.NS","RATNAMANI.NS","WELSPUNIND.NS","GPIL.NS","JINDALSAW.NS",
-    "DEEPAKNITR.NS","AARTI.NS","NAVINFLUOR.NS","SRF.NS","PIIND.NS",
+    "APLAPOLLO.NS","RATNAMANI.NS","WELSPUNLIV.NS","GPIL.NS","JINDALSAW.NS",
+    # ── Chemicals & Specialty ────────────────────────────────────────────────
+    "DEEPAKNITRITE.NS","AARTIIND.NS","NAVINFLUOR.NS","SRF.NS","PIIND.NS",
+    "VINATIORG.NS","FINEORG.NS","ALKYLAMINE.NS","ROSSARI.NS","ANUPAMRAS.NS",
+    # ── Fertilizers & Agro ────────────────────────────────────────────────────
     "CHAMBLFERT.NS","COROMANDEL.NS","GSFC.NS","GNFC.NS","RCF.NS",
-    "BATAINDIA.NS","VMART.NS","SHOPERSTOP.NS","RAJESHEXPO.NS","TITAN.NS",
-    "JUBLFOOD.NS","WESTLIFE.NS","DEVYANI.NS","SAPPHIRE.NS","BARBEQUE.NS",
-    "VGUARD.NS","BLUESTARCO.NS","VOLTAS.NS","WHIRLPOOL.NS","SYMPHONY.NS",
+    # ── Infrastructure & Capital Goods ───────────────────────────────────────
+    "SUPREMEIND.NS","PRINCEPIPE.NS","FINOLEXCAB.NS","KEI.NS","ASTRAZEN.NS",
+    "NCC.NS","KEC.NS","KALPATARU.NS","ENGINERSIN.NS","TITAGARH.NS",
+    # ── Hospitality & QSR ────────────────────────────────────────────────────
+    "BARBEQUE-N.NS","INDHOTEL.NS","LEMONTREE.NS","CHALET.NS",
 ]
 
-# De-duplicate while preserving order
-_seen: set = set()
-NIFTY500_SYMBOLS = [
-    s for s in NIFTY500_SYMBOLS
-    if not (s in _seen or _seen.add(s))  # type: ignore[func-returns-value]
-]
+# De-duplicate, exclude bad symbols, and resolve known corrections
+from data.symbol_map import clean_symbol_list  # noqa: E402
+NIFTY500_SYMBOLS = clean_symbol_list(NIFTY500_SYMBOLS)
 
 
 def fetch_nifty500_symbols() -> list[str]:
@@ -140,7 +160,7 @@ def fetch_nifty500_symbols() -> list[str]:
                     symbols.append(sym + ".NS")
         if len(symbols) >= 200:
             log.info("Fetched %d NIFTY 500 symbols from NSE", len(symbols))
-            return symbols
+            return clean_symbol_list(symbols)   # resolve + deduplicate
     except Exception as exc:
         log.warning("NSE NIFTY500 fetch failed, using hardcoded list: %s", exc)
     return list(NIFTY500_SYMBOLS)
