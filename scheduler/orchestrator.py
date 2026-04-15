@@ -193,18 +193,33 @@ def _format_agent_outputs(
 
 def _extract_json(text: str) -> dict:
     """
-    Extract and parse the first JSON object from Claude's response.
+    Extract and parse the first complete JSON object from Claude's response.
+
+    Strategy: find the first '{' and the LAST '}' in the text (or fenced block)
+    rather than relying on regex greediness, which breaks on nested structures.
     Handles ```json ... ``` fences and bare JSON objects.
     """
-    # Fenced block
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    def _parse_between_outer_braces(s: str) -> dict:
+        """Slice from first '{' to last '}' and parse as JSON."""
+        start = s.find("{")
+        end   = s.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("No JSON object delimiters found")
+        return json.loads(s[start : end + 1])
+
+    # 1. Prefer a fenced ```json ... ``` block — strip the fence first
+    m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
     if m:
-        return json.loads(m.group(1))
-    # Bare JSON object
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if m:
-        return json.loads(m.group(0))
-    raise ValueError("No JSON object found in Claude response")
+        try:
+            return _parse_between_outer_braces(m.group(1))
+        except (ValueError, json.JSONDecodeError):
+            pass   # fall through to bare-object search
+
+    # 2. Bare JSON object anywhere in the text
+    try:
+        return _parse_between_outer_braces(text)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"No valid JSON object found in Claude response: {exc}") from exc
 
 
 def _fallback_synthesis(
@@ -601,11 +616,16 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                     valuation.get("current_price") if isinstance(valuation, dict) else None
                 ) or "N/A"
 
-                prompt = prompt_template.format(
-                    symbol=symbol,
-                    agent_outputs=agent_text,
-                    composite_score=f"{composite:.1f}",
-                    current_price=current_price,
+                # Use explicit .replace() instead of str.format() so that the
+                # literal { } braces in the JSON example block inside the prompt
+                # template are NOT misinterpreted as Python format placeholders,
+                # which would raise KeyError on keys like '\n  "bull_case"'.
+                prompt = (
+                    prompt_template
+                    .replace("{symbol}",          str(symbol))
+                    .replace("{agent_outputs}",   agent_text)
+                    .replace("{composite_score}", f"{composite:.1f}")
+                    .replace("{current_price}",   str(current_price))
                 )
 
                 log.info("[%s] Calling Claude Sonnet for synthesis...", symbol)
@@ -620,11 +640,12 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 try:
                     synthesis_data = _extract_json(raw_text)
                     log.info("[%s] Claude synthesis parsed OK", symbol)
-                except (ValueError, json.JSONDecodeError) as parse_err:
+                except (ValueError, json.JSONDecodeError, KeyError) as parse_err:
                     log.warning(
                         "[%s] Claude JSON parse failed (%s) — using fallback",
                         symbol, parse_err,
                     )
+                    log.debug("[%s] Raw Claude response: %.500s", symbol, raw_text)
                     synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
             else:
                 synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
