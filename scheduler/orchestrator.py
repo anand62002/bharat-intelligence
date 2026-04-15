@@ -408,7 +408,18 @@ async def load_symbols_node(state: OrchestratorState) -> dict:
     1. WATCHLIST env var (comma-separated symbols)
     2. OPEN positions in Supabase portfolio_holdings table
     Symbols are resolved via symbol_map and deduplicated.
+
+    If state["symbols"] is already populated (via symbols_override in
+    run_pipeline), this node is a no-op — it preserves the pre-validated list.
     """
+    # Override path: symbols were pre-validated in run_pipeline()
+    if state["symbols"]:
+        log.info(
+            "Symbol override active — skipping env/portfolio load. "
+            "Analysing: %s", state["symbols"],
+        )
+        return {}   # return empty dict = keep existing state unchanged
+
     symbols: set[str] = set()
 
     # 1. WATCHLIST env var
@@ -824,13 +835,45 @@ def _build_graph():
 # Pipeline entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def run_pipeline(dry_run: bool = False) -> OrchestratorState:
-    """Execute the full orchestration pipeline once and return the final state."""
+async def run_pipeline(
+    dry_run:          bool       = False,
+    symbols_override: list[str]  | None = None,
+) -> OrchestratorState:
+    """
+    Execute the full orchestration pipeline once and return the final state.
+
+    Args:
+        dry_run:          If True, skip all Supabase writes and print results.
+        symbols_override: If provided, skip env/portfolio loading and analyse
+                          exactly these symbols. Useful for ad-hoc testing of
+                          a single stock without touching WATCHLIST or the DB.
+                          Example: symbols_override=["PREMEXPLN.NS"]
+    """
     graph = _build_graph()
+
+    # Resolve and validate any override symbols up-front
+    preloaded: list[str] = []
+    if symbols_override:
+        from data.symbol_map import is_excluded, resolve_yf  # noqa: E402
+        for raw in symbols_override:
+            sym = raw.strip().upper()
+            if not (sym.endswith(".NS") or sym.endswith(".BO")):
+                sym += ".NS"
+            if is_excluded(sym):
+                log.warning("--symbol %s is in excluded list, skipping", sym)
+                continue
+            resolved = resolve_yf(sym)
+            if resolved:
+                preloaded.append(resolved)
+                log.info("Symbol override: %s -> %s", raw, resolved)
+            else:
+                log.warning("--symbol %s could not be resolved, skipping", sym)
 
     initial_state: OrchestratorState = {
         "dry_run":           dry_run,
-        "symbols":           [],
+        # If a pre-validated override list exists, put it directly in symbols
+        # so load_symbols_node knows to skip its own loading logic.
+        "symbols":           preloaded,
         "agent_weights":     {},
         "symbol_results":    {},
         "recommendations":   [],
@@ -853,9 +896,11 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python scheduler/orchestrator.py              # start 06:00 IST scheduler
-  python scheduler/orchestrator.py --run-now    # run immediately, save to DB
-  python scheduler/orchestrator.py --run-now --dry   # full analysis, no DB writes
+  python scheduler/orchestrator.py                          # start 06:00 IST scheduler
+  python scheduler/orchestrator.py --run-now                # run immediately, save to DB
+  python scheduler/orchestrator.py --run-now --dry          # full analysis, no DB writes
+  python scheduler/orchestrator.py --symbol PREMEXPLN.NS    # ad-hoc dry run, single symbol
+  python scheduler/orchestrator.py --symbol RELIANCE.NS --symbol TCS.NS  # multiple symbols
         """,
     )
     parser.add_argument(
@@ -866,11 +911,35 @@ Examples:
         "--dry", action="store_true",
         help="Dry run: full analysis but no Supabase writes; prints results to stdout",
     )
+    parser.add_argument(
+        "--symbol",
+        action="append",
+        dest="symbols",
+        metavar="SYMBOL",
+        help=(
+            "Analyse a specific symbol (NSE ticker, e.g. PREMEXPLN.NS). "
+            "Can be repeated for multiple symbols. "
+            "Implicitly enables --run-now and --dry; "
+            "ignores WATCHLIST env var and portfolio holdings."
+        ),
+    )
     args = parser.parse_args()
 
+    # --symbol implies --run-now and --dry automatically
+    if args.symbols:
+        args.run_now = True
+        args.dry     = True
+
     if args.run_now:
-        log.info("Starting pipeline immediately (dry=%s)...", args.dry)
-        final = asyncio.run(run_pipeline(dry_run=args.dry))
+        dry_label = " [DRY RUN]" if args.dry else ""
+        sym_label = f" symbols={args.symbols}" if args.symbols else ""
+        log.info("Starting pipeline immediately%s%s...", dry_label, sym_label)
+        final = asyncio.run(
+            run_pipeline(
+                dry_run=args.dry,
+                symbols_override=args.symbols or None,
+            )
+        )
         if final.get("errors"):
             log.warning(
                 "%d error(s) during run:\n  %s",
