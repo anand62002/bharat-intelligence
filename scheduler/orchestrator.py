@@ -774,16 +774,13 @@ async def monitor_node(state: OrchestratorState) -> dict:
         return {}
 
     try:
-        from agents import portfolio_monitor  # noqa: F401
-        if hasattr(portfolio_monitor, "run"):
-            await asyncio.to_thread(portfolio_monitor.run)
-            log.info("Portfolio monitor triggered successfully")
-        else:
-            log.warning("portfolio_monitor.run() not found — skipping trigger")
+        from scheduler import portfolio_monitor  # noqa: F401
+        await asyncio.to_thread(portfolio_monitor.run)
+        log.info("Portfolio monitor triggered successfully")
     except ImportError:
-        log.info("portfolio_monitor not yet implemented — skipping")
+        log.warning("portfolio_monitor module not found — skipping trigger")
     except Exception as exc:
-        log.warning("portfolio monitor trigger failed: %s", exc)
+        log.warning("Portfolio monitor trigger failed: %s", exc)
 
     return {}
 
