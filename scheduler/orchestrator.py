@@ -7,7 +7,7 @@ runs a Claude Sonnet bull-bear synthesis, and saves recommendations.
 Schedule  : 06:00 IST (Asia/Kolkata) daily via APScheduler
 Pipeline  : (LangGraph nodes, run sequentially)
   load_symbols  →  load_weights  →  run_agents  →  synthesise
-  →  save_recs  →  monitor       →  log_run
+  →  fact_check  →  save_recs  →  monitor       →  log_run
 
 Agents run in two async phases per symbol:
   Phase 1 (parallel): technical, fundamental, sentiment
@@ -15,9 +15,10 @@ Agents run in two async phases per symbol:
   Pre-fetched (once): macro, commodities  (symbol-agnostic)
 
 Usage:
-    python scheduler/orchestrator.py                   # start 06:00 IST scheduler
-    python scheduler/orchestrator.py --run-now         # fire once immediately
-    python scheduler/orchestrator.py --run-now --dry   # dry run, no DB writes
+    python scheduler/orchestrator.py                         # start 06:00 IST scheduler
+    python scheduler/orchestrator.py --run-now               # fire once immediately
+    python scheduler/orchestrator.py --run-now --dry         # dry run, no DB writes
+    python scheduler/orchestrator.py --symbol PREMEXPLN.NS   # ad-hoc single symbol
 """
 
 import argparse
@@ -666,6 +667,39 @@ async def synthesise_node(state: OrchestratorState) -> dict:
     return {"recommendations": recommendations, "errors": errors}
 
 
+async def fact_check_node(state: OrchestratorState) -> dict:
+    """
+    Run the governance fact-checker against all synthesised recommendations.
+    Verifies 5–8 numerical claims per recommendation using Claude Haiku,
+    applies confidence penalties for CONTRADICTED claims, and withholds
+    recommendations with too many unverifiable claims.
+
+    In --dry mode, Haiku checks still run (no DB writes from fact_checker itself).
+    This node is a no-op if the governance module is unavailable.
+    """
+    recommendations = state["recommendations"]
+    symbol_results  = state["symbol_results"]
+
+    if not recommendations:
+        return {}
+
+    try:
+        from governance import fact_checker  # noqa: F401
+        log.info("Running governance fact-check on %d recommendations...", len(recommendations))
+        checked = fact_checker.check_recommendations(
+            recommendations,
+            symbol_results,
+            dry_run=state["dry_run"],
+        )
+        return {"recommendations": checked}
+    except ImportError:
+        log.warning("governance.fact_checker not available — skipping fact-check node")
+        return {}
+    except Exception as exc:
+        log.warning("Fact-check node failed: %s", exc)
+        return {}
+
+
 async def save_recs_node(state: OrchestratorState) -> dict:
     """
     Persist recommendations to the Supabase recommendations table.
@@ -717,6 +751,24 @@ async def save_recs_node(state: OrchestratorState) -> dict:
             synthesis = rec.get("summary", "")
             if synthesis:
                 print(f"\n   Synthesis:\n      {synthesis}")
+            # Governance fact-check summary
+            gov = rec.get("gov_check")
+            if gov and isinstance(gov, dict):
+                n_checked     = gov.get("claims_checked", 0)
+                n_verified    = gov.get("verified_count", 0)
+                n_contradicted= gov.get("contradicted_count", 0)
+                n_unverified  = gov.get("unverified_count", 0)
+                withheld      = gov.get("withheld", False)
+                conf_delta    = gov.get("confidence_delta", 0)
+                gov_line = (
+                    f"   Gov check       : {n_verified}/{n_checked} verified, "
+                    f"{n_contradicted} contradicted, {n_unverified} unverified"
+                )
+                if conf_delta != 0:
+                    gov_line += f"  (conf delta {conf_delta:+.0f})"
+                if withheld:
+                    gov_line += "  [WITHHELD]"
+                print(gov_line)
             print()
         print(sep)
         return {"saved_ids": [], "errors": errors}
@@ -735,7 +787,7 @@ async def save_recs_node(state: OrchestratorState) -> dict:
         "horizon_days", "upside_pct", "upside_confidence",
         "danger_drop_pct", "danger_confidence",
         "headline", "summary", "agent_signals", "is_discovery",
-        "valid_till",
+        "valid_till", "gov_check",
     }
 
     saved_ids: list[str] = []
@@ -833,6 +885,7 @@ def _build_graph():
     builder.add_node("load_weights", load_weights_node)
     builder.add_node("run_agents",   run_agents_node)
     builder.add_node("synthesise",   synthesise_node)
+    builder.add_node("fact_check",   fact_check_node)
     builder.add_node("save_recs",    save_recs_node)
     builder.add_node("monitor",      monitor_node)
     builder.add_node("log_run",      log_run_node)
@@ -841,7 +894,8 @@ def _build_graph():
     builder.add_edge("load_symbols", "load_weights")
     builder.add_edge("load_weights", "run_agents")
     builder.add_edge("run_agents",   "synthesise")
-    builder.add_edge("synthesise",   "save_recs")
+    builder.add_edge("synthesise",   "fact_check")
+    builder.add_edge("fact_check",   "save_recs")
     builder.add_edge("save_recs",    "monitor")
     builder.add_edge("monitor",      "log_run")
     builder.add_edge("log_run",      END)
