@@ -7,6 +7,16 @@ Entry point: analyse() -> dict
 
 Returns per-commodity signal + an overall commodities macro view.
 Critical gold upside flag: Fed cutting + DXY falling + INR depreciating + central bank buying.
+
+Ticker strategy
+───────────────
+  Gold    : GC=F  (NYMEX USD)  primary; GOLDBEES.NS  (NSE INR ETF) preferred
+  Crude   : BZ=F  (ICE Brent)  primary; CL=F  (NYMEX WTI) fallback
+            India crude imports are Brent-benchmarked; WTI is a secondary proxy.
+            CRUDEOIL.NS is NOT a valid yfinance ticker (NSE lists MCX derivatives,
+            not directly on yfinance) — removed.
+  Silver  : SI=F  (NYMEX USD)
+  INR/USD : USDINR=X
 """
 
 import logging
@@ -44,9 +54,14 @@ def _fetch_ohlcv(ticker: str, period: str = "3mo") -> Optional[object]:
 
 
 def _latest_price(df) -> Optional[float]:
+    """Return the most recent valid (non-NaN) closing price, or None."""
     if df is None or df.empty:
         return None
-    return float(df["Close"].iloc[-1])
+    close = df["Close"].dropna()
+    if close.empty:
+        return None
+    val = float(close.iloc[-1])
+    return val if val == val else None   # NaN guard (NaN != NaN)
 
 
 def _trend_50d(df) -> Optional[float]:
@@ -419,43 +434,85 @@ def analyse() -> dict:
     data_sources: list[str] = []
 
     # ── 1. Fetch OHLCV data ────────────────────────────────────────────────────
-    gold_df    = _fetch_ohlcv("GC=F",         period="3mo")   # USD gold futures
-    crude_df   = _fetch_ohlcv("CL=F",         period="3mo")   # USD crude futures
-    silver_df  = _fetch_ohlcv("SI=F",         period="3mo")   # USD silver futures
-    inr_df     = _fetch_ohlcv("USDINR=X",     period="3mo")   # INR/USD
-    goldbees_df = _fetch_ohlcv("GOLDBEES.NS", period="3mo")   # INR gold ETF
-    crudeoil_df = _fetch_ohlcv("CRUDEOIL.NS", period="3mo")   # INR crude ETF
+    # Gold: prefer INR-denominated NSE ETF, fall back to USD futures
+    gold_df      = _fetch_ohlcv("GC=F",         period="3mo")   # NYMEX USD gold futures
+    goldbees_df  = _fetch_ohlcv("GOLDBEES.NS",  period="3mo")   # NSE INR gold ETF
 
-    if any(df is not None for df in [gold_df, crude_df, silver_df]):
+    # Crude: try Brent (BZ=F) first since India imports are Brent-benchmarked.
+    # BZ=F can sometimes return calendar-spread or far-month contract data with
+    # distorted prices; we sanity-check against WTI (CL=F) and fall back when
+    # the Brent/WTI ratio is outside the historically plausible 0.8–1.4 band.
+    # CRUDEOIL.NS is NOT a valid yfinance symbol (NSE MCX derivatives) — removed.
+    brent_df     = _fetch_ohlcv("BZ=F",         period="3mo")   # ICE Brent crude
+    wti_df       = _fetch_ohlcv("CL=F",         period="3mo")   # NYMEX WTI crude
+
+    silver_df    = _fetch_ohlcv("SI=F",         period="3mo")   # NYMEX USD silver futures
+    inr_df       = _fetch_ohlcv("USDINR=X",     period="3mo")   # USD/INR spot
+
+    if any(df is not None for df in [gold_df, brent_df, wti_df, silver_df]):
         data_sources.append("yfinance_commodities")
     if inr_df is not None:
         data_sources.append("yfinance_usdinr")
-    if goldbees_df is not None or crudeoil_df is not None:
+    if goldbees_df is not None:
         data_sources.append("yfinance_india_etf")
 
     # ── 2. Derived values ─────────────────────────────────────────────────────
-    # Prefer INR-denominated ETF for Indian investor perspective; fall back to USD
-    gold_price   = _latest_price(goldbees_df) or _latest_price(gold_df)
-    crude_price  = _latest_price(crudeoil_df) or _latest_price(crude_df)
-    silver_price = _latest_price(silver_df)
+    # Helper: use first non-None, non-NaN value.
+    # Avoids two bugs:
+    #   (a) `x or fallback` incorrectly drops x when x == 0.0 (falsy but valid)
+    #   (b) NaN values from yfinance dividend-adjustment artifacts pass `is not None`
+    def _first(*vals):
+        import math
+        for v in vals:
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                return v
+        return None
 
-    gold_trend   = _trend_50d(goldbees_df) or _trend_50d(gold_df)
-    crude_trend  = _trend_50d(crudeoil_df) or _trend_50d(crude_df)
+    # Gold: prefer GOLDBEES.NS (INR-denominated) then GC=F (USD)
+    gold_price  = _first(_latest_price(goldbees_df), _latest_price(gold_df))
+    gold_trend  = _first(_trend_50d(goldbees_df),    _trend_50d(gold_df))
+
+    # Crude: prefer Brent, but sanity-check the price ratio vs WTI.
+    # Brent/WTI ratio is historically 0.85–1.25. If outside 0.75–1.40,
+    # the BZ=F data is likely a stale far-month contract — use WTI instead.
+    brent_px = _latest_price(brent_df)
+    wti_px   = _latest_price(wti_df)
+    _use_brent = False
+    if brent_px is not None and wti_px is not None and wti_px > 0:
+        ratio = brent_px / wti_px
+        _use_brent = (0.75 <= ratio <= 1.40)
+        if not _use_brent:
+            log.warning(
+                "BZ=F Brent/WTI ratio %.2f out of plausible range (%.2f/%.2f) — "
+                "falling back to WTI (CL=F)",
+                ratio, brent_px, wti_px,
+            )
+    elif brent_px is not None and wti_px is None:
+        _use_brent = True   # WTI unavailable, use whatever Brent gives us
+
+    if _use_brent:
+        crude_price  = brent_px
+        crude_trend  = _trend_50d(brent_df)
+        crude_source = "Brent (BZ=F)"
+    else:
+        crude_price  = wti_px
+        crude_trend  = _trend_50d(wti_df)
+        crude_source = "WTI (CL=F)"
+
+    silver_price = _latest_price(silver_df)
     silver_trend = _trend_50d(silver_df)
-    dxy_trend    = _trend_50d(inr_df)    # USDINR trend serves as DXY proxy for India
 
     inr_usd = _latest_price(inr_df)
 
     # INR trend: positive = depreciation (more INR per USD)
     inr_trend_pct = _trend_50d(inr_df)
 
-    # DXY proxy: use gold USD trend — a falling DXY usually = rising USD gold
-    # We use inr_df to detect USD strength trend
-    dxy_falling_trend = inr_trend_pct  # if USDINR rising, USD is NOT falling — see logic below
-    # Clarify: if USDINR is falling (INR strengthening), that means DXY is weakening
+    # DXY proxy: if USDINR is falling (INR strengthening) → USD weakening
     dxy_proxy_trend = (-inr_trend_pct) if inr_trend_pct is not None else None
 
-    gold_corr   = _inr_correlation(goldbees_df if goldbees_df is not None else gold_df, inr_df)
+    gold_corr   = _inr_correlation(
+        goldbees_df if goldbees_df is not None else gold_df, inr_df
+    )
     silver_corr = _inr_correlation(silver_df, inr_df)
 
     gold_season   = _seasonal_month_bias("gold")
@@ -512,6 +569,7 @@ def analyse() -> dict:
                 "inr_usd":   inr_usd,
                 "seasonal":  crude_season,
                 "detail":    c_note,
+                "source":    crude_source,
                 "agent_name": AGENT_NAME,
             },
             "silver": {
