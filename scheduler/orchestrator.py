@@ -301,7 +301,7 @@ def _build_recommendation(
     entry_high  = _f("entry_high", valuation.get("entry_high"))
     target      = _f("target",     valuation.get("target"), targets.get("target"))
     stoploss    = _f("stoploss",   targets.get("stoploss"))
-    horizon_days      = int(synthesis_data.get("horizon_days", 180))
+    horizon_days      = int(synthesis_data.get("horizon_days") or 180)
     upside_pct        = float(synthesis_data.get("upside_pct",
                               fund.get("upside_pct") or tech.get("upside_pct") or 0))
     upside_confidence = float(synthesis_data.get("upside_confidence", confidence))
