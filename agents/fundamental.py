@@ -168,12 +168,30 @@ EV_EBITDA_SECTORS: frozenset[str] = frozenset({
     "diversified",
 })
 
+# Banking/NBFC sectors where Price/Book Value (P/B) is the primary valuation
+# metric. P/B captures the premium investors pay over tangible book value.
+# For banks, ROE drives P/B: a bank sustaining ROE > 15% commands 3–4x P/B;
+# a PSU bank at 8% ROE trades near 0.8–1.2x P/B.
+BANKING_SECTORS: frozenset[str] = frozenset({
+    "banking", "bank", "nbfc", "financial services", "finance",
+})
+
+# Sector median P/B benchmarks (NSE 2024-2026 calibration)
+SECTOR_PB_MAP: dict[str, float] = {
+    "banking":            1.8,   # HDFC Bank 3.5x, SBI 1.5x, PSU banks 0.8-1.2x
+    "bank":               1.8,
+    "nbfc":               2.5,   # Bajaj Finance 5x; lower-quality 1-2x; blended
+    "financial services": 2.5,
+    "finance":            2.2,
+}
+
 # Danger drop estimates (median historical drawdown from current price)
 # calibrated against NSE events: IL&FS, DHFL, ADAG, Videocon, Suzlon, JSPL
+# CRITICAL now fires when >= 3 primary triggers hit (ICR < 1 added as 4th possible)
 _DANGER_DROP: dict[str, tuple[float, float]] = {
-    "CRITICAL": (55.0, 0.82),   # all 3 triggers: rev -30%+ & D/E>3 & pledging>50%
-    "WARNING":  (30.0, 0.55),   # 2 of 3 triggers
-    "WATCH":    (15.0, 0.30),   # 1 trigger present
+    "CRITICAL": (55.0, 0.82),   # >= 3 primary triggers
+    "WARNING":  (30.0, 0.55),   # 2 primary triggers
+    "WATCH":    (15.0, 0.30),   # 1 primary trigger
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -184,11 +202,19 @@ def _score_growth(
     revenue_growth: Optional[float],
     revenue_growth_qoq: Optional[float],
     roce: Optional[float],
+    *,
+    roe: Optional[float] = None,
 ) -> tuple[int, str]:
     """
-    growth_quality — max 25 pts
+    growth_quality — max 25 pts (capped)
       Revenue YoY:  0/5/10/15 pts
-      ROCE quality: 0/5/10 pts
+      ROCE quality: 0/3/4/7/10 pts
+      ROE quality:  0/1/3/5 bonus pts (keyword-only; supplements ROCE)
+
+    ROE cross-validates ROCE. ROCE measures returns on total capital (equity +
+    debt); ROE measures returns to equity shareholders only. For banking sectors
+    ROE is the primary profitability metric; for all others it flags whether
+    leverage is being used to manufacture returns artificially.
     """
     score = 0
     notes: list[str] = []
@@ -209,7 +235,7 @@ def _score_growth(
     else:
         notes.append(f"Revenue contraction {revenue_growth:.1f}% YoY")
 
-    # QoQ momentum bonus (max 5 pts via ROCE path — logged only)
+    # QoQ momentum (informational note, no pts)
     if revenue_growth_qoq is not None:
         if revenue_growth_qoq >= 5:
             notes.append(f"QoQ revenue acceleration +{revenue_growth_qoq:.1f}%")
@@ -232,6 +258,21 @@ def _score_growth(
     else:
         notes.append(f"Weak ROCE {roce:.1f}%")
 
+    # ROE — capital efficiency supplementary check (max 5 bonus pts)
+    # Scores within existing 25-pt cap; does not expand the ceiling.
+    if roe is not None:
+        if roe >= 20:
+            score += 5
+            notes.append(f"Excellent ROE {roe:.1f}%")
+        elif roe >= 15:
+            score += 3
+            notes.append(f"Good ROE {roe:.1f}%")
+        elif roe >= 10:
+            score += 1
+            notes.append(f"Moderate ROE {roe:.1f}%")
+        else:
+            notes.append(f"Weak ROE {roe:.1f}%")
+
     return min(score, 25), "; ".join(notes)
 
 
@@ -242,20 +283,28 @@ def _score_profitability(
     ev_ebitda: Optional[float] = None,
     sector_ev_ebitda: Optional[float] = None,
     prefer_ev_ebitda: bool = False,
+    *,
+    peg_ratio: Optional[float] = None,
+    fcf_yield: Optional[float] = None,
+    pat_margin: Optional[float] = None,
+    pb_ratio: Optional[float] = None,
+    sector_pb: Optional[float] = None,
+    prefer_pb: bool = False,
 ) -> tuple[int, str]:
     """
-    profitability — max 25 pts
-      EBITDA margin:              0/5/10/15 pts
-      Valuation vs sector:        0/5/10 pts
+    profitability — max 25 pts (capped)
+      EBITDA margin:        0/5/8/12/15 pts
+      Valuation vs sector:  0/2/5/7/10 pts   (P/E | EV/EBITDA | P/B depending on sector)
+      PEG adjustment:       ±2 pts modifier   (when P/E scoring is active)
+      FCF yield:            0/1/3/5 bonus pts (earnings quality)
+      PAT margin:           informational note + 0/−2 pts for loss-making
 
-    Valuation metric selection (10-pt sub-score):
-      - If prefer_ev_ebitda=True (sector is EV/EBITDA-native) AND ev_ebitda data
-        is available → score on EV/EBITDA vs sector_ev_ebitda.
-      - If P/E is negative/None AND ev_ebitda is available → fallback to EV/EBITDA.
-      - Otherwise → score on P/E vs sector_pe (original behaviour).
+    Valuation metric priority:
+      1. P/B  — when prefer_pb=True (banking/NBFC) and pb_ratio available
+      2. EV/EBITDA — when prefer_ev_ebitda=True (telecom, metals, etc.) or P/E ≤ 0
+      3. P/E  — default for all other sectors
 
-    This prevents Airtel/Reliance-style misscores where heavy amortisation /
-    conglomerate blending makes P/E meaningless while EBITDA is robust.
+    All sub-scores sum within the 25-pt cap.
     """
     score = 0
     notes: list[str] = []
@@ -279,21 +328,67 @@ def _score_profitability(
     else:
         notes.append(f"Very thin/negative EBITDA margin {ebitda_margin:.1f}%")
 
+    # ── PAT (net profit) margin — earnings quality note ───────────────────────
+    # A large EBITDA-PAT spread signals heavy interest expense or depreciation.
+    # Negative PAT margin = loss-making after all costs.
+    if pat_margin is not None:
+        if pat_margin >= 15:
+            notes.append(f"Healthy net margin {pat_margin:.1f}%")
+        elif pat_margin >= 5:
+            notes.append(f"Moderate net margin {pat_margin:.1f}%")
+        elif pat_margin >= 0:
+            notes.append(f"Thin net margin {pat_margin:.1f}%")
+        else:
+            score -= 2
+            notes.append(f"Negative net margin {pat_margin:.1f}% — loss-making")
+
     # ── Valuation vs sector (max 10 pts) ─────────────────────────────────────
-    # Decide which metric to use
+    # Priority: P/B for banking → EV/EBITDA for capex-heavy → P/E default
+    _use_pb = (
+        prefer_pb
+        and pb_ratio is not None and pb_ratio > 0
+        and sector_pb is not None
+    )
     _use_ev = (
-        ev_ebitda is not None
-        and ev_ebitda > 0
+        not _use_pb
+        and ev_ebitda is not None and ev_ebitda > 0
         and sector_ev_ebitda is not None
-        and (
-            prefer_ev_ebitda              # sector natively uses EV/EBITDA
-            or (pe is None or pe <= 0)    # P/E unavailable → EV/EBITDA fallback
-        )
+        and (prefer_ev_ebitda or (pe is None or pe <= 0))
     )
 
-    if _use_ev:
+    if _use_pb:
+        # P/B valuation scoring — primary for banking/NBFC
+        assert sector_pb is not None
+        if pb_ratio <= sector_pb * 0.70:
+            score += 10
+            notes.append(
+                f"Deep value: P/B {pb_ratio:.1f}x vs sector {sector_pb:.1f}x"
+            )
+        elif pb_ratio <= sector_pb * 0.90:
+            score += 7
+            notes.append(
+                f"Undervalued: P/B {pb_ratio:.1f}x vs sector {sector_pb:.1f}x"
+            )
+        elif pb_ratio <= sector_pb * 1.10:
+            score += 5
+            notes.append(
+                f"Fairly valued: P/B {pb_ratio:.1f}x ~ sector {sector_pb:.1f}x"
+            )
+        elif pb_ratio <= sector_pb * 1.40:
+            score += 2
+            notes.append(
+                f"Slight premium: P/B {pb_ratio:.1f}x vs sector {sector_pb:.1f}x"
+            )
+        else:
+            notes.append(
+                f"Expensive: P/B {pb_ratio:.1f}x >> sector {sector_pb:.1f}x"
+            )
+        if pe is not None and pe > 0:
+            notes.append(f"(P/E {pe:.1f}x for reference; P/B used for scoring)")
+
+    elif _use_ev:
         # EV/EBITDA valuation scoring
-        assert sector_ev_ebitda is not None  # guaranteed by _use_ev condition
+        assert sector_ev_ebitda is not None
         if ev_ebitda <= sector_ev_ebitda * 0.70:
             score += 10
             notes.append(
@@ -320,8 +415,9 @@ def _score_profitability(
             )
         if pe is not None and pe > 0:
             notes.append(f"(P/E {pe:.1f}x shown for reference; EV/EBITDA used for scoring)")
+
     else:
-        # P/E valuation scoring (original behaviour)
+        # P/E valuation scoring (default)
         if pe is None or pe <= 0:
             score += 4
             notes.append("P/E not available (neutral)")
@@ -340,17 +436,54 @@ def _score_profitability(
         else:
             notes.append(f"Expensive: PE {pe:.1f}x >> sector {sector_pe:.0f}x")
 
+        # PEG ratio adjustment — growth context for P/E valuation (±2 pts)
+        # PEG < 0.8: quality growth at value price; PEG > 3.0: expensive for growth rate
+        if peg_ratio is not None and peg_ratio > 0:
+            if peg_ratio < 0.8:
+                score += 2
+                notes.append(f"PEG {peg_ratio:.2f} < 0.8 — quality growth at value price")
+            elif peg_ratio > 3.0:
+                score -= 2
+                notes.append(f"PEG {peg_ratio:.2f} > 3.0 — expensive relative to growth rate")
+
+    # ── FCF yield — earnings quality / cash conversion (max 5 bonus pts) ──────
+    # Positive FCF yield confirms EBITDA is backed by real cash, not accruals.
+    # FCF = None → no pts (unknown; do not inflate score for data-poor stocks)
+    if fcf_yield is not None:
+        if fcf_yield >= 5:
+            score += 5
+            notes.append(f"Strong FCF yield {fcf_yield:.1f}% — excellent cash conversion")
+        elif fcf_yield >= 3:
+            score += 3
+            notes.append(f"Good FCF yield {fcf_yield:.1f}%")
+        elif fcf_yield >= 1:
+            score += 1
+            notes.append(f"Modest FCF yield {fcf_yield:.1f}%")
+        elif fcf_yield < 0:
+            notes.append(f"Negative FCF yield {fcf_yield:.1f}% — consuming cash")
+
     return min(score, 25), "; ".join(notes)
 
 
 def _score_balance_sheet(
     debt_equity: Optional[float],
     roce: Optional[float],
+    *,
+    icr: Optional[float] = None,
+    net_debt_ebitda: Optional[float] = None,
+    current_ratio: Optional[float] = None,
 ) -> tuple[int, str]:
     """
-    balance_sheet — max 25 pts
-      D/E health:          0/6/12/18/20 pts
-      ROCE vs leverage:    0/5 bonus pts
+    balance_sheet — max 25 pts (capped), min 0 pts
+      D/E health:            0/3/7/13/18/20 pts
+      ROCE vs leverage:      0/5 bonus pts
+      ICR (Interest Coverage): penalty up to −6 pts for inability to service debt
+      Net Debt/EBITDA:       ±2/4 pts repayment horizon metric
+      Current ratio:         −2 pts penalty if < 1.0 (liquidity squeeze)
+
+    ICR < 1.0 means operating earnings cannot cover interest — a primary danger
+    signal. Net Debt/EBITDA cross-validates D/E using cash earnings, not book equity.
+    Both are keyword-only with None defaults for full backward compatibility.
     """
     score = 0
     notes: list[str] = []
@@ -387,19 +520,73 @@ def _score_balance_sheet(
         score += 5
         notes.append(f"ROCE {roce:.1f}% well above implied cost of debt")
 
-    return min(score, 25), "; ".join(notes)
+    # ── Interest Coverage Ratio (ICR = EBIT / Interest Expense) ──────────────
+    # ICR < 1 means operating profits cannot cover interest payments — this is
+    # the classic early-warning signal seen in IL&FS, Vodafone Idea, DHFL.
+    if icr is not None:
+        if icr >= 4.0:
+            score += 2
+            notes.append(f"Strong interest coverage {icr:.1f}x")
+        elif icr >= 2.0:
+            notes.append(f"Adequate interest coverage {icr:.1f}x")
+        elif icr >= 1.0:
+            score -= 3
+            notes.append(f"Thin interest coverage {icr:.1f}x — debt service risk")
+        else:
+            score -= 6
+            notes.append(f"CRITICAL: ICR {icr:.1f}x < 1.0 — cannot cover interest payments")
+
+    # ── Net Debt / EBITDA — repayment horizon ────────────────────────────────
+    # Cross-validates D/E using cash earnings rather than book equity.
+    # Net cash position (negative ND/EBITDA) is a positive quality signal.
+    if net_debt_ebitda is not None:
+        if net_debt_ebitda <= 0:
+            score += 4
+            notes.append(f"Net cash position (ND/EBITDA {net_debt_ebitda:.1f}x)")
+        elif net_debt_ebitda <= 1.5:
+            score += 2
+            notes.append(f"Low leverage ND/EBITDA {net_debt_ebitda:.1f}x")
+        elif net_debt_ebitda <= 3.0:
+            notes.append(f"Moderate leverage ND/EBITDA {net_debt_ebitda:.1f}x")
+        elif net_debt_ebitda <= 5.0:
+            score -= 2
+            notes.append(f"High leverage ND/EBITDA {net_debt_ebitda:.1f}x")
+        else:
+            score -= 4
+            notes.append(f"Very high leverage ND/EBITDA {net_debt_ebitda:.1f}x")
+
+    # ── Current ratio — short-term liquidity check ────────────────────────────
+    # Current ratio < 1.0 means current liabilities exceed current assets —
+    # a potential short-term funding stress (especially relevant for NBFCs/banks).
+    if current_ratio is not None:
+        if current_ratio >= 2.0:
+            notes.append(f"Strong liquidity current ratio {current_ratio:.1f}x")
+        elif current_ratio >= 1.0:
+            notes.append(f"Adequate liquidity current ratio {current_ratio:.1f}x")
+        else:
+            score -= 2
+            notes.append(f"Tight liquidity: current ratio {current_ratio:.1f}x < 1.0")
+
+    return max(0, min(score, 25)), "; ".join(notes)
 
 
 def _score_governance(
     promoter_holding: Optional[float],
     promoter_pledging: Optional[float],
     debt_equity: Optional[float],
+    *,
+    dividend_yield: Optional[float] = None,
 ) -> tuple[int, str]:
     """
     governance — max 25 pts (after penalties)
-      Promoter holding:     0/4/8/12/15 pts
-      Pledging adjustment:  +10 / +5 / -15 / -30 pts
+      Promoter holding:         0/2/4/8/12/15 pts
+      Pledging adjustment:      +10 / +5 / -15 / -30 pts
       D/E>2 governance penalty: -10 pts
+      Dividend yield bonus:     0/1/2/3 pts (capital allocation quality signal)
+
+    Dividend yield signals management confidence in free cash flow. Consistent
+    dividend payers (ITC, Infosys, Power Grid) demonstrate capital discipline
+    and provide an income floor for long-term holders.
     """
     score = 0
     notes: list[str] = []
@@ -447,6 +634,20 @@ def _score_governance(
         score -= 10
         notes.append(f"D/E {debt_equity:.1f}>2 governance penalty -10pts")
 
+    # Dividend yield — capital allocation quality bonus (max 3 pts)
+    # Consistent dividends signal management confidence in free cash flow
+    # sustainability. Relevant for mature compounders and PSU income stocks.
+    if dividend_yield is not None and dividend_yield > 0:
+        if dividend_yield >= 4.0:
+            score += 3
+            notes.append(f"High dividend yield {dividend_yield:.1f}% — strong income signal")
+        elif dividend_yield >= 2.0:
+            score += 2
+            notes.append(f"Healthy dividend yield {dividend_yield:.1f}%")
+        elif dividend_yield >= 0.5:
+            score += 1
+            notes.append(f"Dividend paying {dividend_yield:.1f}%")
+
     return max(0, min(score, 25)), "; ".join(notes)
 
 
@@ -459,20 +660,27 @@ def _assess_danger(
     debt_equity: Optional[float],
     promoter_pledging: Optional[float],
     ebitda_margin: Optional[float],
+    *,
+    icr: Optional[float] = None,
+    net_debt_ebitda: Optional[float] = None,
 ) -> tuple[Optional[str], Optional[float], float, list[str]]:
     """
     Returns (danger_level, danger_drop_pct, danger_confidence, trigger_list).
 
-    CRITICAL DANGER fires when ALL three primary triggers hit:
+    CRITICAL DANGER fires when >= 3 primary triggers hit (was originally 3 fixed;
+    now >= 3 to accommodate the 4th primary trigger — ICR < 1.0):
       1. Revenue YoY < -30%
       2. D/E > 3
       3. Promoter pledging > 50%
+      4. ICR < 1.0 (cannot cover interest from operating earnings) [NEW]
+
+    Net Debt/EBITDA > 5x and > 3.5x are secondary signals.
 
     Secondary signals (WARNING/WATCH) fire on partial matches or
     near-threshold combinations.
 
     danger_drop_pct is calibrated against NSE historical incidents
-    (IL&FS, DHFL, Videocon, ADAG group, Suzlon FY08, Unitech).
+    (IL&FS, DHFL, Videocon, ADAG group, Suzlon FY08, Vodafone Idea, Unitech).
     """
     triggers: list[str] = []
 
@@ -485,6 +693,10 @@ def _assess_danger(
 
     if promoter_pledging is not None and promoter_pledging > 50:
         triggers.append(f"critical_pledging_{promoter_pledging:.0f}pct")
+
+    # ICR < 1.0: operating earnings cannot cover interest payments
+    if icr is not None and icr < 1.0:
+        triggers.append(f"interest_not_covered_icr_{icr:.2f}")
 
     # ── Secondary / near-threshold signals ───────────────────────────────────
     secondary: list[str] = []
@@ -501,10 +713,16 @@ def _assess_danger(
     if ebitda_margin is not None and ebitda_margin < 3:
         secondary.append(f"near_zero_ebitda_margin_{ebitda_margin:.1f}pct")
 
+    # Net Debt/EBITDA — repayment horizon as secondary signal
+    if net_debt_ebitda is not None and net_debt_ebitda > 5.0:
+        secondary.append(f"very_high_nd_ebitda_{net_debt_ebitda:.1f}x")
+    elif net_debt_ebitda is not None and net_debt_ebitda > 3.5:
+        secondary.append(f"elevated_nd_ebitda_{net_debt_ebitda:.1f}x")
+
     n_primary = len(triggers)
     n_secondary = len(secondary)
 
-    if n_primary == 3:
+    if n_primary >= 3:
         level = "CRITICAL"
     elif n_primary == 2 or (n_primary == 1 and n_secondary >= 2):
         level = "WARNING"
@@ -666,17 +884,35 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
     if sector_key:
         sector_pe = SECTOR_PE_MAP.get(sector_key, DEFAULT_SECTOR_PE)
 
-    # ── 3. yfinance: sector lookup, EV/EBITDA metrics, current price ─────────
-    # One Ticker object shared for all yfinance calls to avoid redundant HTTP
-    # round-trips. We fetch: sector, EV/EBITDA ratio, absolute EBITDA,
-    # enterprise value, shares outstanding, debt/cash (for net debt), and
-    # latest closing price.
-    yf_sector_key       = ""
+    # ── 3. yfinance: one Ticker call fetches ALL market data ─────────────────
+    # Single Ticker object avoids redundant HTTP round-trips.
+    # Fields fetched (all from info dict unless noted):
+    #   Existing:  sector, enterpriseToEbitda, ebitda, sharesOutstanding,
+    #              totalDebt, totalCash, history(1d)
+    #   Tier 2 new: returnOnEquity, priceToBook, freeCashflow, marketCap,
+    #               profitMargins, ebit, interestExpense, dividendYield, currentRatio
+    yf_sector_key:      str            = ""
     ev_ebitda:          Optional[float] = None
     ebitda_abs:         Optional[float] = None
     shares_outstanding: Optional[float] = None
     net_debt:           Optional[float] = None
     current_price:      Optional[float] = None
+    # Tier 2 new fields
+    roe_pct:            Optional[float] = None   # Return on Equity (%)
+    pb_ratio:           Optional[float] = None   # Price / Book Value
+    fcf_yield:          Optional[float] = None   # Free Cash Flow Yield (%)
+    pat_margin:         Optional[float] = None   # Net Profit Margin (%)
+    icr:                Optional[float] = None   # Interest Coverage Ratio
+    dividend_yield_pct: Optional[float] = None   # Dividend Yield (%)
+    current_ratio:      Optional[float] = None   # Current Assets / Current Liabilities
+
+    def _safe_positive_float(val) -> Optional[float]:
+        """Parse val as float; return None if invalid or non-positive."""
+        try:
+            v = float(val)
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
 
     try:
         import yfinance as yf
@@ -690,34 +926,15 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             data_sources.append("yfinance_sector")
 
         # EV/EBITDA ratio (direct from yfinance)
-        _ev_ebitda_raw = info.get("enterpriseToEbitda")
-        if _ev_ebitda_raw is not None:
-            try:
-                _v = float(_ev_ebitda_raw)
-                if _v > 0:
-                    ev_ebitda = _v
-            except (TypeError, ValueError):
-                pass
+        ev_ebitda = _safe_positive_float(info.get("enterpriseToEbitda"))
 
         # Absolute EBITDA (needed for EV/EBITDA-based fair-value calc)
-        _ebitda_raw = info.get("ebitda")
-        if _ebitda_raw is not None:
-            try:
-                _v = float(_ebitda_raw)
-                if _v > 0:
-                    ebitda_abs = _v
-            except (TypeError, ValueError):
-                pass
+        ebitda_abs = _safe_positive_float(info.get("ebitda"))
 
         # Shares outstanding (for price-per-share in fair-value calc)
-        _shares_raw = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
-        if _shares_raw is not None:
-            try:
-                _v = float(_shares_raw)
-                if _v > 0:
-                    shares_outstanding = _v
-            except (TypeError, ValueError):
-                pass
+        shares_outstanding = _safe_positive_float(
+            info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+        )
 
         # Net debt = total debt − cash & equivalents
         try:
@@ -730,6 +947,62 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
         if ev_ebitda is not None:
             data_sources.append("yfinance_ev_ebitda")
 
+        # ── Tier 2: new financial metrics (all zero-cost — same info dict) ───
+
+        # Return on Equity — yfinance returns as decimal (0.18 = 18%)
+        _roe_raw = info.get("returnOnEquity")
+        if _roe_raw is not None:
+            try:
+                roe_pct = round(float(_roe_raw) * 100, 2)
+            except (TypeError, ValueError):
+                pass
+
+        # Price/Book Value
+        pb_ratio = _safe_positive_float(info.get("priceToBook"))
+
+        # FCF Yield = Free Cash Flow / Market Cap (expressed as %)
+        _fcf_raw    = info.get("freeCashflow")
+        _mktcap_raw = info.get("marketCap")
+        if _fcf_raw is not None and _mktcap_raw is not None:
+            try:
+                _mktcap = float(_mktcap_raw)
+                if _mktcap > 0:
+                    fcf_yield = round(float(_fcf_raw) / _mktcap * 100, 2)
+            except (TypeError, ValueError):
+                pass
+
+        # PAT (Net Profit) Margin — yfinance returns as decimal
+        _pm_raw = info.get("profitMargins")
+        if _pm_raw is not None:
+            try:
+                pat_margin = round(float(_pm_raw) * 100, 2)
+            except (TypeError, ValueError):
+                pass
+
+        # Interest Coverage Ratio = EBIT / |Interest Expense|
+        # Note: yfinance interestExpense is typically negative (it's an expense)
+        _ebit_raw    = info.get("ebit")
+        _intexp_raw  = info.get("interestExpense")
+        if _ebit_raw is not None and _intexp_raw is not None:
+            try:
+                _ebit    = float(_ebit_raw)
+                _int_exp = abs(float(_intexp_raw))
+                if _int_exp > 0:
+                    icr = round(_ebit / _int_exp, 2)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+
+        # Dividend Yield — yfinance returns as decimal (0.045 = 4.5%)
+        _dy_raw = info.get("dividendYield")
+        if _dy_raw is not None:
+            try:
+                dividend_yield_pct = round(float(_dy_raw) * 100, 2)
+            except (TypeError, ValueError):
+                pass
+
+        # Current Ratio
+        current_ratio = _safe_positive_float(info.get("currentRatio"))
+
         # Current price (dropna for dividend-adjustment NaN artefacts)
         hist = ticker.history(period="1d")
         if not hist.empty:
@@ -741,29 +1014,62 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
     except Exception as exc:
         log.debug("yfinance fetch failed for %s: %s", symbol, exc)
 
-    # ── 3b. Resolve EV/EBITDA sector benchmark and preference flag ───────────
+    # ── 3b. Resolve sector benchmarks and preference flags ───────────────────
     effective_sector  = sector_key or yf_sector_key
     sector_ev_ebitda: Optional[float] = SECTOR_EV_EBITDA_MAP.get(effective_sector) \
         if effective_sector else None
     prefer_ev_ebitda: bool = effective_sector in EV_EBITDA_SECTORS
+    sector_pb:        Optional[float] = SECTOR_PB_MAP.get(effective_sector) \
+        if effective_sector else None
+    prefer_pb:        bool = effective_sector in BANKING_SECTORS
+
+    # ── 3c. Pre-compute derived ratios (zero extra API calls) ────────────────
+    # PEG ratio: P/E ÷ revenue growth (proxy for EPS growth)
+    peg_ratio: Optional[float] = None
+    if pe is not None and pe > 0 and revenue_growth is not None and revenue_growth > 0:
+        peg_ratio = round(pe / revenue_growth, 2)
+
+    # Net Debt / EBITDA: repayment horizon cross-check
+    net_debt_ebitda: Optional[float] = None
+    if net_debt is not None and ebitda_abs is not None and ebitda_abs > 0:
+        net_debt_ebitda = round(net_debt / ebitda_abs, 2)
 
     # ── 4. Score ─────────────────────────────────────────────────────────────
-    growth_score,  growth_notes  = _score_growth(revenue_growth, revenue_growth_qoq, roce)
+    growth_score,  growth_notes  = _score_growth(
+        revenue_growth, revenue_growth_qoq, roce,
+        roe=roe_pct,
+    )
     profit_score,  profit_notes  = _score_profitability(
         ebitda_margin, pe, sector_pe,
         ev_ebitda=ev_ebitda,
         sector_ev_ebitda=sector_ev_ebitda,
         prefer_ev_ebitda=prefer_ev_ebitda,
+        peg_ratio=peg_ratio,
+        fcf_yield=fcf_yield,
+        pat_margin=pat_margin,
+        pb_ratio=pb_ratio,
+        sector_pb=sector_pb,
+        prefer_pb=prefer_pb,
     )
-    bs_score,      bs_notes      = _score_balance_sheet(debt_equity, roce)
-    gov_score,     gov_notes     = _score_governance(promoter_holding, promoter_pledging, debt_equity)
+    bs_score,      bs_notes      = _score_balance_sheet(
+        debt_equity, roce,
+        icr=icr,
+        net_debt_ebitda=net_debt_ebitda,
+        current_ratio=current_ratio,
+    )
+    gov_score,     gov_notes     = _score_governance(
+        promoter_holding, promoter_pledging, debt_equity,
+        dividend_yield=dividend_yield_pct,
+    )
 
     total_score = growth_score + profit_score + bs_score + gov_score
     total_score = max(0, min(100, total_score))
 
     # ── 5. Danger assessment ─────────────────────────────────────────────────
     danger_level, danger_drop_pct, danger_confidence, danger_triggers = _assess_danger(
-        revenue_growth, debt_equity, promoter_pledging, ebitda_margin
+        revenue_growth, debt_equity, promoter_pledging, ebitda_margin,
+        icr=icr,
+        net_debt_ebitda=net_debt_ebitda,
     )
 
     # ── 6. Signal ────────────────────────────────────────────────────────────
@@ -813,30 +1119,41 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "revenue_growth_yoy":  revenue_growth,
             "revenue_growth_qoq":  revenue_growth_qoq,
             "roce":                roce,
+            "roe":                 roe_pct,
             "notes":               growth_notes,
         },
         "profitability": {
             "score":              profit_score,
             "ebitda_margin":      ebitda_margin,
+            "pat_margin":         pat_margin,
             "pe":                 pe,
+            "peg_ratio":          peg_ratio,
             "sector_pe_used":     sector_pe,
             "ev_ebitda":          ev_ebitda,
             "sector_ev_ebitda":   sector_ev_ebitda,
             "prefer_ev_ebitda":   prefer_ev_ebitda,
+            "pb_ratio":           pb_ratio,
+            "sector_pb":          sector_pb,
+            "prefer_pb":          prefer_pb,
+            "fcf_yield":          fcf_yield,
             "valuation_method":   valuation_method,
             "notes":              profit_notes,
         },
         "balance_sheet": {
-            "score":        bs_score,
-            "debt_equity":  debt_equity,
-            "roce":         roce,
-            "notes":        bs_notes,
+            "score":            bs_score,
+            "debt_equity":      debt_equity,
+            "roce":             roce,
+            "icr":              icr,
+            "net_debt_ebitda":  net_debt_ebitda,
+            "current_ratio":    current_ratio,
+            "notes":            bs_notes,
         },
         "governance": {
             "score":              gov_score,
             "promoter_holding":   promoter_holding,
             "promoter_pledging":  promoter_pledging,
             "debt_equity":        debt_equity,
+            "dividend_yield":     dividend_yield_pct,
             "notes":              gov_notes,
         },
         "danger": {
@@ -846,6 +1163,7 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "confidence": danger_confidence,
         },
         "raw_metrics": {
+            # Screener.in sourced
             "pe":                  pe,
             "revenue_growth":      revenue_growth,
             "revenue_growth_qoq":  revenue_growth_qoq,
@@ -854,9 +1172,9 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "roce":                roce,
             "promoter_holding":    promoter_holding,
             "promoter_pledging":   promoter_pledging,
+            # yfinance sourced (existing)
             "current_price":       current_price,
             "sector_pe":           sector_pe,
-            # EV/EBITDA valuation data
             "ev_ebitda":           ev_ebitda,
             "sector_ev_ebitda":    sector_ev_ebitda,
             "ebitda_abs":          ebitda_abs,
@@ -865,6 +1183,18 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "upside_pe_pct":       upside_pe,
             "upside_ev_pct":       upside_ev,
             "valuation_method":    valuation_method,
+            # yfinance sourced (Tier 2 new)
+            "roe":                 roe_pct,
+            "pb_ratio":            pb_ratio,
+            "sector_pb":           sector_pb,
+            "fcf_yield":           fcf_yield,
+            "pat_margin":          pat_margin,
+            "icr":                 icr,
+            "net_debt_ebitda":     net_debt_ebitda,
+            "current_ratio":       current_ratio,
+            "dividend_yield":      dividend_yield_pct,
+            # Derived
+            "peg_ratio":           peg_ratio,
         },
     }
 
