@@ -41,10 +41,12 @@ AGENT_NAME = "commodities"
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _fetch_ohlcv(ticker: str, period: str = "3mo") -> Optional[object]:
-    """Return yfinance history DataFrame or None on failure."""
+    """Return yfinance history DataFrame or None on failure (with retry)."""
     try:
         import yfinance as yf
-        df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
+        from data.fetchers import yf_fetch_with_retry
+        t = yf.Ticker(ticker)
+        df = yf_fetch_with_retry(t.history, period=period, auto_adjust=True)
         if df is None or df.empty:
             return None
         return df

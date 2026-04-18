@@ -916,8 +916,9 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
 
     try:
         import yfinance as yf
+        from data.fetchers import yf_fetch_with_retry
         ticker = yf.Ticker(symbol)
-        info   = ticker.info
+        info   = yf_fetch_with_retry(lambda: ticker.info)
 
         # Sector → P/E benchmark (only if caller did not provide sector override)
         yf_sector_key = (info.get("sector") or "").lower()
@@ -1004,7 +1005,7 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
         current_ratio = _safe_positive_float(info.get("currentRatio"))
 
         # Current price (dropna for dividend-adjustment NaN artefacts)
-        hist = ticker.history(period="1d")
+        hist = yf_fetch_with_retry(ticker.history, period="1d")
         if not hist.empty:
             _close = hist["Close"].dropna()
             if not _close.empty:

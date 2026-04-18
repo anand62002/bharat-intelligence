@@ -112,12 +112,13 @@ def _fetch_current_price(symbol: str) -> Optional[float]:
         resolved = resolve_yf(symbol)
         if not resolved:
             return None
+        from data.fetchers import yf_fetch_with_retry
         ticker = yf.Ticker(resolved)
-        hist   = ticker.history(period="2d")
+        hist   = yf_fetch_with_retry(ticker.history, period="2d")
         if not hist.empty:
             return round(float(hist["Close"].iloc[-1]), 2)
         # Fallback: info dict
-        info  = ticker.info
+        info  = yf_fetch_with_retry(lambda: ticker.info)
         price = info.get("regularMarketPrice") or info.get("previousClose")
         return round(float(price), 2) if price else None
     except Exception as exc:

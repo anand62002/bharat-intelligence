@@ -557,7 +557,9 @@ def analyse(symbol: str) -> dict:
     analyst_target: Optional[float] = None
     try:
         import yfinance as yf
-        info = yf.Ticker(symbol).info
+        from data.fetchers import yf_fetch_with_retry
+        _t = yf.Ticker(symbol)
+        info = yf_fetch_with_retry(lambda: _t.info)
         analyst_target = info.get("targetMeanPrice") or info.get("targetMedianPrice")
         if analyst_target:
             analyst_target = float(analyst_target)

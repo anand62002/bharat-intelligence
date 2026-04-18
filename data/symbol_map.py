@@ -278,7 +278,9 @@ def _try_yf(ticker: str, period: str) -> bool:
     """Return True if yfinance returns at least 1 row for this ticker."""
     try:
         import yfinance as yf
-        df = yf.Ticker(ticker).history(period=period)
+        from data.fetchers import yf_fetch_with_retry
+        t = yf.Ticker(ticker)
+        df = yf_fetch_with_retry(t.history, period=period)
         return df is not None and not df.empty
     except Exception:
         return False

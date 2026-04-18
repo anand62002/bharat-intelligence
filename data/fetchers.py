@@ -3,9 +3,13 @@ data/fetchers.py — Bharat Intelligence India Market Data Fetchers
 All functions return None on failure and log errors to stderr.
 """
 
+import json
 import logging
+import random
 import re
+import time
 from datetime import datetime
+from typing import Any, Callable, Optional, Tuple, Type
 
 import feedparser
 import requests
@@ -23,6 +27,114 @@ _HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+
+# ─── yfinance retry utility ──────────────────────────────────────────────────
+
+# Errors that indicate a transient problem worth retrying.
+# - ConnectionError / Timeout: network blip or DNS hiccup
+# - HTTPError 429: Yahoo rate-limit (back off and retry)
+# - HTTPError 5xx: Yahoo server error (transient)
+# - JSONDecodeError: occasionally yfinance returns a malformed response
+_YF_RETRYABLE: Tuple[Type[Exception], ...] = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    json.JSONDecodeError,
+)
+
+# Errors indicating a permanent failure — retrying would not help.
+# - HTTP 404: symbol does not exist in Yahoo Finance
+# - HTTP 400: bad request (malformed symbol)
+# - ValueError / TypeError from downstream yfinance parsing
+_YF_PERMANENT: Tuple[Type[Exception], ...] = (
+    ValueError,
+    TypeError,
+)
+
+
+def yf_fetch_with_retry(
+    fn: Callable[..., Any],
+    *args: Any,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    **kwargs: Any,
+) -> Any:
+    """
+    Execute a callable (typically a yfinance API call) with exponential-backoff
+    retry for transient failures.
+
+    Retry policy
+    ------------
+    - Retries on: ConnectionError, Timeout, HTTP 429, HTTP 5xx, JSONDecodeError
+    - Does NOT retry on: HTTP 404 / 400 (permanent), ValueError, TypeError
+    - Delays: base_delay * 2^attempt + uniform jitter [0, 0.5s]
+      e.g., with base_delay=1.0: ~1.0s, ~2.0s, ~4.0s
+
+    Usage
+    -----
+        # .history() call with retry
+        df = yf_fetch_with_retry(yf.Ticker("TCS.NS").history, period="1y")
+
+        # .info property via lambda
+        info = yf_fetch_with_retry(lambda: yf.Ticker("TCS.NS").info)
+
+    Returns the callable's return value on success.
+    Raises the last exception if all retries are exhausted.
+    Raises immediately (no retry) for permanent errors.
+    """
+    last_exc: Exception = RuntimeError("yf_fetch_with_retry: no attempts made")
+
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+
+        except requests.exceptions.HTTPError as exc:
+            resp = getattr(exc, "response", None)
+            status = resp.status_code if resp is not None else 0
+            if status in (429,) or (500 <= status < 600):
+                last_exc = exc
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                log.debug(
+                    "yfinance HTTP %s (attempt %d/%d) — retrying in %.1fs",
+                    status, attempt + 1, max_retries, delay,
+                )
+                time.sleep(delay)
+            else:
+                # 404, 400, etc. — permanent failure, raise immediately
+                raise
+
+        except _PERMANENT as exc:
+            raise
+
+        except _YF_RETRYABLE as exc:
+            last_exc = exc
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+            log.debug(
+                "yfinance transient %s (attempt %d/%d) — retrying in %.1fs",
+                type(exc).__name__, attempt + 1, max_retries, delay,
+            )
+            time.sleep(delay)
+
+        except Exception as exc:
+            # Unknown error — treat as transient for one retry only,
+            # then let it propagate (avoids swallowing genuine bugs).
+            if attempt < 1:
+                last_exc = exc
+                delay = base_delay + random.uniform(0, 0.5)
+                log.debug(
+                    "yfinance unknown error %s (attempt %d/%d) — retrying once in %.1fs",
+                    type(exc).__name__, attempt + 1, max_retries, delay,
+                )
+                time.sleep(delay)
+            else:
+                raise
+
+    raise last_exc
+
+
+# Private alias for the permanent-error tuple used in the except clause above.
+# Defined after the function because it is only used internally.
+_PERMANENT = _YF_PERMANENT
 
 
 # ─── 1. OHLCV ────────────────────────────────────────────────────────────────
@@ -51,7 +163,7 @@ def get_ohlcv(symbol: str, period: str = "1y"):
 
     try:
         ticker = yf.Ticker(resolved)
-        df = ticker.history(period=period)
+        df = yf_fetch_with_retry(ticker.history, period=period)
         if df.empty:
             log.warning("get_ohlcv: no data returned for %s (period=%s)", resolved, period)
             return None
@@ -112,11 +224,11 @@ def get_mcx_prices() -> dict | None:
         for name, sym in tickers.items():
             try:
                 ticker = yf.Ticker(sym)
-                hist = ticker.history(period="1d")
+                hist = yf_fetch_with_retry(ticker.history, period="1d")
                 if not hist.empty:
                     result[name] = round(float(hist["Close"].iloc[-1]), 2)
                 else:
-                    info = ticker.info
+                    info = yf_fetch_with_retry(lambda t=ticker: t.info)
                     result[name] = round(float(info.get("regularMarketPrice") or info.get("previousClose") or 0), 2)
             except Exception as inner:
                 log.warning("get_mcx_prices: failed for %s (%s): %s", name, sym, inner)
@@ -361,10 +473,10 @@ def get_inr_usd() -> float | None:
     """
     try:
         ticker = yf.Ticker("USDINR=X")
-        hist = ticker.history(period="1d")
+        hist = yf_fetch_with_retry(ticker.history, period="1d")
         if not hist.empty:
             return round(float(hist["Close"].iloc[-1]), 4)
-        info = ticker.info
+        info = yf_fetch_with_retry(lambda: ticker.info)
         rate = info.get("regularMarketPrice") or info.get("previousClose")
         return round(float(rate), 4) if rate else None
     except Exception as e:
@@ -383,10 +495,10 @@ def get_india_vix() -> float | None:
     """
     try:
         ticker = yf.Ticker("^INDIAVIX")
-        hist = ticker.history(period="1d")
+        hist = yf_fetch_with_retry(ticker.history, period="1d")
         if not hist.empty:
             return round(float(hist["Close"].iloc[-1]), 2)
-        info = ticker.info
+        info = yf_fetch_with_retry(lambda: ticker.info)
         vix = info.get("regularMarketPrice") or info.get("previousClose")
         return round(float(vix), 2) if vix else None
     except Exception as e:

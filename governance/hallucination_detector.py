@@ -89,10 +89,14 @@ def _fetch_price_on_date(symbol: str, target_date: date) -> Optional[float]:
     """
     try:
         import yfinance as yf
+        from data.fetchers import yf_fetch_with_retry
         # yfinance history end date is exclusive; fetch a 7-day window
         start = target_date
         end   = target_date + timedelta(days=7)
-        df    = yf.Ticker(symbol).history(start=str(start), end=str(end), auto_adjust=True)
+        _t    = yf.Ticker(symbol)
+        df    = yf_fetch_with_retry(
+            _t.history, start=str(start), end=str(end), auto_adjust=True
+        )
         if df.empty:
             return None
         # Return the first available session >= target_date
