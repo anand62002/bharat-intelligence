@@ -29,45 +29,91 @@ AGENT_NAME = "fundamental"
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 
-# NSE sector median P/E ratios (calibrated to FY2023-24 averages)
-# Used for fair-value estimation and governance context
+# NSE sector median P/E ratios
+# Two layers:
+#   (a) screener.in / human-readable sector names
+#   (b) yfinance info["sector"] names — must be present or the lookup falls to DEFAULT
+#
+# Updated for 2024-2026 market realities:
+#   Telecom/Comm Services raised to 38x (5G capex supercycle + duopoly pricing power)
+#   FMCG/Consumer Defensive raised to 48x (consistent re-rating by quality-focused FIIs)
+#   Real Estate raised to 28x (India housing super-cycle premium)
+#   Communication Services added (yfinance sector for Airtel, Jio etc.)
+#   Consumer Cyclical / Defensive / Basic Materials / Utilities added (yfinance names)
 SECTOR_PE_MAP: dict[str, float] = {
-    "banking": 14.0,
-    "bank": 14.0,
-    "nbfc": 18.0,
+    # ── Banking & Finance ─────────────────────────────────────────────────────
+    "banking":            14.0,
+    "bank":               14.0,
+    "nbfc":               18.0,
     "financial services": 18.0,
-    "finance": 18.0,
+    "finance":            18.0,
+    "insurance":          32.0,
+    # ── Technology & IT ───────────────────────────────────────────────────────
     "information technology": 30.0,
-    "it": 30.0,
-    "technology": 28.0,
-    "pharmaceuticals": 28.0,
-    "pharma": 28.0,
-    "healthcare": 30.0,
-    "fast moving consumer goods": 45.0,
-    "fmcg": 45.0,
-    "consumer staples": 42.0,
+    "it":                 30.0,
+    "technology":         28.0,   # yfinance sector name for TCS, Infosys
+    # ── Healthcare & Pharma ───────────────────────────────────────────────────
+    "pharmaceuticals":    28.0,
+    "pharma":             28.0,
+    "healthcare":         30.0,   # yfinance sector name for hospitals, diagnostics
+    # ── Consumer ──────────────────────────────────────────────────────────────
+    "fast moving consumer goods": 48.0,
+    "fmcg":               48.0,
+    "consumer staples":   45.0,
+    "consumer defensive": 48.0,   # yfinance: HUL, Nestle, Britannia, ITC
     "consumer discretionary": 38.0,
-    "automobile": 22.0,
-    "auto": 22.0,
-    "infrastructure": 18.0,
-    "construction": 16.0,
-    "metals & mining": 12.0,
-    "metals": 12.0,
-    "energy": 12.0,
-    "oil & gas": 11.0,
-    "realty": 22.0,
-    "real estate": 22.0,
-    "telecom": 28.0,
-    "telecommunications": 28.0,
-    "cement": 25.0,
-    "chemicals": 28.0,
-    "textiles": 18.0,
-    "media": 24.0,
-    "retail": 35.0,
-    "insurance": 32.0,
-    "diversified": 20.0,
+    "consumer cyclical":  35.0,   # yfinance: Maruti, Titan, Avenue Supermarts
+    "retail":             35.0,
+    # ── Telecom ───────────────────────────────────────────────────────────────
+    "telecom":            38.0,   # 5G capex supercycle; Airtel ARPU compounding
+    "telecommunications": 38.0,
+    "communication services": 38.0,   # yfinance sector name for Airtel, Indus Towers
+    # ── Auto ──────────────────────────────────────────────────────────────────
+    "automobile":         24.0,
+    "auto":               24.0,
+    # ── Infrastructure & Capital Goods ────────────────────────────────────────
+    "infrastructure":     22.0,
+    "construction":       18.0,
+    "industrials":        22.0,   # yfinance: L&T, Adani Ports, Siemens
+    "capital goods":      25.0,
+    # ── Metals, Mining & Materials ────────────────────────────────────────────
+    "metals & mining":    12.0,
+    "metals":             12.0,
+    "materials":          14.0,   # yfinance: Tata Steel, JSW Steel, Hindalco
+    "basic materials":    14.0,   # yfinance alias for metals/chemicals
+    "chemicals":          28.0,
+    "cement":             25.0,
+    # ── Energy ────────────────────────────────────────────────────────────────
+    # Note: yfinance classifies Reliance as "Energy" even though Jio+Retail
+    # are >50% of its market cap. The growth_stock protection in _estimate_upside
+    # handles this case automatically (PE >> sector_pe → partial de-rate only).
+    "energy":             12.0,
+    "oil & gas":          11.0,
+    # ── Real Estate ───────────────────────────────────────────────────────────
+    "realty":             28.0,   # India housing super-cycle premium
+    "real estate":        28.0,   # yfinance sector name for DLF, Godrej Props
+    # ── Utilities ─────────────────────────────────────────────────────────────
+    "utilities":          18.0,   # yfinance: NTPC, Power Grid, Tata Power
+    # ── Textiles / Media / Diversified ────────────────────────────────────────
+    "textiles":           18.0,
+    "media":              24.0,
+    "diversified":        24.0,   # conglomerates with multi-sector exposure
 }
 DEFAULT_SECTOR_PE: float = 22.0   # Nifty 500 long-run median
+
+# Sectors where ROCE is structurally depressed during heavy capex build-out.
+# Companies in these sectors with low ROCE + strong revenue growth should receive
+# partial ROCE credit rather than a zero-score penalty, because:
+#   - Telecom: 5G rollout compresses ROCE for 3-5 years before FCF inflects
+#   - Utilities/Renewables: asset-heavy with 30-year revenue visibility
+#   - Infrastructure: long project cycles; ROCE matures as projects commission
+#   - Real Estate: land bank / launches cycle; ROCE tied to completion timing
+CAPEX_HEAVY_SECTORS: frozenset[str] = frozenset({
+    "telecom", "telecommunications", "communication services",
+    "utilities", "infrastructure", "construction", "industrials",
+    "realty", "real estate", "energy", "oil & gas",
+    "renewable energy", "renewables",
+})
 
 # Danger drop estimates (median historical drawdown from current price)
 # calibrated against NSE events: IL&FS, DHFL, ADAG, Videocon, Suzlon, JSPL
