@@ -115,6 +115,59 @@ CAPEX_HEAVY_SECTORS: frozenset[str] = frozenset({
     "renewable energy", "renewables",
 })
 
+# Sector median EV/EBITDA benchmarks (NSE 2024-2026 calibration).
+# Used when P/E is unreliable — heavy depreciation or negative earnings make
+# EV/EBITDA the industry-standard metric for these sectors.
+#
+# Sources: NSE/BSE company filings, Bloomberg consensus, Motilal Oswal sector reports
+SECTOR_EV_EBITDA_MAP: dict[str, float] = {
+    # ── Telecom ─── spectrum capex inflates EV; EBITDA is the clean metric
+    "telecom":                8.5,   # Airtel ~7-9x; Jio implied ~8-10x
+    "telecommunications":     8.5,
+    "communication services": 8.5,
+    # ── Energy / Oil & Gas ─── asset-heavy, cyclical, integrated players
+    "energy":                 7.5,   # Reliance, ONGC, BPCL blended
+    "oil & gas":              6.5,   # pure upstream/refining
+    # ── Utilities / Power ─── regulated RAB model; long-dated cash flows
+    "utilities":             11.0,   # NTPC, Power Grid, Tata Power
+    # ── Metals & Mining ─── trough/peak cycle; normalised 5-yr avg used
+    "metals & mining":        5.5,
+    "metals":                 5.5,
+    "basic materials":        7.0,
+    "materials":              7.0,
+    # ── Cement ─── capacity cycle; EBITDA/t is primary metric
+    "cement":                11.0,   # Ultratech, Ambuja, ACC
+    # ── Infrastructure / Industrials ─── long project cycles
+    "infrastructure":        12.0,
+    "industrials":           13.0,   # L&T, Siemens, ABB
+    "construction":           9.0,
+    # ── Conglomerates ─── blended P/E meaningless; EV/EBITDA on consolidated basis
+    "diversified":           11.0,   # Reliance (blended), ITC, Bajaj Holdings
+    # ── Real Estate ─── sometimes used alongside NAV; pre-sales cycle
+    "realty":                14.0,
+    "real estate":           14.0,
+}
+
+# Sectors where EV/EBITDA is the PRIMARY valuation metric.
+# For these sectors: P/E is structurally distorted by large depreciation,
+# negative earnings from capex cycles, or blended conglomerate structures.
+# EV/EBITDA scoring replaces the P/E valuation sub-score when data is available.
+EV_EBITDA_SECTORS: frozenset[str] = frozenset({
+    # Telecom — spectrum auctions + 5G amortisation suppress EPS to near-zero
+    "telecom", "telecommunications", "communication services",
+    # Energy / Metals — highly cyclical; trough-year EPS distorts P/E wildly
+    "energy", "oil & gas",
+    "metals & mining", "metals", "basic materials", "materials",
+    # Utilities — regulated asset base; depreciation-heavy
+    "utilities",
+    # Infrastructure — project-cycle lumpy earnings
+    "infrastructure", "industrials", "construction",
+    # Cement — capacity-cycle EPS volatility
+    "cement",
+    # Conglomerates — blended P/E meaningless
+    "diversified",
+})
+
 # Danger drop estimates (median historical drawdown from current price)
 # calibrated against NSE events: IL&FS, DHFL, ADAG, Videocon, Suzlon, JSPL
 _DANGER_DROP: dict[str, tuple[float, float]] = {
@@ -186,16 +239,28 @@ def _score_profitability(
     ebitda_margin: Optional[float],
     pe: Optional[float],
     sector_pe: float,
+    ev_ebitda: Optional[float] = None,
+    sector_ev_ebitda: Optional[float] = None,
+    prefer_ev_ebitda: bool = False,
 ) -> tuple[int, str]:
     """
     profitability — max 25 pts
-      EBITDA margin: 0/5/10/15 pts
-      PE vs sector:  0/5/10 pts
+      EBITDA margin:              0/5/10/15 pts
+      Valuation vs sector:        0/5/10 pts
+
+    Valuation metric selection (10-pt sub-score):
+      - If prefer_ev_ebitda=True (sector is EV/EBITDA-native) AND ev_ebitda data
+        is available → score on EV/EBITDA vs sector_ev_ebitda.
+      - If P/E is negative/None AND ev_ebitda is available → fallback to EV/EBITDA.
+      - Otherwise → score on P/E vs sector_pe (original behaviour).
+
+    This prevents Airtel/Reliance-style misscores where heavy amortisation /
+    conglomerate blending makes P/E meaningless while EBITDA is robust.
     """
     score = 0
     notes: list[str] = []
 
-    # EBITDA margin (max 15 pts)
+    # ── EBITDA margin (max 15 pts) ────────────────────────────────────────────
     if ebitda_margin is None:
         score += 5
         notes.append("EBITDA margin unknown (neutral)")
@@ -214,24 +279,66 @@ def _score_profitability(
     else:
         notes.append(f"Very thin/negative EBITDA margin {ebitda_margin:.1f}%")
 
-    # PE valuation vs sector (max 10 pts)
-    if pe is None or pe <= 0:
-        score += 4
-        notes.append("P/E not available (neutral)")
-    elif pe <= sector_pe * 0.70:
-        score += 10
-        notes.append(f"Deep value: PE {pe:.1f}x vs sector {sector_pe:.0f}x")
-    elif pe <= sector_pe * 0.90:
-        score += 7
-        notes.append(f"Undervalued: PE {pe:.1f}x vs sector {sector_pe:.0f}x")
-    elif pe <= sector_pe * 1.10:
-        score += 5
-        notes.append(f"Fairly valued: PE {pe:.1f}x ≈ sector {sector_pe:.0f}x")
-    elif pe <= sector_pe * 1.40:
-        score += 2
-        notes.append(f"Slight premium: PE {pe:.1f}x vs sector {sector_pe:.0f}x")
+    # ── Valuation vs sector (max 10 pts) ─────────────────────────────────────
+    # Decide which metric to use
+    _use_ev = (
+        ev_ebitda is not None
+        and ev_ebitda > 0
+        and sector_ev_ebitda is not None
+        and (
+            prefer_ev_ebitda              # sector natively uses EV/EBITDA
+            or (pe is None or pe <= 0)    # P/E unavailable → EV/EBITDA fallback
+        )
+    )
+
+    if _use_ev:
+        # EV/EBITDA valuation scoring
+        assert sector_ev_ebitda is not None  # guaranteed by _use_ev condition
+        if ev_ebitda <= sector_ev_ebitda * 0.70:
+            score += 10
+            notes.append(
+                f"Deep value: EV/EBITDA {ev_ebitda:.1f}x vs sector {sector_ev_ebitda:.1f}x"
+            )
+        elif ev_ebitda <= sector_ev_ebitda * 0.90:
+            score += 7
+            notes.append(
+                f"Undervalued: EV/EBITDA {ev_ebitda:.1f}x vs sector {sector_ev_ebitda:.1f}x"
+            )
+        elif ev_ebitda <= sector_ev_ebitda * 1.10:
+            score += 5
+            notes.append(
+                f"Fairly valued: EV/EBITDA {ev_ebitda:.1f}x ~ sector {sector_ev_ebitda:.1f}x"
+            )
+        elif ev_ebitda <= sector_ev_ebitda * 1.40:
+            score += 2
+            notes.append(
+                f"Slight premium: EV/EBITDA {ev_ebitda:.1f}x vs sector {sector_ev_ebitda:.1f}x"
+            )
+        else:
+            notes.append(
+                f"Expensive: EV/EBITDA {ev_ebitda:.1f}x >> sector {sector_ev_ebitda:.1f}x"
+            )
+        if pe is not None and pe > 0:
+            notes.append(f"(P/E {pe:.1f}x shown for reference; EV/EBITDA used for scoring)")
     else:
-        notes.append(f"Expensive: PE {pe:.1f}x >> sector {sector_pe:.0f}x")
+        # P/E valuation scoring (original behaviour)
+        if pe is None or pe <= 0:
+            score += 4
+            notes.append("P/E not available (neutral)")
+        elif pe <= sector_pe * 0.70:
+            score += 10
+            notes.append(f"Deep value: PE {pe:.1f}x vs sector {sector_pe:.0f}x")
+        elif pe <= sector_pe * 0.90:
+            score += 7
+            notes.append(f"Undervalued: PE {pe:.1f}x vs sector {sector_pe:.0f}x")
+        elif pe <= sector_pe * 1.10:
+            score += 5
+            notes.append(f"Fairly valued: PE {pe:.1f}x approx sector {sector_pe:.0f}x")
+        elif pe <= sector_pe * 1.40:
+            score += 2
+            notes.append(f"Slight premium: PE {pe:.1f}x vs sector {sector_pe:.0f}x")
+        else:
+            notes.append(f"Expensive: PE {pe:.1f}x >> sector {sector_pe:.0f}x")
 
     return min(score, 25), "; ".join(notes)
 
@@ -438,6 +545,46 @@ def _estimate_upside(
     return round((fair_value - current_price) / current_price * 100, 2)
 
 
+def _estimate_upside_ev_ebitda(
+    ebitda_abs: Optional[float],
+    shares_outstanding: Optional[float],
+    net_debt: Optional[float],
+    current_price: Optional[float],
+    sector_ev_ebitda: float,
+) -> Optional[float]:
+    """
+    Fair value via EV/EBITDA for telecom, conglomerate and capex-heavy sectors.
+
+    Methodology:
+      fair_EV           = sector_median_ev_ebitda * trailing_EBITDA
+      fair_equity_value = fair_EV - net_debt
+      fair_price        = fair_equity_value / shares_outstanding
+      upside_pct        = (fair_price - current_price) / current_price * 100
+
+    This avoids P/E distortion caused by:
+      - Large spectrum / 5G amortisation (telecom)
+      - Cyclical trough earnings (metals, energy)
+      - Conglomerate blended earnings (diversified)
+
+    Returns upside_pct (can be negative = downside) or None if data is insufficient.
+    """
+    if (
+        ebitda_abs is None or ebitda_abs <= 0
+        or shares_outstanding is None or shares_outstanding <= 0
+        or current_price is None or current_price <= 0
+        or net_debt is None
+    ):
+        return None
+
+    fair_ev = sector_ev_ebitda * ebitda_abs
+    fair_equity = fair_ev - net_debt
+    if fair_equity <= 0:
+        # Net debt exceeds fair EV — deeply distressed; skip rather than emit huge negative
+        return None
+    fair_price = fair_equity / shares_outstanding
+    return round((fair_price - current_price) / current_price * 100, 2)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Supabase helper
 # ──────────────────────────────────────────────────────────────────────────────
@@ -513,40 +660,101 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
     promoter_holding = raw.get("promoter_holding")
     promoter_pledging = raw.get("promoter_pledging")
 
-    # ── 2. Resolve sector PE ─────────────────────────────────────────────────
-    sector_pe = DEFAULT_SECTOR_PE
+    # ── 2. Resolve sector (caller override takes precedence) ─────────────────
+    sector_pe  = DEFAULT_SECTOR_PE
     sector_key = (sector or "").strip().lower()
     if sector_key:
         sector_pe = SECTOR_PE_MAP.get(sector_key, DEFAULT_SECTOR_PE)
-    else:
-        # Try yfinance sector lookup as a best-effort fallback
-        try:
-            import yfinance as yf
-            info = yf.Ticker(symbol).info
-            yf_sector = (info.get("sector") or "").lower()
-            sector_pe = SECTOR_PE_MAP.get(yf_sector, DEFAULT_SECTOR_PE)
-            if yf_sector:
-                data_sources.append("yfinance_sector")
-        except Exception:
-            pass
 
-    # ── 3. Fetch current price for upside calc ───────────────────────────────
-    current_price: Optional[float] = None
+    # ── 3. yfinance: sector lookup, EV/EBITDA metrics, current price ─────────
+    # One Ticker object shared for all yfinance calls to avoid redundant HTTP
+    # round-trips. We fetch: sector, EV/EBITDA ratio, absolute EBITDA,
+    # enterprise value, shares outstanding, debt/cash (for net debt), and
+    # latest closing price.
+    yf_sector_key       = ""
+    ev_ebitda:          Optional[float] = None
+    ebitda_abs:         Optional[float] = None
+    shares_outstanding: Optional[float] = None
+    net_debt:           Optional[float] = None
+    current_price:      Optional[float] = None
+
     try:
         import yfinance as yf
-        hist = yf.Ticker(symbol).history(period="1d")
+        ticker = yf.Ticker(symbol)
+        info   = ticker.info
+
+        # Sector → P/E benchmark (only if caller did not provide sector override)
+        yf_sector_key = (info.get("sector") or "").lower()
+        if yf_sector_key and not sector_key:
+            sector_pe = SECTOR_PE_MAP.get(yf_sector_key, DEFAULT_SECTOR_PE)
+            data_sources.append("yfinance_sector")
+
+        # EV/EBITDA ratio (direct from yfinance)
+        _ev_ebitda_raw = info.get("enterpriseToEbitda")
+        if _ev_ebitda_raw is not None:
+            try:
+                _v = float(_ev_ebitda_raw)
+                if _v > 0:
+                    ev_ebitda = _v
+            except (TypeError, ValueError):
+                pass
+
+        # Absolute EBITDA (needed for EV/EBITDA-based fair-value calc)
+        _ebitda_raw = info.get("ebitda")
+        if _ebitda_raw is not None:
+            try:
+                _v = float(_ebitda_raw)
+                if _v > 0:
+                    ebitda_abs = _v
+            except (TypeError, ValueError):
+                pass
+
+        # Shares outstanding (for price-per-share in fair-value calc)
+        _shares_raw = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+        if _shares_raw is not None:
+            try:
+                _v = float(_shares_raw)
+                if _v > 0:
+                    shares_outstanding = _v
+            except (TypeError, ValueError):
+                pass
+
+        # Net debt = total debt − cash & equivalents
+        try:
+            _total_debt = float(info.get("totalDebt") or 0)
+            _total_cash = float(info.get("totalCash") or 0)
+            net_debt = _total_debt - _total_cash
+        except (TypeError, ValueError):
+            net_debt = None
+
+        if ev_ebitda is not None:
+            data_sources.append("yfinance_ev_ebitda")
+
+        # Current price (dropna for dividend-adjustment NaN artefacts)
+        hist = ticker.history(period="1d")
         if not hist.empty:
-            current_price = float(hist["Close"].iloc[-1])
-            if "yfinance_sector" not in data_sources:
+            _close = hist["Close"].dropna()
+            if not _close.empty:
+                current_price = float(_close.iloc[-1])
                 data_sources.append("yfinance_price")
-            else:
-                data_sources.append("yfinance_price")
-    except Exception:
-        pass
+
+    except Exception as exc:
+        log.debug("yfinance fetch failed for %s: %s", symbol, exc)
+
+    # ── 3b. Resolve EV/EBITDA sector benchmark and preference flag ───────────
+    effective_sector  = sector_key or yf_sector_key
+    sector_ev_ebitda: Optional[float] = SECTOR_EV_EBITDA_MAP.get(effective_sector) \
+        if effective_sector else None
+    prefer_ev_ebitda: bool = effective_sector in EV_EBITDA_SECTORS
 
     # ── 4. Score ─────────────────────────────────────────────────────────────
     growth_score,  growth_notes  = _score_growth(revenue_growth, revenue_growth_qoq, roce)
-    profit_score,  profit_notes  = _score_profitability(ebitda_margin, pe, sector_pe)
+    profit_score,  profit_notes  = _score_profitability(
+        ebitda_margin, pe, sector_pe,
+        ev_ebitda=ev_ebitda,
+        sector_ev_ebitda=sector_ev_ebitda,
+        prefer_ev_ebitda=prefer_ev_ebitda,
+    )
     bs_score,      bs_notes      = _score_balance_sheet(debt_equity, roce)
     gov_score,     gov_notes     = _score_governance(promoter_holding, promoter_pledging, debt_equity)
 
@@ -573,7 +781,22 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
         signal = "SELL"
 
     # ── 7. Upside estimation ─────────────────────────────────────────────────
-    upside_pct = _estimate_upside(pe, revenue_growth, current_price, sector_pe)
+    # For EV/EBITDA-native sectors, fair value via EV/EBITDA is more reliable.
+    # We compute both and prefer EV/EBITDA when the sector warrants it.
+    upside_pe: Optional[float] = _estimate_upside(pe, revenue_growth, current_price, sector_pe)
+    upside_ev: Optional[float] = None
+    if prefer_ev_ebitda and sector_ev_ebitda is not None:
+        upside_ev = _estimate_upside_ev_ebitda(
+            ebitda_abs, shares_outstanding, net_debt, current_price, sector_ev_ebitda
+        )
+    # EV/EBITDA upside is primary for EV/EBITDA sectors when available;
+    # P/E upside is kept as fallback or reference.
+    upside_pct: Optional[float] = (
+        upside_ev if (prefer_ev_ebitda and upside_ev is not None) else upside_pe
+    )
+    valuation_method = (
+        "ev_ebitda" if (prefer_ev_ebitda and upside_ev is not None) else "pe"
+    )
 
     # ── 8. Confidence in the overall analysis ───────────────────────────────
     available = sum(
@@ -593,11 +816,15 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "notes":               growth_notes,
         },
         "profitability": {
-            "score":          profit_score,
-            "ebitda_margin":  ebitda_margin,
-            "pe":             pe,
-            "sector_pe_used": sector_pe,
-            "notes":          profit_notes,
+            "score":              profit_score,
+            "ebitda_margin":      ebitda_margin,
+            "pe":                 pe,
+            "sector_pe_used":     sector_pe,
+            "ev_ebitda":          ev_ebitda,
+            "sector_ev_ebitda":   sector_ev_ebitda,
+            "prefer_ev_ebitda":   prefer_ev_ebitda,
+            "valuation_method":   valuation_method,
+            "notes":              profit_notes,
         },
         "balance_sheet": {
             "score":        bs_score,
@@ -629,6 +856,15 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "promoter_pledging":   promoter_pledging,
             "current_price":       current_price,
             "sector_pe":           sector_pe,
+            # EV/EBITDA valuation data
+            "ev_ebitda":           ev_ebitda,
+            "sector_ev_ebitda":    sector_ev_ebitda,
+            "ebitda_abs":          ebitda_abs,
+            "net_debt":            net_debt,
+            "shares_outstanding":  shares_outstanding,
+            "upside_pe_pct":       upside_pe,
+            "upside_ev_pct":       upside_ev,
+            "valuation_method":    valuation_method,
         },
     }
 
