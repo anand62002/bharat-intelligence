@@ -36,6 +36,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -57,11 +58,11 @@ log = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────────
 FACT_CHECK_PROMPT_PATH  = _ROOT / "prompts" / "fact_check.txt"
 CLAUDE_HAIKU_MODEL      = os.getenv("CLAUDE_HAIKU_MODEL", "claude-haiku-4-5")
-HAIKU_MAX_TOKENS        = 300
+HAIKU_MAX_TOKENS        = 400   # raised from 300 — prevents truncation on longer reasons
 MAX_CLAIMS_PER_REC      = 8
 MIN_CLAIMS_FOR_CHECK    = 3     # skip rec if we can't extract at least this many
 CONTRADICTED_PENALTY    = 15.0  # confidence points deducted per contradicted claim
-UNVERIFIED_WITHHOLD_N   = 3     # withhold if more than this many unverified claims
+UNVERIFIED_WITHHOLD_N   = 4     # withhold if more than this many unverified claims
 HALLUCINATION_ALERT_PCT = 1.5   # alert if agent hallucination_rate exceeds this
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -364,11 +365,26 @@ def _verify_claim(
         )
         raw_text = response.content[0].text.strip()
 
-        # Strip possible markdown fences
-        if raw_text.startswith("```"):
-            raw_text = raw_text.strip("`").lstrip("json").strip()
+        # Strip markdown fences if present (e.g. ```json ... ```)
+        raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
+        raw_text = re.sub(r"\n?```$", "", raw_text).strip()
 
-        parsed = json.loads(raw_text)
+        # Brace-matching extractor — handles models that append text after the JSON object.
+        # Walks from the first '{' tracking depth so nested braces are handled correctly.
+        json_str = raw_text
+        start = raw_text.find("{")
+        if start >= 0:
+            depth = 0
+            for idx, ch in enumerate(raw_text[start:], start):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        json_str = raw_text[start: idx + 1]
+                        break
+
+        parsed = json.loads(json_str)
         claim.status          = str(parsed.get("status", "UNVERIFIED")).upper()
         claim.reason          = str(parsed.get("reason", ""))
         claim.corrected_claim = str(parsed.get("corrected_claim") or "")

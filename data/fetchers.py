@@ -244,48 +244,84 @@ def get_mcx_prices() -> dict | None:
 
 # ─── 4. RSS HEADLINES ────────────────────────────────────────────────────────
 
+# Static broad-market feeds (keyword-filtered per symbol inside get_rss_headlines)
+# Note: Business Standard and Livemint block automated requests; removed.
 _RSS_FEEDS = [
-    ("ET Markets", "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"),
-    ("Moneycontrol", "https://www.moneycontrol.com/rss/business.xml"),
+    ("ET Markets",    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"),
+    ("ET Auto",       "https://economictimes.indiatimes.com/industry/auto/rssfeeds/1286551815.cms"),
+    ("Moneycontrol",  "https://www.moneycontrol.com/rss/business.xml"),
+    ("Hindu BizLine", "https://www.thehindubusinessline.com/markets/feeder/default.rss"),
 ]
+
+# Google News RSS — dynamic per symbol; always returns symbol-specific headlines
+_GOOGLE_NEWS_RSS_TMPL = (
+    "https://news.google.com/rss/search"
+    "?q={keyword}+NSE+stock+India"
+    "&hl=en-IN&gl=IN&ceid=IN:en"
+)
+
 
 def get_rss_headlines(symbol: str) -> list | None:
     """
-    Parse ET Markets and Moneycontrol RSS feeds for mentions of symbol.
+    Fetch headlines from static market RSS feeds + a dynamic Google News RSS
+    feed for the specific symbol.
 
     Args:
-        symbol: Company name or ticker, e.g. "Reliance" or "TCS"
+        symbol: NSE/BSE ticker, e.g. "MARUTI.NS" or "TCS"
 
     Returns:
-        List of dicts: [{title, source, published, url}], empty list if no matches, None on failure.
+        List of dicts [{title, source, published, url}], or None if every
+        feed request failed (network-level failure).
     """
-    keyword = symbol.replace(".NS", "").replace(".BO", "").upper()
-    results = []
+    from urllib.parse import quote_plus
+
+    keyword = symbol.replace(".NS", "").replace(".BO", "").strip().upper()
+
+    # Build the full feed list: static feeds + 1 dynamic Google News feed
+    feeds_to_try = list(_RSS_FEEDS) + [
+        ("Google News", _GOOGLE_NEWS_RSS_TMPL.format(keyword=quote_plus(keyword))),
+    ]
+
+    results: list[dict] = []
     any_feed_ok = False
 
-    for source_name, feed_url in _RSS_FEEDS:
+    for source_name, feed_url in feeds_to_try:
         try:
             feed = feedparser.parse(feed_url)
+            # bozo=True means malformed XML, but entries may still be present
             if feed.bozo and not feed.entries:
                 log.warning("get_rss_headlines: feed parse error for %s", source_name)
                 continue
             any_feed_ok = True
+
             for entry in feed.entries:
-                title = entry.get("title", "")
-                if keyword.lower() in title.lower() or keyword.lower() in entry.get("summary", "").lower():
-                    published = entry.get("published", "")
-                    try:
-                        published = str(datetime(*entry.published_parsed[:6]).date()) if entry.get("published_parsed") else published
-                    except Exception:
-                        pass
-                    results.append({
-                        "title": title.strip(),
-                        "source": source_name,
-                        "published": published,
-                        "url": entry.get("link", ""),
-                    })
-        except Exception as e:
-            log.warning("get_rss_headlines: error parsing %s: %s", source_name, e)
+                title   = entry.get("title", "").strip()
+                summary = entry.get("summary", "")
+
+                # For Google News the feed is already symbol-specific;
+                # for static feeds we still keyword-filter.
+                is_google = source_name == "Google News"
+                if not is_google and (
+                    keyword.lower() not in title.lower()
+                    and keyword.lower() not in summary.lower()
+                ):
+                    continue
+
+                published = entry.get("published", "")
+                try:
+                    if entry.get("published_parsed"):
+                        published = str(datetime(*entry.published_parsed[:6]).date())
+                except Exception:
+                    pass
+
+                results.append({
+                    "title":     title,
+                    "source":    source_name,
+                    "published": published,
+                    "url":       entry.get("link", ""),
+                })
+        except Exception as exc:
+            log.warning("get_rss_headlines: error parsing %s: %s", source_name, exc)
 
     if not any_feed_ok:
         return None

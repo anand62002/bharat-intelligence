@@ -12,8 +12,8 @@ import os
 import sys
 from datetime import date, datetime, timedelta
 from typing import Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+import requests
 
 from dotenv import load_dotenv
 
@@ -70,12 +70,12 @@ def _fetch_bulk_deals(symbol: str, days: int = 30) -> list[dict]:
     """
     Fetch bulk/block deal records from NSE for a symbol over the last `days`.
 
-    NSE returns JSON with array of deal objects. Each deal has:
-        symbol, clientName, buySell, quantityTraded, tradePrice, date
+    Uses a requests.Session so cookies from the NSE homepage seed request
+    are correctly carried into the data request (urllib did not do this).
 
-    Returns list of normalised dicts, or [] on failure.
+    Falls back to an empty list on any failure; caller handles gracefully.
     """
-    clean = symbol.replace(".NS", "").replace(".BO", "").upper()
+    clean     = symbol.replace(".NS", "").replace(".BO", "").upper()
     to_date   = date.today()
     from_date = to_date - timedelta(days=days)
 
@@ -86,53 +86,107 @@ def _fetch_bulk_deals(symbol: str, days: int = 30) -> list[dict]:
     )
 
     try:
-        # NSE requires a prior visit for cookie seeding
-        seed_req = Request("https://www.nseindia.com/", headers=_NSE_HEADERS)
-        with urlopen(seed_req, timeout=10):
-            pass
-
-        req = Request(url, headers=_NSE_HEADERS)
-        with urlopen(req, timeout=12) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except (URLError, HTTPError) as exc:
+        session = requests.Session()
+        # NSE requires a prior visit so cookies are seeded before the API call
+        session.get("https://www.nseindia.com/", headers=_NSE_HEADERS, timeout=10)
+        resp = session.get(url, headers=_NSE_HEADERS, timeout=12)
+        resp.raise_for_status()
+        raw = resp.text
+    except requests.RequestException as exc:
         log.warning("NSE bulk-deal fetch failed: %s", exc)
         return []
 
     import json
     try:
-        data = json.loads(raw)
+        data    = json.loads(raw)
         records = data if isinstance(data, list) else data.get("data", [])
     except (json.JSONDecodeError, AttributeError):
-        # Try CSV fallback (some NSE endpoints return CSV)
         records = _parse_bulk_csv(raw, clean)
 
     deals = []
     for r in records:
         try:
-            qty        = float(r.get("quantityTraded") or r.get("TD_QTY_TRADED") or 0)
-            price      = float(r.get("tradePrice")     or r.get("TD_TRADE_PRICE") or 0)
-            value_cr   = qty * price / _CRORE
+            qty      = float(r.get("quantityTraded") or r.get("TD_QTY_TRADED") or 0)
+            price    = float(r.get("tradePrice")     or r.get("TD_TRADE_PRICE") or 0)
+            value_cr = qty * price / _CRORE
             if value_cr < _BLOCK_DEAL_MIN_CR:
                 continue
 
-            client      = str(r.get("clientName") or r.get("TD_CLIENT_NAME") or "").strip()
-            buy_sell    = str(r.get("buySell")     or r.get("TD_BUY_SELL") or "").upper()
-            deal_date   = str(r.get("date")        or r.get("TD_DT")       or "")
+            client   = str(r.get("clientName") or r.get("TD_CLIENT_NAME") or "").strip()
+            buy_sell = str(r.get("buySell")    or r.get("TD_BUY_SELL") or "").upper()
+            deal_date= str(r.get("date")       or r.get("TD_DT") or "")
 
             deals.append({
-                "date":      deal_date,
-                "symbol":    clean,
-                "client":    client,
-                "side":      "BUY" if buy_sell.startswith("B") else "SELL",
-                "qty":       int(qty),
-                "price":     round(price, 2),
-                "value_cr":  round(value_cr, 2),
-                "is_mf":     _is_mf_client(client),
+                "date":     deal_date,
+                "symbol":   clean,
+                "client":   client,
+                "side":     "BUY" if buy_sell.startswith("B") else "SELL",
+                "qty":      int(qty),
+                "price":    round(price, 2),
+                "value_cr": round(value_cr, 2),
+                "is_mf":    _is_mf_client(client),
             })
         except (ValueError, TypeError):
             continue
 
     return deals
+
+
+def _fetch_yf_institutional_holders(symbol: str) -> dict:
+    """
+    Fallback when NSE bulk-deal API is blocked.
+
+    Fetches yfinance institutional_holders (quarterly snapshot, NOT daily flows).
+    Used only as a supplementary signal — does NOT replace flow-based scoring.
+
+    Returns:
+        {
+            pct_institutions: float|None  — % of shares held by institutions
+            top_holders:      list[dict]  — [{name, shares, pct_out}]
+            source:           "yfinance_institutional"
+        }
+        or {} on failure.
+    """
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(symbol)
+
+        pct_institutions: Optional[float] = None
+        try:
+            major = ticker.major_holders
+            if major is not None and not major.empty:
+                # Row 1 in major_holders = "% of Shares Held by Institutions"
+                raw_val = major.iloc[1, 0]
+                pct_institutions = round(float(str(raw_val).strip("%")) * (
+                    0.01 if float(str(raw_val).strip("%")) <= 1.0 else 1.0
+                ), 2)
+        except Exception:
+            pass
+
+        top_holders: list[dict] = []
+        try:
+            inst = ticker.institutional_holders
+            if inst is not None and not inst.empty:
+                for _, row in inst.head(5).iterrows():
+                    top_holders.append({
+                        "name":    str(row.get("Holder", "")),
+                        "shares":  int(row.get("Shares", 0)),
+                        "pct_out": round(float(row.get("% Out", 0)) * 100, 2),
+                    })
+        except Exception:
+            pass
+
+        if pct_institutions is None and not top_holders:
+            return {}
+
+        return {
+            "pct_institutions": pct_institutions,
+            "top_holders":      top_holders,
+            "source":           "yfinance_institutional",
+        }
+    except Exception as exc:
+        log.debug("yfinance institutional_holders failed: %s", exc)
+        return {}
 
 
 def _parse_bulk_csv(raw: str, symbol: str) -> list[dict]:
@@ -535,18 +589,42 @@ def analyse(
 
     # ── 3. Bulk / block deals ─────────────────────────────────────────────────
     bulk_deals = _fetch_bulk_deals(symbol, days=30)
+    yf_inst: dict = {}
     if bulk_deals:
         data_sources.append("nse_bulk_deals")
+    else:
+        # NSE bulk-deal API blocked → fall back to yfinance institutional holders
+        # This is a quarterly snapshot (not daily flows) used only for narrative;
+        # it adds a small ±5pt score nudge based on institutional ownership level.
+        yf_inst = _fetch_yf_institutional_holders(symbol)
+        if yf_inst:
+            data_sources.append("yfinance_institutional")
 
     # ── 4. Score ──────────────────────────────────────────────────────────────
     fii_score,  fii_note  = _score_fii(rows_5d)
     dii_score,  dii_note  = _score_dii(rows_5d, fii_score)
     bulk_score, bulk_note = _score_bulk_deals(bulk_deals, symbol)
 
-    # Raw score range: [-30,30] + [0,15] + [-20,20] = [-50, 65]
-    # Normalise to 0–100: (raw + 50) / 115 * 100
-    raw_score       = fii_score + dii_score + bulk_score
-    normalised      = round((raw_score + 50) / 115 * 100)
+    # yfinance fallback nudge: ±5 pts based on institutional ownership %
+    # Only applied when NSE bulk deals were unavailable
+    yf_nudge = 0
+    yf_nudge_note = ""
+    if yf_inst and not bulk_deals:
+        pct = yf_inst.get("pct_institutions")
+        if pct is not None:
+            if pct >= 20:
+                yf_nudge = 5
+                yf_nudge_note = f"Institutional ownership {pct:.1f}% (yfinance snapshot)"
+            elif pct < 5:
+                yf_nudge = -5
+                yf_nudge_note = f"Low institutional ownership {pct:.1f}% (yfinance snapshot)"
+            else:
+                yf_nudge_note = f"Institutional ownership {pct:.1f}% (yfinance snapshot)"
+
+    # Raw score range: [-30,30] + [0,15] + [-20,20] + [-5,5] = [-55, 70]
+    # Normalise to 0–100: (raw + 55) / 125 * 100
+    raw_score       = fii_score + dii_score + bulk_score + yf_nudge
+    normalised      = round((raw_score + 55) / 125 * 100)
     total_score     = max(0, min(100, normalised))
 
     # ── 5. Danger / opportunity signals ───────────────────────────────────────
@@ -598,27 +676,40 @@ def analyse(
             "notes":         dii_note,
         },
         "bulk_deals": {
-            "score":       bulk_score,
-            "total_deals": len(bulk_deals),
-            "mf_deals":    len(mf_deals),
+            "score":         bulk_score,
+            "total_deals":   len(bulk_deals),
+            "mf_deals":      len(mf_deals),
             "buy_value_cr":  round(sum(d["value_cr"] for d in bulk_deals if d["side"] == "BUY"), 2),
             "sell_value_cr": round(sum(d["value_cr"] for d in bulk_deals if d["side"] == "SELL"), 2),
             "notes":         bulk_note,
         },
+        "institutional_snapshot": {
+            # Populated only when NSE bulk-deal API is unavailable;
+            # quarterly data from yfinance — different semantic to daily flows
+            "pct_institutions": yf_inst.get("pct_institutions"),
+            "top_holders":      yf_inst.get("top_holders", []),
+            "notes":            yf_nudge_note,
+            "nudge_score":      yf_nudge,
+        } if yf_inst else None,
         "raw_score":        raw_score,
         "sessions_history": len(rows_10d),
     }
 
+    # Distinguish "NSE API returned no data" from "genuinely zero flow"
+    # so the synthesiser does not mis-read missing data as bearish signal.
+    nse_data_available = bool(live or historical)
+
     result = {
-        "signal":         signal,
-        "score":          total_score,
-        "detail":         detail,
-        "fii_net_5d":     fii_net_5d,
-        "dii_net_5d":     dii_net_5d,
-        "bulk_deals":     bulk_deals,
-        "danger_signals": danger_signals,
-        "data_sources":   list(dict.fromkeys(data_sources)),
-        "agent_name":     AGENT_NAME,
+        "signal":             signal,
+        "score":              total_score,
+        "detail":             detail,
+        "fii_net_5d":         fii_net_5d,
+        "dii_net_5d":         dii_net_5d,
+        "bulk_deals":         bulk_deals,
+        "danger_signals":     danger_signals,
+        "data_sources":       list(dict.fromkeys(data_sources)),
+        "nse_data_available": nse_data_available,   # False = NSE blocked/failed; not bearish
+        "agent_name":         AGENT_NAME,
     }
 
     try:
