@@ -874,6 +874,55 @@ async def log_run_node(state: OrchestratorState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Sector PE Snapshot node
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def sector_pe_snapshot_node(state: OrchestratorState) -> dict:
+    """
+    Persist today's sector P/E regime snapshot to sector_pe_snapshots.
+
+    Runs once per daily pipeline, BEFORE symbol loading, so that the fresh
+    regime data is available to sector_valuation's in-process cache for all
+    subsequent fundamental.analyse() calls in this pipeline run.
+
+    In dry_run mode the snapshot is fetched (warming the cache) but not saved.
+    Any failures are non-fatal and only logged — the pipeline continues regardless.
+
+    Regime changes detected vs yesterday are logged at INFO level so they appear
+    in the daily run log without needing a separate alerting pass.
+    """
+    dry_run = state.get("dry_run", False)
+    try:
+        from scheduler.sector_pe_tracker import run_snapshot
+        result = run_snapshot(sectors=None, dry_run=dry_run)
+        label = " [DRY RUN]" if dry_run else ""
+        log.info(
+            "Sector PE snapshot%s: fetched=%d saved=%d fallback=%d changes=%d errors=%d",
+            label,
+            result.sectors_fetched,
+            result.sectors_saved,
+            result.sectors_fallback,
+            len(result.regime_changes),
+            len(result.errors),
+        )
+        for chg in result.regime_changes:
+            log.info(
+                "  REGIME CHANGE [%s]: %s → %s  (dev=%s%%)",
+                chg["sector_key"],
+                chg["from_regime"],
+                chg["to_regime"],
+                f"{chg.get('deviation_pct'):+.0f}" if chg.get("deviation_pct") is not None else "n/a",
+            )
+        if result.errors:
+            for err in result.errors:
+                log.warning("  sector_pe_snapshot error: %s", err)
+    except Exception as exc:
+        log.warning("sector_pe_snapshot_node failed (non-fatal): %s", exc)
+
+    return {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Graph construction
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -881,24 +930,26 @@ def _build_graph():
     """Compile the LangGraph orchestration pipeline."""
     builder = StateGraph(OrchestratorState)
 
-    builder.add_node("load_symbols", load_symbols_node)
-    builder.add_node("load_weights", load_weights_node)
-    builder.add_node("run_agents",   run_agents_node)
-    builder.add_node("synthesise",   synthesise_node)
-    builder.add_node("fact_check",   fact_check_node)
-    builder.add_node("save_recs",    save_recs_node)
-    builder.add_node("monitor",      monitor_node)
-    builder.add_node("log_run",      log_run_node)
+    builder.add_node("sector_pe_snapshot", sector_pe_snapshot_node)
+    builder.add_node("load_symbols",       load_symbols_node)
+    builder.add_node("load_weights",       load_weights_node)
+    builder.add_node("run_agents",         run_agents_node)
+    builder.add_node("synthesise",         synthesise_node)
+    builder.add_node("fact_check",         fact_check_node)
+    builder.add_node("save_recs",          save_recs_node)
+    builder.add_node("monitor",            monitor_node)
+    builder.add_node("log_run",            log_run_node)
 
-    builder.set_entry_point("load_symbols")
-    builder.add_edge("load_symbols", "load_weights")
-    builder.add_edge("load_weights", "run_agents")
-    builder.add_edge("run_agents",   "synthesise")
-    builder.add_edge("synthesise",   "fact_check")
-    builder.add_edge("fact_check",   "save_recs")
-    builder.add_edge("save_recs",    "monitor")
-    builder.add_edge("monitor",      "log_run")
-    builder.add_edge("log_run",      END)
+    builder.set_entry_point("sector_pe_snapshot")
+    builder.add_edge("sector_pe_snapshot", "load_symbols")
+    builder.add_edge("load_symbols",       "load_weights")
+    builder.add_edge("load_weights",       "run_agents")
+    builder.add_edge("run_agents",         "synthesise")
+    builder.add_edge("synthesise",         "fact_check")
+    builder.add_edge("fact_check",         "save_recs")
+    builder.add_edge("save_recs",          "monitor")
+    builder.add_edge("monitor",            "log_run")
+    builder.add_edge("log_run",            END)
 
     return builder.compile()
 

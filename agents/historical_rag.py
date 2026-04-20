@@ -202,6 +202,34 @@ _NEGATIVE_IMPACTS = {"SEVERE_NEGATIVE", "MODERATE_NEGATIVE", "SECTOR_NEGATIVE",
                      "SEVERE_SECTOR_DISRUPTION"}
 _POSITIVE_IMPACTS = {"STRONG_POSITIVE", "MILD_POSITIVE", "LONG_TERM_POSITIVE"}
 
+# ── Score floor guard ──────────────────────────────────────────────────────────
+# When the historical_events table has fewer than _MIN_BALANCED_COUNT events
+# of EACH polarity (positive / negative), a small or one-sided seed can drive
+# the weighted-sentiment score all the way to its floor (~10).  That "max-
+# bearish default" misleads the downstream composite scorer.
+#
+# The floor of 30 keeps the signal in a cautious-but-not-extreme range until
+# the event library grows large enough to be statistically trusted.
+# Formula: score = round(50 + avg * 40)  →  floor-of-30 ≡ avg ≤ -0.5
+_RAG_SCORE_FLOOR:    int = 30
+_MIN_BALANCED_COUNT: int = 10   # need ≥10 positive AND ≥10 negative events
+
+
+def _check_db_balance() -> tuple[int, int]:
+    """
+    Count positive-impact and negative-impact events in the historical_events table.
+
+    Reuses _fetch_all_events (up to 200 rows) so no extra query type is needed.
+    Returns (n_positive, n_negative).  Both 0 when Supabase is unavailable.
+
+    A "balanced" DB satisfies:
+        n_positive >= _MIN_BALANCED_COUNT AND n_negative >= _MIN_BALANCED_COUNT
+    """
+    events = _fetch_all_events(limit=200)
+    n_pos = sum(1 for e in events if e.get("market_impact") in _POSITIVE_IMPACTS)
+    n_neg = sum(1 for e in events if e.get("market_impact") in _NEGATIVE_IMPACTS)
+    return n_pos, n_neg
+
 
 def _derive_signal(matches: list[dict], scores: list[float]) -> tuple[str, int, str]:
     """
@@ -317,6 +345,24 @@ def analyse(market_description: str) -> dict:
     # ── 3. Derive signal ──────────────────────────────────────────────────────
     signal, score, reasoning = _derive_signal(matched_events, similarity_scores)
 
+    # ── 4. Score floor: prevent max-bearish default on sparse / biased DB ────
+    # Count polarity balance in the full event table.  When neither side has
+    # reached _MIN_BALANCED_COUNT rows yet, clamp the score to _RAG_SCORE_FLOOR
+    # so a biased seed can't push the composite signal to its worst extreme.
+    n_pos_events, n_neg_events = _check_db_balance()
+    db_balanced = (
+        n_pos_events >= _MIN_BALANCED_COUNT
+        and n_neg_events >= _MIN_BALANCED_COUNT
+    )
+    score_floor_applied = False
+    if not db_balanced and score < _RAG_SCORE_FLOOR:
+        log.debug(
+            "RAG score floor %d applied (n_pos=%d n_neg=%d raw_score=%d) — DB not yet balanced",
+            _RAG_SCORE_FLOOR, n_pos_events, n_neg_events, score,
+        )
+        score = _RAG_SCORE_FLOOR
+        score_floor_applied = True
+
     # Clean events for output (remove raw embedding vectors — too large)
     clean_events = []
     for ev in matched_events:
@@ -326,10 +372,14 @@ def analyse(market_description: str) -> dict:
         "signal":           signal,
         "score":            score,
         "detail": {
-            "embed_method":  embed_method,
-            "query":         market_description[:300],
-            "reasoning":     reasoning,
-            "events_in_db":  len(matched_events),
+            "embed_method":        embed_method,
+            "query":               market_description[:300],
+            "reasoning":           reasoning,
+            "events_in_db":        len(matched_events),
+            "db_n_positive":       n_pos_events,
+            "db_n_negative":       n_neg_events,
+            "db_balanced":         db_balanced,
+            "score_floor_applied": score_floor_applied,
         },
         "matched_events":    clean_events,
         "similarity_scores": similarity_scores,

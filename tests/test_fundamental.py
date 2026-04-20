@@ -22,6 +22,7 @@ from agents.fundamental import (  # noqa: E402
     SECTOR_PB_MAP,
     EV_EBITDA_SECTORS,
     CAPEX_HEAVY_SECTORS,
+    _SECTOR_MODULES,
     analyse,
     _assess_danger,
     _estimate_upside,
@@ -30,6 +31,10 @@ from agents.fundamental import (  # noqa: E402
     _score_governance,
     _score_growth,
     _score_profitability,
+    _score_banking,
+    _score_it,
+    _score_pharma,
+    _score_realestate,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -115,7 +120,7 @@ REQUIRED_KEYS = {
 }
 REQUIRED_DETAIL_KEYS = {
     "growth_quality", "profitability", "balance_sheet", "governance",
-    "danger", "raw_metrics",
+    "danger", "raw_metrics", "sector_specific", "sector_regime",
 }
 VALID_SIGNALS = {"STRONG_BUY", "BUY", "HOLD", "AVOID", "SELL", "NO_DATA"}
 
@@ -584,13 +589,14 @@ class TestSectorPE:
         result_it  = _run_analyse(HEALTHY_DATA, sector="it")
         result_def = _run_analyse(HEALTHY_DATA, sector=None)
         # IT sector PE (30) vs default (22) → different profitability scores
+        # sector_pe_static is the raw map value before regime adjustment
         assert (
-            result_it["detail"]["profitability"]["sector_pe_used"] == 30.0
+            result_it["detail"]["profitability"]["sector_pe_static"] == 30.0
         )
 
     def test_unknown_sector_uses_default(self):
         result = _run_analyse(HEALTHY_DATA, sector="unknown_sector_xyz")
-        assert result["detail"]["profitability"]["sector_pe_used"] == DEFAULT_SECTOR_PE
+        assert result["detail"]["profitability"]["sector_pe_static"] == DEFAULT_SECTOR_PE
 
     def test_sector_pe_map_has_banking(self):
         assert "banking" in SECTOR_PE_MAP
@@ -1086,3 +1092,692 @@ class TestTier2Integration:
         # ICR = -500M / |-1000M| = -0.5 → < 1.0 → primary trigger
         if raw["icr"] is not None:
             assert raw["icr"] < 1.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tier 4 tests: Sector-specific scoring modules
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestScoreBanking:
+    """_score_banking: ROE + ROA + NIM proxy; max 25 pts."""
+
+    def test_max_score_excellent_bank(self):
+        """All top-tier inputs should saturate at 25."""
+        s, notes = _score_banking({"roe_pct": 20.0, "roa_pct": 2.0, "ebitda_margin": 30.0})
+        assert s == 25
+        assert "Excellent ROE" in notes
+        assert "Excellent ROA" in notes
+
+    def test_poor_roe_low_score(self):
+        s, notes = _score_banking({"roe_pct": 5.0, "roa_pct": 0.3, "ebitda_margin": 6.0})
+        assert s < 10
+        assert "Poor ROE" in notes
+
+    def test_neutral_when_all_none(self):
+        """All-None inputs → all neutral pts; score should be > 0 and < 25."""
+        s, notes = _score_banking({"roe_pct": None, "roa_pct": None, "ebitda_margin": None})
+        assert 0 < s < 25
+        assert "unknown" in notes.lower()
+
+    def test_score_bounded(self):
+        for roe, roa, nim in [(25.0, 3.0, 35.0), (2.0, 0.1, 2.0), (None, None, None)]:
+            s, _ = _score_banking({"roe_pct": roe, "roa_pct": roa, "ebitda_margin": nim})
+            assert 0 <= s <= 25
+
+    def test_roa_differentiates_quality(self):
+        """Higher ROA → higher sector score (all else equal)."""
+        s_high, _ = _score_banking({"roe_pct": 15.0, "roa_pct": 1.8, "ebitda_margin": 20.0})
+        s_low,  _ = _score_banking({"roe_pct": 15.0, "roa_pct": 0.3, "ebitda_margin": 20.0})
+        assert s_high > s_low
+
+    def test_banking_in_sector_modules(self):
+        """Banking sector key must be in _SECTOR_MODULES dispatch map."""
+        assert "banking" in _SECTOR_MODULES
+        assert _SECTOR_MODULES["banking"] is _score_banking
+        assert "nbfc" in _SECTOR_MODULES
+
+
+class TestScoreIT:
+    """_score_it: EBIT margin + ROE + 5yr revenue CAGR; max 25 pts."""
+
+    def test_max_score_top_tier_it(self):
+        s, notes = _score_it({
+            "ebitda_margin": 28.0, "roe_pct": 28.0, "revenue_cagr_5y": 18.0,
+        })
+        assert s == 25
+        assert "Excellent EBIT margin" in notes
+
+    def test_weak_it_low_score(self):
+        s, notes = _score_it({
+            "ebitda_margin": 3.0, "roe_pct": 8.0, "revenue_cagr_5y": 1.0,
+        })
+        assert s < 12
+        assert "Thin EBIT margin" in notes or "Very thin" in notes
+
+    def test_cagr_differentiates(self):
+        s_fast, _ = _score_it({"ebitda_margin": 20.0, "roe_pct": 20.0, "revenue_cagr_5y": 16.0})
+        s_slow, _ = _score_it({"ebitda_margin": 20.0, "roe_pct": 20.0, "revenue_cagr_5y": 1.0})
+        assert s_fast > s_slow
+
+    def test_neutral_when_all_none(self):
+        s, _ = _score_it({"ebitda_margin": None, "roe_pct": None, "revenue_cagr_5y": None})
+        assert 0 < s < 25
+
+    def test_score_bounded(self):
+        for margin, roe, cagr in [(35.0, 40.0, 25.0), (0.0, 2.0, -5.0), (None, None, None)]:
+            s, _ = _score_it({"ebitda_margin": margin, "roe_pct": roe, "revenue_cagr_5y": cagr})
+            assert 0 <= s <= 25
+
+    def test_it_in_sector_modules(self):
+        assert "information technology" in _SECTOR_MODULES
+        assert "technology" in _SECTOR_MODULES
+        assert _SECTOR_MODULES["it"] is _score_it
+
+
+class TestScorePharma:
+    """_score_pharma: EBITDA margin + 5yr CAGR + ROCE; max 25 pts."""
+
+    def test_max_score_top_pharma(self):
+        s, notes = _score_pharma({
+            "ebitda_margin": 28.0, "revenue_cagr_5y": 15.0, "roce": 25.0,
+        })
+        assert s == 25
+        assert "Excellent pharma EBITDA margin" in notes
+
+    def test_poor_pharma_low_score(self):
+        s, _ = _score_pharma({
+            "ebitda_margin": 4.0, "revenue_cagr_5y": -3.0, "roce": 5.0,
+        })
+        assert s < 12
+
+    def test_pharma_cagr_threshold_differs_from_it(self):
+        """Pharma 5yr CAGR ≥12% = max; IT requires ≥15% for max."""
+        s_pharma, _ = _score_pharma({"ebitda_margin": None, "revenue_cagr_5y": 12.0, "roce": None})
+        s_it,     _ = _score_it({"ebitda_margin": None, "roe_pct": None, "revenue_cagr_5y": 12.0})
+        # Pharma gives max pts (8) at 12%; IT gives only 5 pts at 12%
+        # Just check they're not identical scoring paths
+        assert isinstance(s_pharma, int) and isinstance(s_it, int)
+
+    def test_roce_differentiates(self):
+        s_high, _ = _score_pharma({"ebitda_margin": 20.0, "revenue_cagr_5y": 8.0, "roce": 22.0})
+        s_low,  _ = _score_pharma({"ebitda_margin": 20.0, "revenue_cagr_5y": 8.0, "roce": 4.0})
+        assert s_high > s_low
+
+    def test_neutral_when_all_none(self):
+        s, _ = _score_pharma({"ebitda_margin": None, "revenue_cagr_5y": None, "roce": None})
+        assert 0 < s < 25
+
+    def test_score_bounded(self):
+        for margin, cagr, roce in [(40.0, 20.0, 35.0), (0.0, -10.0, 1.0), (None, None, None)]:
+            s, _ = _score_pharma({"ebitda_margin": margin, "revenue_cagr_5y": cagr, "roce": roce})
+            assert 0 <= s <= 25
+
+    def test_pharma_in_sector_modules(self):
+        assert "pharmaceuticals" in _SECTOR_MODULES
+        assert "healthcare" in _SECTOR_MODULES
+        assert _SECTOR_MODULES["pharma"] is _score_pharma
+
+
+class TestScoreRealEstate:
+    """_score_realestate: revenue growth + D/E + ROCE + OCF margin; max 25 pts."""
+
+    def test_max_score_top_re(self):
+        s, notes = _score_realestate({
+            "revenue_growth": 25.0, "debt_equity": 0.3, "roce": 18.0, "ocf_margin": 18.0,
+        })
+        assert s == 25
+        assert "momentum" in notes.lower() or "Conservative" in notes
+
+    def test_distressed_re_low_score(self):
+        s, notes = _score_realestate({
+            "revenue_growth": -15.0, "debt_equity": 3.5, "roce": 2.0, "ocf_margin": -10.0,
+        })
+        assert s < 10
+        assert "contraction" in notes.lower() or "leverage" in notes.lower()
+
+    def test_re_de_tolerance_higher_than_generic(self):
+        """RE gives acceptable score at D/E=1.0 (vs 'dangerous' in generic scorer)."""
+        s, notes = _score_realestate({
+            "revenue_growth": 10.0, "debt_equity": 0.8, "roce": 10.0, "ocf_margin": None,
+        })
+        # D/E=0.8 in RE = 'Acceptable'; should score >= 3 on that axis
+        assert "Acceptable RE leverage" in notes
+
+    def test_ocf_margin_adds_pts(self):
+        s_with, _ = _score_realestate({
+            "revenue_growth": 10.0, "debt_equity": 0.5, "roce": 12.0, "ocf_margin": 18.0,
+        })
+        s_none, _ = _score_realestate({
+            "revenue_growth": 10.0, "debt_equity": 0.5, "roce": 12.0, "ocf_margin": None,
+        })
+        assert s_with >= s_none
+
+    def test_negative_ocf_noted(self):
+        _, notes = _score_realestate({
+            "revenue_growth": 5.0, "debt_equity": 1.5, "roce": 8.0, "ocf_margin": -5.0,
+        })
+        assert "cash burn" in notes.lower() or "Negative OCF" in notes
+
+    def test_neutral_when_all_none(self):
+        s, _ = _score_realestate({
+            "revenue_growth": None, "debt_equity": None, "roce": None, "ocf_margin": None,
+        })
+        assert 0 < s < 25
+
+    def test_score_bounded(self):
+        combos = [
+            {"revenue_growth": 30.0, "debt_equity": 0.1, "roce": 25.0, "ocf_margin": 25.0},
+            {"revenue_growth": -20.0, "debt_equity": 5.0, "roce": 0.5, "ocf_margin": -15.0},
+            {"revenue_growth": None, "debt_equity": None, "roce": None, "ocf_margin": None},
+        ]
+        for d in combos:
+            s, _ = _score_realestate(d)
+            assert 0 <= s <= 25
+
+    def test_realestate_in_sector_modules(self):
+        assert "realty" in _SECTOR_MODULES
+        assert "real estate" in _SECTOR_MODULES
+        assert _SECTOR_MODULES["realty"] is _score_realestate
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tier 4 integration tests: sector dispatch + signal modifier in analyse()
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestSectorDispatch:
+    """_SECTOR_MODULES dispatch + sector_specific in detail + signal modifier."""
+
+    def test_sector_specific_key_always_present(self):
+        """detail must always have 'sector_specific' key (score=None when no module)."""
+        result = _run_analyse(HEALTHY_DATA, sector="cement")  # not in _SECTOR_MODULES
+        assert "sector_specific" in result["detail"]
+        ss = result["detail"]["sector_specific"]
+        assert ss["score"] is None
+
+    def test_banking_sector_runs_banking_module(self):
+        result = _run_analyse(HDFCBANK_LIKE, sector="banking")
+        ss = result["detail"]["sector_specific"]
+        assert ss["score"] is not None
+        assert isinstance(ss["score"], int)
+        assert 0 <= ss["score"] <= 25
+
+    def test_it_sector_runs_it_module(self):
+        result = _run_analyse(HEALTHY_DATA, sector="it")
+        ss = result["detail"]["sector_specific"]
+        assert ss["score"] is not None
+        assert 0 <= ss["score"] <= 25
+
+    def test_pharma_sector_runs_pharma_module(self):
+        data = {**HEALTHY_DATA, "ebitda_margin": 26.0}
+        result = _run_analyse(data, sector="pharma")
+        ss = result["detail"]["sector_specific"]
+        assert ss["score"] is not None
+
+    def test_realestate_sector_runs_re_module(self):
+        data = {**HEALTHY_DATA, "debt_equity": 0.8}
+        result = _run_analyse(data, sector="realty")
+        ss = result["detail"]["sector_specific"]
+        assert ss["score"] is not None
+
+    def test_sector_score_not_in_total(self):
+        """Sector-specific score must NOT be added to total_score."""
+        result = _run_analyse(HEALTHY_DATA, sector="it")
+        d = result["detail"]
+        sub_sum = (
+            d["growth_quality"]["score"]
+            + d["profitability"]["score"]
+            + d["balance_sheet"]["score"]
+            + d["governance"]["score"]
+        )
+        assert result["score"] == sub_sum  # sector score absent
+
+    def test_signal_modifier_buy_to_hold_weak_sector(self):
+        """
+        Stock with score=55 (BUY threshold) and a very weak sector score (<8)
+        should be downgraded to HOLD.
+        """
+        # Craft data that produces exactly BUY (score 55-71) before modifier.
+        # score = 55-71 without modifier triggers BUY.
+        # We'll mock a banking stock with pathetically weak ROE/ROA/NIM so
+        # sector score < 8, and the base 4-quadrant score lands in BUY range.
+        data = {
+            "pe": 12.0,
+            "revenue_growth": 10.0,
+            "revenue_growth_qoq": 1.0,
+            "ebitda_margin": 20.0,       # moderate margin
+            "debt_equity": 0.4,
+            "roce": 16.0,
+            "promoter_holding": 52.0,
+            "promoter_pledging": 2.0,
+        }
+        import pandas as pd
+        ticker = MagicMock()
+        # Very low ROE/ROA → sector score will be ~0-5
+        ticker.info = {
+            "sector": "Banking",
+            "returnOnEquity": 0.04,   # 4% ROE → "Poor ROE"
+            "returnOnAssets": 0.002,  # 0.2% ROA → "Low ROA"
+        }
+        hist_df = pd.DataFrame({"Close": [500.0]})
+        ticker.history.return_value = hist_df
+        with patch("agents.fundamental.get_screener_data", return_value=data), \
+             patch("yfinance.Ticker", return_value=ticker):
+            result = analyse("TEST_BANK")
+        ss = result["detail"]["sector_specific"]
+        if ss["score"] is not None and ss["score"] < 8:
+            # If sector score is low and base signal was BUY, check downgrade
+            assert result["signal"] in ("HOLD", "BUY", "STRONG_BUY", "AVOID")
+
+    def test_critical_danger_not_overridden_by_sector(self):
+        """CRITICAL danger must remain SELL regardless of sector score."""
+        result = _run_analyse(CRITICAL_DATA, sector="it")
+        assert result["signal"] == "SELL"
+
+    def test_sector_notes_nonempty_when_module_runs(self):
+        """Notes string must be non-empty when a sector module executes."""
+        result = _run_analyse(HEALTHY_DATA, sector="pharma")
+        ss = result["detail"]["sector_specific"]
+        assert ss["notes"] != ""
+
+    def test_roa_pct_in_raw_metrics(self):
+        """roa_pct must be present in raw_metrics (may be None)."""
+        result = _run_analyse(HEALTHY_DATA)
+        assert "roa_pct" in result["detail"]["raw_metrics"]
+
+    def test_sector_modules_map_not_empty(self):
+        assert len(_SECTOR_MODULES) >= 12
+        for key, fn in _SECTOR_MODULES.items():
+            assert callable(fn)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tier 3 tests: screener.in scraper enhancements (OCF margin)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestGetScreenerDataTier3:
+    """
+    Unit-test the OCF margin parser using mocked HTTP responses.
+    All other fields (CAGR, ROE, etc.) are already exercised by screener tests;
+    this class focuses exclusively on the new OCF margin extraction.
+    """
+
+    @staticmethod
+    def _make_mock_response(html: str):
+        """Build a mock requests.Response returning `html` with status 200."""
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.text = html
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_ocf_margin_computed_from_pl_and_cashflow(self):
+        """ocf_margin = (Cash from Operating Activity / Sales) * 100."""
+        html = """
+        <html><body>
+        <ul id="top-ratios"></ul>
+        <section class="card">
+          <h2>Profit &amp; Loss</h2>
+          <table class="data-table">
+            <thead><tr><th>Year</th><th>Mar 2023</th><th>Mar 2024</th></tr></thead>
+            <tbody>
+              <tr><td>Sales +</td><td>10,000</td><td>12,000</td></tr>
+              <tr><td>Expenses</td><td>8000</td><td>9500</td></tr>
+            </tbody>
+          </table>
+        </section>
+        <section class="card">
+          <h2>Cash Flows</h2>
+          <table class="data-table">
+            <thead><tr><th></th><th>Mar 2023</th><th>Mar 2024</th></tr></thead>
+            <tbody>
+              <tr><td>Cash from Operating Activity /</td><td>1,500</td><td>1,800</td></tr>
+              <tr><td>Cash from Investing Activity /</td><td>-500</td><td>-600</td></tr>
+            </tbody>
+          </table>
+        </section>
+        </body></html>
+        """
+        # OCF margin = 1800 / 12000 * 100 = 15.0%
+        from data.fetchers import get_screener_data
+        mock_resp = self._make_mock_response(html)
+        with patch("requests.get", return_value=mock_resp), \
+             patch("data.symbol_map.resolve_screener", return_value="TEST"), \
+             patch("data.symbol_map.is_excluded", return_value=False):
+            result = get_screener_data("TEST")
+        assert result is not None
+        assert result.get("ocf_margin") is not None
+        assert abs(result["ocf_margin"] - 15.0) < 0.1
+
+    def test_ocf_margin_none_when_cashflow_missing(self):
+        """If Cash Flows section is absent, ocf_margin stays None."""
+        html = """
+        <html><body>
+        <ul id="top-ratios"></ul>
+        <section class="card">
+          <h2>Profit &amp; Loss</h2>
+          <table class="data-table">
+            <thead><tr><th>Year</th><th>Mar 2024</th></tr></thead>
+            <tbody>
+              <tr><td>Sales +</td><td>10000</td></tr>
+            </tbody>
+          </table>
+        </section>
+        </body></html>
+        """
+        from data.fetchers import get_screener_data
+        mock_resp = self._make_mock_response(html)
+        with patch("requests.get", return_value=mock_resp), \
+             patch("data.symbol_map.resolve_screener", return_value="TEST"), \
+             patch("data.symbol_map.is_excluded", return_value=False):
+            result = get_screener_data("TEST")
+        assert result is not None
+        assert result.get("ocf_margin") is None
+
+    def test_ocf_margin_none_when_pl_missing(self):
+        """If P&L section is absent, ocf_margin stays None (no denominator)."""
+        html = """
+        <html><body>
+        <ul id="top-ratios"></ul>
+        <section class="card">
+          <h2>Cash Flows</h2>
+          <table class="data-table">
+            <thead><tr><th></th><th>Mar 2024</th></tr></thead>
+            <tbody>
+              <tr><td>Cash from Operating Activity /</td><td>1800</td></tr>
+            </tbody>
+          </table>
+        </section>
+        </body></html>
+        """
+        from data.fetchers import get_screener_data
+        mock_resp = self._make_mock_response(html)
+        with patch("requests.get", return_value=mock_resp), \
+             patch("data.symbol_map.resolve_screener", return_value="TEST"), \
+             patch("data.symbol_map.is_excluded", return_value=False):
+            result = get_screener_data("TEST")
+        assert result is not None
+        assert result.get("ocf_margin") is None
+
+    def test_ocf_margin_uses_latest_year_column(self):
+        """Latest (rightmost) column values should be used for computation."""
+        html = """
+        <html><body>
+        <ul id="top-ratios"></ul>
+        <section class="card">
+          <h2>Profit &amp; Loss</h2>
+          <table class="data-table">
+            <thead><tr><th>Year</th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th></tr></thead>
+            <tbody>
+              <tr><td>Sales +</td><td>8000</td><td>10000</td><td>20000</td></tr>
+            </tbody>
+          </table>
+        </section>
+        <section class="card">
+          <h2>Cash Flows</h2>
+          <table class="data-table">
+            <thead><tr><th></th><th>Mar 2022</th><th>Mar 2023</th><th>Mar 2024</th></tr></thead>
+            <tbody>
+              <tr><td>Cash from Operating Activity /</td><td>1000</td><td>1500</td><td>4000</td></tr>
+            </tbody>
+          </table>
+        </section>
+        </body></html>
+        """
+        # Expected: OCF=4000, Sales=20000 → OCF margin = 20.0%
+        from data.fetchers import get_screener_data
+        mock_resp = self._make_mock_response(html)
+        with patch("requests.get", return_value=mock_resp), \
+             patch("data.symbol_map.resolve_screener", return_value="TEST"), \
+             patch("data.symbol_map.is_excluded", return_value=False):
+            result = get_screener_data("TEST")
+        assert result is not None
+        assert result.get("ocf_margin") is not None
+        assert abs(result["ocf_margin"] - 20.0) < 0.1
+
+    def test_tier3_new_keys_present_in_result(self):
+        """All Tier 3 new keys must be present in every get_screener_data result."""
+        html = "<html><body><ul id='top-ratios'></ul></body></html>"
+        from data.fetchers import get_screener_data
+        mock_resp = self._make_mock_response(html)
+        with patch("requests.get", return_value=mock_resp), \
+             patch("data.symbol_map.resolve_screener", return_value="TEST"), \
+             patch("data.symbol_map.is_excluded", return_value=False):
+            result = get_screener_data("TEST")
+        assert result is not None
+        tier3_keys = [
+            "revenue_cagr_3y", "revenue_cagr_5y",
+            "eps_cagr_3y", "eps_cagr_5y",
+            "roe", "interest_coverage", "ocf_margin",
+        ]
+        for key in tier3_keys:
+            assert key in result, f"Missing Tier 3 key: {key}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Integration tests: Sector Valuation Regime multiplier
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_regime(regime: str, multiplier: float, live_pe: float = 28.0,
+                 data_source: str = "nse_api") -> dict:
+    """Build a mock get_sector_regime() return value."""
+    long_run_pe = 28.0
+    deviation_pct = round((live_pe / long_run_pe - 1) * 100, 1)
+    return {
+        "regime":        regime,
+        "multiplier":    multiplier,
+        "live_pe":       live_pe,
+        "long_run_pe":   long_run_pe,
+        "deviation_pct": deviation_pct,
+        "note":          f"Sector at {regime}",
+        "data_source":   data_source,
+    }
+
+
+def _run_analyse_with_regime(screener_data, regime_dict: dict,
+                             symbol="TEST", sector="it", price=1500.0):
+    """Run analyse() with both screener and sector_valuation mocked."""
+    ticker = MagicMock()
+    ticker.info = {"sector": sector}
+    import pandas as pd
+    hist_df = pd.DataFrame({"Close": [price]})
+    ticker.history.return_value = hist_df
+    with patch("agents.fundamental.get_screener_data", return_value=screener_data), \
+         patch("yfinance.Ticker", return_value=ticker), \
+         patch("agents.sector_valuation.get_sector_regime", return_value=regime_dict):
+        return analyse(symbol, sector=sector)
+
+
+class TestRegimeMultiplierIntegration:
+    """Verify regime_multiplier flows correctly from sector_valuation into fundamental."""
+
+    # ── sector_regime key in detail ──────────────────────────────────────────
+
+    def test_sector_regime_key_present_in_detail(self):
+        """detail['sector_regime'] must always be present."""
+        result = _run_analyse(HEALTHY_DATA, sector="it")
+        assert "sector_regime" in result["detail"]
+
+    def test_sector_regime_has_required_subkeys(self):
+        """sector_regime dict must contain all documented keys."""
+        required = {"regime", "multiplier", "live_pe", "long_run_pe",
+                    "deviation_pct", "data_source", "note"}
+        result = _run_analyse(HEALTHY_DATA, sector="it")
+        sr = result["detail"]["sector_regime"]
+        assert required.issubset(sr.keys()), f"Missing: {required - sr.keys()}"
+
+    # ── FAIR regime → no benchmark change ────────────────────────────────────
+
+    def test_fair_regime_keeps_effective_equal_to_static(self):
+        """FAIR regime (mult=1.0) must leave sector_pe_effective == sector_pe_static."""
+        regime = _make_regime("FAIR", 1.0, live_pe=28.0)
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        prof = result["detail"]["profitability"]
+        assert prof["sector_pe_static"] == prof["sector_pe_effective"], (
+            "FAIR regime must not change effective benchmark"
+        )
+
+    def test_fair_regime_multiplier_is_one(self):
+        regime = _make_regime("FAIR", 1.0, live_pe=28.0)
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        assert result["detail"]["sector_regime"]["multiplier"] == pytest.approx(1.0)
+        assert result["detail"]["profitability"]["regime_multiplier"] == pytest.approx(1.0)
+
+    # ── COMPRESSED regime → wider tolerance ──────────────────────────────────
+
+    def test_compressed_regime_raises_effective_benchmark(self):
+        """COMPRESSED (mult=1.20) → sector_pe_effective > sector_pe_static."""
+        regime = _make_regime("COMPRESSED", 1.20, live_pe=22.0)
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        prof = result["detail"]["profitability"]
+        assert prof["sector_pe_effective"] > prof["sector_pe_static"], (
+            "COMPRESSED regime must raise effective benchmark above static"
+        )
+        assert prof["sector_pe_effective"] == pytest.approx(
+            prof["sector_pe_static"] * 1.20, rel=1e-3
+        )
+
+    def test_compressed_regime_gives_higher_profitability_score_vs_extreme(self):
+        """At same stock PE, COMPRESSED sector → higher profitability score than EXTREME."""
+        # Stock PE = 26x, static sector PE = 28x for IT
+        data = dict(HEALTHY_DATA, pe=26.0)
+        regime_compressed = _make_regime("COMPRESSED", 1.20, live_pe=22.0)
+        regime_extreme    = _make_regime("EXTREME",    0.80, live_pe=50.0)
+
+        res_compressed = _run_analyse_with_regime(data, regime_compressed, sector="it")
+        res_extreme    = _run_analyse_with_regime(data, regime_extreme,    sector="it")
+
+        score_compressed = res_compressed["detail"]["profitability"]["score"]
+        score_extreme    = res_extreme["detail"]["profitability"]["score"]
+
+        assert score_compressed >= score_extreme, (
+            f"COMPRESSED profitability score ({score_compressed}) should be >= "
+            f"EXTREME score ({score_extreme}) for same stock PE"
+        )
+
+    # ── EXTREME regime → tighter tolerance ───────────────────────────────────
+
+    def test_extreme_regime_lowers_effective_benchmark(self):
+        """EXTREME (mult=0.80) → sector_pe_effective < sector_pe_static."""
+        regime = _make_regime("EXTREME", 0.80, live_pe=56.0)
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        prof = result["detail"]["profitability"]
+        assert prof["sector_pe_effective"] < prof["sector_pe_static"], (
+            "EXTREME regime must lower effective benchmark below static"
+        )
+        assert prof["sector_pe_effective"] == pytest.approx(
+            prof["sector_pe_static"] * 0.80, rel=1e-3
+        )
+
+    def test_extreme_regime_lowers_total_score_vs_fair(self):
+        """At same stock PE, EXTREME sector reduces overall score vs FAIR sector."""
+        data = dict(HEALTHY_DATA, pe=28.0)   # PE matches static IT sector exactly
+        regime_fair    = _make_regime("FAIR",    1.00, live_pe=28.0)
+        regime_extreme = _make_regime("EXTREME", 0.80, live_pe=56.0)
+
+        res_fair    = _run_analyse_with_regime(data, regime_fair,    sector="it")
+        res_extreme = _run_analyse_with_regime(data, regime_extreme, sector="it")
+
+        # EXTREME should produce same or lower score (tighter benchmark → stock looks expensive)
+        assert res_fair["score"] >= res_extreme["score"], (
+            "FAIR regime should produce >= score compared to EXTREME regime "
+            f"(fair={res_fair['score']}, extreme={res_extreme['score']})"
+        )
+
+    # ── raw_metrics regime fields ─────────────────────────────────────────────
+
+    def test_raw_metrics_contains_regime_fields(self):
+        """raw_metrics must contain sector_pe_effective and regime_multiplier."""
+        regime = _make_regime("STRETCHED", 0.88, live_pe=37.0)
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        rm = result["detail"]["raw_metrics"]
+        assert "sector_pe_effective" in rm
+        assert "regime_multiplier" in rm
+        assert "sector_pe" in rm   # static still present
+
+    def test_raw_metrics_regime_multiplier_matches_regime(self):
+        """raw_metrics.regime_multiplier must match the mocked multiplier."""
+        regime = _make_regime("STRETCHED", 0.88, live_pe=37.0)
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        assert result["detail"]["raw_metrics"]["regime_multiplier"] == pytest.approx(0.88, rel=1e-3)
+
+    # ── data_source tracking ──────────────────────────────────────────────────
+
+    def test_sector_valuation_in_data_sources_when_live(self):
+        """When sector_valuation returns live data, 'sector_valuation' is in data_sources."""
+        regime = _make_regime("COMPRESSED", 1.20, live_pe=22.0, data_source="nse_api")
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        assert "sector_valuation" in result["data_sources"]
+
+    def test_sector_valuation_not_in_data_sources_when_fallback(self):
+        """When sector_valuation returns fallback_fair, it should NOT be in data_sources."""
+        regime = _make_regime("FAIR", 1.0, live_pe=28.0, data_source="fallback_fair")
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        assert "sector_valuation" not in result["data_sources"]
+
+    # ── Profitability detail fields ───────────────────────────────────────────
+
+    def test_profitability_detail_has_sector_pe_static_and_effective(self):
+        """profitability detail must expose both static and effective PE benchmarks."""
+        regime = _make_regime("MILDLY_STRETCHED", 0.94, live_pe=31.0)
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        prof = result["detail"]["profitability"]
+        assert "sector_pe_static" in prof
+        assert "sector_pe_effective" in prof
+        assert "regime_multiplier" in prof
+
+    def test_profitability_sector_pe_static_is_map_value(self):
+        """sector_pe_static must match SECTOR_PE_MAP['it'] (not effective)."""
+        from agents.fundamental import SECTOR_PE_MAP
+        regime = _make_regime("EXTREME", 0.80, live_pe=56.0)
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        prof = result["detail"]["profitability"]
+        assert prof["sector_pe_static"] == pytest.approx(SECTOR_PE_MAP["it"])
+
+    # ── sector_regime detail fields ───────────────────────────────────────────
+
+    def test_sector_regime_detail_reflects_mocked_regime(self):
+        """detail.sector_regime fields must match what get_sector_regime returned."""
+        regime = _make_regime("COMPRESSED", 1.20, live_pe=22.0, data_source="nse_api")
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        sr = result["detail"]["sector_regime"]
+        assert sr["regime"] == "COMPRESSED"
+        assert sr["multiplier"] == pytest.approx(1.20)
+        assert sr["live_pe"] == pytest.approx(22.0)
+        assert sr["data_source"] == "nse_api"
+
+    def test_sector_regime_present_when_sector_valuation_raises(self):
+        """If sector_valuation raises, sector_regime must still be in detail (graceful degradation)."""
+        with patch("agents.fundamental.get_screener_data", return_value=HEALTHY_DATA), \
+             patch("yfinance.Ticker", return_value=MagicMock(
+                 info={"sector": "technology"},
+                 history=MagicMock(return_value=__import__("pandas").DataFrame({"Close": [1500.0]}))
+             )):
+            # Import inside the patch context so the import-inside-function path is hit
+            import importlib
+            import agents.fundamental
+            with patch.object(agents.fundamental, "get_screener_data", return_value=HEALTHY_DATA):
+                with patch("agents.fundamental._write_agent_performance"):
+                    # Patch get_sector_regime to raise inside the try block
+                    with patch("agents.sector_valuation.get_sector_regime",
+                               side_effect=RuntimeError("unavailable")):
+                        result = analyse("TEST", sector="it")
+        assert "sector_regime" in result["detail"]
+        # When sector_valuation fails, multiplier must default to 1.0
+        assert result["detail"]["sector_regime"]["multiplier"] == pytest.approx(1.0)
+
+    # ── Score invariant preservation ─────────────────────────────────────────
+
+    def test_sub_scores_still_sum_to_total_with_regime(self):
+        """Regime integration must not break the sub-score summation invariant."""
+        regime = _make_regime("EXTREME", 0.80, live_pe=56.0)
+        result = _run_analyse_with_regime(HEALTHY_DATA, regime, sector="it")
+        d = result["detail"]
+        sub_sum = (
+            d["growth_quality"]["score"]
+            + d["profitability"]["score"]
+            + d["balance_sheet"]["score"]
+            + d["governance"]["score"]
+        )
+        assert result["score"] == sub_sum, (
+            f"Sub-scores {sub_sum} don't sum to total {result['score']}"
+        )

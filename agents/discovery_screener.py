@@ -509,6 +509,10 @@ def _upside_basis(symbol: str, agent_results: dict, tier: str) -> str:
     """
     Generate a 3-sentence upside basis explanation from agent outputs.
     No LLM call — deterministic from agent signals.
+
+    When the sector is in a notable valuation regime (COMPRESSED / STRETCHED /
+    EXTREME), a macro-level sector context sentence is appended so the user
+    understands how the sector's own historical cycle affects the opportunity.
     """
     fund   = agent_results.get("fundamental", {})
     tech   = agent_results.get("technical", {})
@@ -518,11 +522,18 @@ def _upside_basis(symbol: str, agent_results: dict, tier: str) -> str:
 
     sentences: list[str] = []
 
+    # Extract sector regime data (added in Priority 1 build)
+    f_detail      = fund.get("detail", {})
+    sv_regime     = f_detail.get("sector_regime", {})
+    regime_label  = sv_regime.get("regime")          # e.g. "COMPRESSED", "EXTREME"
+    regime_dev    = sv_regime.get("deviation_pct")   # e.g. -22.5
+    regime_mult   = sv_regime.get("multiplier", 1.0) # e.g. 1.20
+    regime_source = sv_regime.get("data_source", "")
+
     # Sentence 1: Fundamental value driver
     f_signal = fund.get("signal", "NO_DATA")
     f_upside = fund.get("upside_pct")
-    f_detail = fund.get("detail", {})
-    rev_g    = f_detail.get("growth", {}).get("revenue_growth")
+    rev_g    = f_detail.get("growth_quality", {}).get("revenue_growth_yoy")
     pe       = f_detail.get("profitability", {}).get("pe")
 
     if f_signal in ("STRONG_BUY", "BUY") and f_upside:
@@ -589,6 +600,38 @@ def _upside_basis(symbol: str, agent_results: dict, tier: str) -> str:
             f" discovery with a suggested {horizon} investment horizon."
         )
     sentences.append(s3.strip())
+
+    # Sentence 4 (optional): Sector valuation regime context
+    # Only emitted when the sector has a notable (non-FAIR) live regime so the
+    # user knows whether they are buying into a cheap or expensive sector cycle.
+    _regime_notable = regime_label in (
+        "COMPRESSED", "MILDLY_COMPRESSED",
+        "MILDLY_STRETCHED", "STRETCHED", "EXTREME",
+    )
+    _regime_live = regime_source not in ("fallback_fair", "not_fetched", "")
+    if regime_label and _regime_notable and _regime_live and regime_dev is not None:
+        if regime_label in ("COMPRESSED", "MILDLY_COMPRESSED"):
+            dev_abs = abs(regime_dev)
+            s4 = (
+                f"Macro context: the sector is currently trading {dev_abs:.0f}% BELOW"
+                f" its long-run median valuation ({regime_label}) — the benchmark was"
+                f" tightened by {regime_mult:.2f}x, meaning this stock looks even more"
+                f" attractive relative to where the sector historically re-rates."
+            )
+        elif regime_label == "EXTREME":
+            s4 = (
+                f"Caution: the sector is in an EXTREME valuation premium"
+                f" ({regime_dev:+.0f}% above long-run median) — benchmarks were"
+                f" tightened by {regime_mult:.2f}x, so upside estimates are"
+                f" conservative and the sector is vulnerable to mean-reversion."
+            )
+        else:  # MILDLY_STRETCHED or STRETCHED
+            s4 = (
+                f"Sector context: the sector is trading {regime_dev:+.0f}% above"
+                f" its long-run median ({regime_label}) — valuation benchmarks are"
+                f" adjusted by {regime_mult:.2f}x to reflect elevated sector pricing."
+            )
+        sentences.append(s4.strip())
 
     return "  ".join(sentences)
 

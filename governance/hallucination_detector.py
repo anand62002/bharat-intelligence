@@ -63,6 +63,12 @@ HOLD_BAND_PCT            = 10.0  # within ±10% = HOLD correct
 IMPROVING_THRESHOLD      = 1.0   # accuracy improvement ≥ 1 pt = IMPROVING
 DEGRADING_THRESHOLD      = 1.0   # accuracy drop ≥ 1 pt = DEGRADING
 
+# ── Trust score constants ──────────────────────────────────────────────────────
+DEFAULT_ACCURACY_BASELINE = 70.0  # neutral accuracy → trust = 1.0 (matches orchestrator)
+TRUST_MIN                 = 0.5   # floor: severely under-performing agent
+TRUST_MAX                 = 1.5   # ceiling: highly accurate agent
+TRUST_HIGH_THRESHOLD      = 1.2   # trust ≥ this → hallucination is CRITICAL, not WARNING
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Infrastructure helpers
@@ -376,20 +382,37 @@ def _emit_hallucination_alert(
     agent_name:         str,
     hallucination_rate: float,
     dry_run:            bool,
+    trust_score:        float = 1.0,
 ) -> None:
-    """Create a portfolio_alert if hallucination_rate exceeds the threshold."""
+    """
+    Create a portfolio_alert if hallucination_rate exceeds the threshold.
+
+    Severity is trust-weighted:
+      • trust ≥ TRUST_HIGH_THRESHOLD (1.2) → CRITICAL  (high-accuracy agent contradicting is alarming)
+      • trust <  TRUST_HIGH_THRESHOLD      → WARNING
+    """
     if hallucination_rate <= HALLUCINATION_ALERT_PCT:
         return
 
+    severity = "CRITICAL" if trust_score >= TRUST_HIGH_THRESHOLD else "WARNING"
+
     log.warning(
-        "HALLUCINATION ALERT: agent=%s rate=%.2f%% (threshold=%.1f%%)",
-        agent_name, hallucination_rate, HALLUCINATION_ALERT_PCT,
+        "HALLUCINATION ALERT [%s]: agent=%s rate=%.2f%% trust=%.2f (threshold=%.1f%%)",
+        severity, agent_name, hallucination_rate, trust_score, HALLUCINATION_ALERT_PCT,
+    )
+
+    trust_note = (
+        f"Agent has high trust score ({trust_score:.2f}) — "
+        "contradictions from this agent are especially significant."
+        if trust_score >= TRUST_HIGH_THRESHOLD
+        else f"Agent trust score: {trust_score:.2f} (baseline 1.0)."
     )
 
     if dry_run:
         print(
-            f"  [DRY RUN] ALERT: agent={agent_name} "
-            f"hallucination_rate={hallucination_rate:.2f}% exceeds {HALLUCINATION_ALERT_PCT}%"
+            f"  [DRY RUN] ALERT [{severity}]: agent={agent_name} "
+            f"hallucination_rate={hallucination_rate:.2f}% "
+            f"trust={trust_score:.2f} exceeds {HALLUCINATION_ALERT_PCT}%"
         )
         return
 
@@ -399,7 +422,7 @@ def _emit_hallucination_alert(
     try:
         client.table("portfolio_alerts").insert({
             "symbol":     agent_name,
-            "severity":   "WARNING",
+            "severity":   severity,
             "alert_type": "HIGH_HALLUCINATION_RATE",
             "title": (
                 f"Agent {agent_name} hallucination rate {hallucination_rate:.2f}% "
@@ -408,13 +431,71 @@ def _emit_hallucination_alert(
             "detail": (
                 f"Weekly hallucination audit found {hallucination_rate:.2f}% "
                 f"of fact-checked claims were CONTRADICTED. "
+                f"{trust_note} "
                 f"Review recent recommendations for {agent_name} agent outputs."
             ),
             "resolved": False,
         }).execute()
-        log.info("Hallucination alert created for agent=%s", agent_name)
+        log.info("Hallucination alert [%s] created for agent=%s", severity, agent_name)
     except Exception as exc:
         log.debug("Alert insert failed for %s: %s", agent_name, exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trust score computation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_agent_trust_scores(client=None) -> dict[str, float]:
+    """
+    Return a trust multiplier for each agent based on their most recent accuracy_90d.
+
+    Formula:
+        trust = max(TRUST_MIN, min(TRUST_MAX, accuracy_90d / DEFAULT_ACCURACY_BASELINE))
+
+    Interpretation:
+        • trust = 1.0  → agent is performing at baseline accuracy (70%)
+        • trust > 1.0  → above-baseline accuracy; signals carry more weight
+        • trust < 1.0  → below-baseline; signals should be discounted
+        • Agents with no performance data → trust = 1.0 (neutral)
+
+    Range: [TRUST_MIN=0.5, TRUST_MAX=1.5]
+
+    Args:
+        client:  Optional pre-built Supabase client.  Creates one if None.
+
+    Returns:
+        {agent_name: trust_score}  — only agents with accuracy_90d rows.
+        Empty dict when Supabase is unreachable.
+    """
+    if client is None:
+        client = _supabase()
+
+    if not client:
+        return {}
+
+    trust_scores: dict[str, float] = {}
+    try:
+        resp = (
+            client.table("agent_performance")
+            .select("agent_name, accuracy_90d")
+            .order("audit_date", desc=True)
+            .execute()
+        )
+        seen: set[str] = set()
+        for row in (resp.data or []):
+            name = row.get("agent_name", "")
+            acc  = row.get("accuracy_90d")
+            if name and acc is not None and name not in seen:
+                trust = max(
+                    TRUST_MIN,
+                    min(TRUST_MAX, float(acc) / DEFAULT_ACCURACY_BASELINE),
+                )
+                trust_scores[name] = round(trust, 4)
+                seen.add(name)
+    except Exception as exc:
+        log.warning("get_agent_trust_scores failed: %s", exc)
+
+    return trust_scores
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -447,6 +528,7 @@ def run(dry_run: bool = False) -> dict:
         return {
             "recs_sampled":      0,
             "agents_evaluated":  0,
+            "trust_scores":      {},
             "errors":            ["Supabase unavailable"],
             "duration_seconds":  round(time.time() - t0, 2),
         }
@@ -508,6 +590,7 @@ def run(dry_run: bool = False) -> dict:
         return {
             "recs_sampled":     0,
             "agents_evaluated": 0,
+            "trust_scores":     {},
             "errors":           errors,
             "duration_seconds": round(time.time() - t0, 2),
         }
@@ -540,19 +623,25 @@ def run(dry_run: bool = False) -> dict:
         return {
             "recs_sampled":     len(recs),
             "agents_evaluated": 0,
+            "trust_scores":     {},
             "errors":           errors,
             "duration_seconds": round(time.time() - t0, 2),
         }
 
-    # ── Step 6: Upsert and alert ──────────────────────────────────────────────
+    # ── Step 6: Compute trust scores for all known agents ────────────────────
+    trust_scores = get_agent_trust_scores(client)
+    log.info("Agent trust scores: %s", {k: f"{v:.4f}" for k, v in trust_scores.items()})
+
+    # ── Step 7: Upsert and alert ──────────────────────────────────────────────
     print()
     print("-" * 70)
     print(f"  Hallucination Audit — {today}   ({len(recs)} recs sampled)")
     print("-" * 70)
 
     for agent in all_agents:
-        acc_data = accuracy_by_agent.get(agent)
+        acc_data  = accuracy_by_agent.get(agent)
         hall_rate = hallucination_rates.get(agent)
+        trust     = trust_scores.get(agent, 1.0)
 
         acc_90d = acc_data["accuracy_90d"] if acc_data else None
 
@@ -563,7 +652,7 @@ def run(dry_run: bool = False) -> dict:
 
         print(
             f"  {agent:<18}  accuracy_90d={acc_str:<8}  "
-            f"signals={signals:<8}  hallucination_rate={hall_str}"
+            f"signals={signals:<8}  hallucination_rate={hall_str}  trust={trust:.2f}"
         )
 
         _upsert_agent_performance(
@@ -571,7 +660,7 @@ def run(dry_run: bool = False) -> dict:
         )
 
         if hall_rate is not None:
-            _emit_hallucination_alert(client, agent, hall_rate, dry_run)
+            _emit_hallucination_alert(client, agent, hall_rate, dry_run, trust_score=trust)
 
     print("-" * 70)
     print()
@@ -588,6 +677,7 @@ def run(dry_run: bool = False) -> dict:
             a: d["accuracy_90d"] for a, d in accuracy_by_agent.items()
         },
         "hallucination_rates": hallucination_rates,
+        "trust_scores":     trust_scores,
         "errors":           errors,
         "duration_seconds": round(time.time() - t0, 2),
     }

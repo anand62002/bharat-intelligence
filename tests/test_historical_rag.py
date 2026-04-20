@@ -40,6 +40,9 @@ from agents.historical_rag import (
     _fetch_all_events,
     _vector_search,
     _embed_openai,
+    _check_db_balance,
+    _RAG_SCORE_FLOOR,
+    _MIN_BALANCED_COUNT,
     analyse,
 )
 
@@ -562,3 +565,189 @@ class TestAnalyse:
             result = analyse("FII selling equity crash")
 
         assert len(result["matched_events"]) <= 3
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _check_db_balance
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestCheckDbBalance:
+    """Unit-test the polarity counter; patches _fetch_all_events so no network needed."""
+
+    def test_empty_db_returns_zeros(self):
+        with patch("agents.historical_rag._fetch_all_events", return_value=[]):
+            n_pos, n_neg = _check_db_balance()
+        assert n_pos == 0
+        assert n_neg == 0
+
+    def test_counts_each_polarity_correctly(self):
+        events = [
+            {"market_impact": "STRONG_POSITIVE"},      # positive
+            {"market_impact": "MILD_POSITIVE"},         # positive
+            {"market_impact": "LONG_TERM_POSITIVE"},    # positive
+            {"market_impact": "SEVERE_NEGATIVE"},       # negative
+            {"market_impact": "MODERATE_NEGATIVE"},     # negative
+            {"market_impact": "MIXED"},                 # neutral — not counted
+            {"market_impact": None},                    # missing — not counted
+        ]
+        with patch("agents.historical_rag._fetch_all_events", return_value=events):
+            n_pos, n_neg = _check_db_balance()
+        assert n_pos == 3
+        assert n_neg == 2
+
+    def test_all_positive_zero_negative(self):
+        events = [{"market_impact": "STRONG_POSITIVE"}] * 15
+        with patch("agents.historical_rag._fetch_all_events", return_value=events):
+            n_pos, n_neg = _check_db_balance()
+        assert n_pos == 15
+        assert n_neg == 0
+
+    def test_all_negative_zero_positive(self):
+        events = [{"market_impact": "SEVERE_NEGATIVE"}] * 8
+        with patch("agents.historical_rag._fetch_all_events", return_value=events):
+            n_pos, n_neg = _check_db_balance()
+        assert n_pos == 0
+        assert n_neg == 8
+
+    def test_sector_negative_counted_as_negative(self):
+        """SECTOR_NEGATIVE and SEVERE_SECTOR_DISRUPTION are in _NEGATIVE_IMPACTS."""
+        events = [
+            {"market_impact": "SECTOR_NEGATIVE"},
+            {"market_impact": "SEVERE_SECTOR_DISRUPTION"},
+        ]
+        with patch("agents.historical_rag._fetch_all_events", return_value=events):
+            _, n_neg = _check_db_balance()
+        assert n_neg == 2
+
+    def test_no_supabase_returns_zeros(self):
+        """When DB is unavailable, _fetch_all_events returns [] → both zero."""
+        # no_supabase autouse fixture blanks the env vars, so _fetch_all_events → []
+        n_pos, n_neg = _check_db_balance()
+        assert n_pos == 0
+        assert n_neg == 0
+
+    def test_balanced_threshold_boundary(self):
+        """Exactly _MIN_BALANCED_COUNT of each polarity → balanced."""
+        pos_events = [{"market_impact": "STRONG_POSITIVE"}] * _MIN_BALANCED_COUNT
+        neg_events = [{"market_impact": "SEVERE_NEGATIVE"}] * _MIN_BALANCED_COUNT
+        with patch("agents.historical_rag._fetch_all_events",
+                   return_value=pos_events + neg_events):
+            n_pos, n_neg = _check_db_balance()
+        assert n_pos >= _MIN_BALANCED_COUNT
+        assert n_neg >= _MIN_BALANCED_COUNT
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RAG score floor (Fix 2)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestRAGScoreFloor:
+    """
+    Score floor of _RAG_SCORE_FLOOR (30) prevents max-bearish default when
+    the historical_events DB has fewer than _MIN_BALANCED_COUNT events on
+    each polarity side.
+    """
+
+    def test_floor_applied_when_db_sparse(self, monkeypatch):
+        """All-bearish query + sparse DB → raw score ~10 → floored to 30."""
+        monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
+
+        bearish_events = [_BEARISH_EVENT, _BEARISH_EVENT, _BEARISH_EVENT]
+        # _check_db_balance returns (0, 3) → not balanced → floor should fire
+        with patch("agents.historical_rag._fetch_all_events", return_value=bearish_events), \
+             patch("agents.historical_rag._check_db_balance", return_value=(0, 3)):
+            result = analyse("massive FII selloff crash panic crisis")
+
+        assert result["detail"]["score_floor_applied"] is True
+        assert result["score"] >= _RAG_SCORE_FLOOR
+
+    def test_floor_not_applied_when_db_balanced(self, monkeypatch):
+        """With ≥10 positive + ≥10 negative events, no floor regardless of raw score."""
+        monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
+
+        bearish_events = [_BEARISH_EVENT] * 3
+        # DB is balanced: 12 pos + 11 neg → db_balanced = True
+        with patch("agents.historical_rag._fetch_all_events", return_value=bearish_events), \
+             patch("agents.historical_rag._check_db_balance",
+                   return_value=(_MIN_BALANCED_COUNT + 2, _MIN_BALANCED_COUNT + 1)):
+            result = analyse("massive selloff crash crisis")
+
+        assert result["detail"]["db_balanced"] is True
+        assert result["detail"]["score_floor_applied"] is False
+
+    def test_floor_not_applied_when_score_already_above_floor(self, monkeypatch):
+        """Bullish scores (>30) are never clamped — floor is a lower bound only."""
+        monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
+
+        bullish_events = [_BULLISH_EVENT] * 3
+        with patch("agents.historical_rag._fetch_all_events", return_value=bullish_events), \
+             patch("agents.historical_rag._check_db_balance", return_value=(2, 0)):
+            result = analyse("RBI rate cut bull rally economy recovery")
+
+        # Raw score > 30 → floor irrelevant → score_floor_applied must be False
+        assert result["detail"]["score_floor_applied"] is False
+        assert result["score"] > _RAG_SCORE_FLOOR
+
+    def test_score_at_exactly_floor_is_not_floored(self, monkeypatch):
+        """score == _RAG_SCORE_FLOOR is NOT floored (floor is strict <, not <=)."""
+        monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
+
+        # Craft avg that yields exactly score=30: avg=-0.5 → 50 + (-0.5)*40 = 30
+        # One positive event (sim=0.5) + one negative (sim=1.5) → avg = (0.5-1.5)/2 = -0.5
+        events_mix = [
+            {**_BULLISH_EVENT, "market_impact": "STRONG_POSITIVE", "outcome": "up"},
+            {**_BEARISH_EVENT, "market_impact": "SEVERE_NEGATIVE", "outcome": "down"},
+            {**_BEARISH_EVENT, "market_impact": "SEVERE_NEGATIVE", "outcome": "crash"},
+        ]
+        with patch("agents.historical_rag._fetch_all_events", return_value=events_mix), \
+             patch("agents.historical_rag._check_db_balance", return_value=(1, 2)):
+            result = analyse("mixed signals crash and recovery")
+
+        # Whatever the exact score, floor logic is score < _RAG_SCORE_FLOOR
+        assert result["score"] >= _RAG_SCORE_FLOOR or result["detail"]["score_floor_applied"]
+
+    def test_detail_always_has_floor_fields(self, monkeypatch):
+        """All 4 balance/floor fields must appear in detail on every code path."""
+        monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
+
+        with patch("agents.historical_rag._fetch_all_events",
+                   return_value=[_BULLISH_EVENT, _BEARISH_EVENT]), \
+             patch("agents.historical_rag._check_db_balance", return_value=(5, 4)):
+            result = analyse("test market conditions India")
+
+        d = result["detail"]
+        assert "db_n_positive"       in d
+        assert "db_n_negative"       in d
+        assert "db_balanced"         in d
+        assert "score_floor_applied" in d
+        assert isinstance(d["db_n_positive"],       int)
+        assert isinstance(d["db_n_negative"],       int)
+        assert isinstance(d["db_balanced"],         bool)
+        assert isinstance(d["score_floor_applied"], bool)
+
+    def test_score_always_in_valid_range_after_floor(self, monkeypatch):
+        """0 ≤ score ≤ 100 must hold regardless of floor application."""
+        monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
+
+        for events, balance in [
+            ([_BEARISH_EVENT] * 3, (0, 3)),   # all negative, sparse
+            ([_BULLISH_EVENT] * 3, (3, 0)),   # all positive, sparse
+            ([_NEUTRAL_EVENT] * 3, (0, 0)),   # all neutral, empty
+        ]:
+            with patch("agents.historical_rag._fetch_all_events", return_value=events), \
+                 patch("agents.historical_rag._check_db_balance", return_value=balance):
+                result = analyse("test query India market VIX FII")
+            assert 0 <= result["score"] <= 100, f"Score out of range for balance={balance}"
+
+    def test_no_data_path_unaffected_by_floor(self):
+        """NO_DATA early-return (empty description) is unaffected by floor logic."""
+        result = analyse("")
+        assert result["signal"] == "NO_DATA"
+        # Floor fields absent on the NO_DATA early-return — that's fine
+        assert result["score"] == 50

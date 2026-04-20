@@ -804,6 +804,385 @@ def _estimate_upside_ev_ebitda(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sector-specific scoring modules (Tier 4)
+#
+# Each function receives a flat `data` dict (keys listed in its docstring) and
+# returns (score: int, notes: str).  Max is 25 pts per module.
+#
+# IMPORTANT: these scores are STANDALONE context — they are NOT added to
+# total_score. They live in detail["sector_specific"] and can trigger a
+# narrow BUY ↔ HOLD signal modifier (see analyse(), step 6 modifier).
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _score_banking(data: dict) -> tuple[int, str]:
+    """
+    Banking / NBFC sector quality score — max 25 pts.
+
+    Keys used: roe_pct, roa_pct, ebitda_margin (NIM proxy)
+
+    Design rationale
+    ----------------
+    For banks, P/E and EBITDA margin alone are poor quality proxies.
+    The three pillars here capture what matters most:
+      • ROE  — equity-return quality and compounding power (target: ≥15%)
+      • ROA  — leverage-normalised efficiency; distinguishes elite lenders
+                from low-quality book-growers (target: ≥1.0%)
+      • NIM proxy (ebitda_margin) — lending spread strength and CASA advantage
+
+    Scale:
+      ROE          0/2/5/8/10 pts
+      ROA          0/2/5/8 pts
+      NIM proxy    0/2/3/5/7 pts
+      Max          25 pts
+    """
+    score = 0
+    notes: list[str] = []
+
+    roe       = data.get("roe_pct")
+    roa       = data.get("roa_pct")
+    nim_proxy = data.get("ebitda_margin")
+
+    # ROE — equity return (max 10 pts)
+    if roe is None:
+        score += 3
+        notes.append("ROE unknown (neutral)")
+    elif roe >= 18:
+        score += 10
+        notes.append(f"Excellent ROE {roe:.1f}% — high-quality bank")
+    elif roe >= 15:
+        score += 8
+        notes.append(f"Strong ROE {roe:.1f}%")
+    elif roe >= 10:
+        score += 5
+        notes.append(f"Adequate ROE {roe:.1f}%")
+    elif roe >= 8:
+        score += 2
+        notes.append(f"Weak ROE {roe:.1f}% — below cost of equity")
+    else:
+        notes.append(f"Poor ROE {roe:.1f}% — value-destroying")
+
+    # ROA — leverage-normalised efficiency (max 8 pts)
+    if roa is None:
+        score += 2
+        notes.append("ROA unknown (neutral)")
+    elif roa >= 1.5:
+        score += 8
+        notes.append(f"Excellent ROA {roa:.2f}% — highly efficient lender")
+    elif roa >= 1.0:
+        score += 5
+        notes.append(f"Good ROA {roa:.2f}%")
+    elif roa >= 0.5:
+        score += 2
+        notes.append(f"Moderate ROA {roa:.2f}%")
+    else:
+        notes.append(f"Low ROA {roa:.2f}% — thin asset returns")
+
+    # NIM proxy — lending spread quality (max 7 pts)
+    if nim_proxy is None:
+        score += 2
+        notes.append("NIM proxy unknown (neutral)")
+    elif nim_proxy >= 25:
+        score += 7
+        notes.append(f"Strong NIM proxy {nim_proxy:.1f}% — wide lending spread")
+    elif nim_proxy >= 15:
+        score += 5
+        notes.append(f"Good NIM proxy {nim_proxy:.1f}%")
+    elif nim_proxy >= 8:
+        score += 3
+        notes.append(f"Adequate NIM proxy {nim_proxy:.1f}%")
+    else:
+        notes.append(f"Thin NIM proxy {nim_proxy:.1f}% — compressed spreads")
+
+    return min(score, 25), "; ".join(notes)
+
+
+def _score_it(data: dict) -> tuple[int, str]:
+    """
+    IT / Technology sector quality score — max 25 pts.
+
+    Keys used: ebitda_margin (EBIT proxy), roe_pct, revenue_cagr_5y
+
+    Design rationale
+    ----------------
+    IT companies are capital-light, so EBIT margin reflects both pricing power
+    and cost discipline. ROE approximates ROCE in a near-zero-debt business.
+    The 5-year revenue CAGR captures structural demand durability (offshoring
+    cycle, cloud migrations, AI/digital transformation spend).
+
+    Scale:
+      EBIT margin (proxy)   0/2/5/7/10 pts
+      ROE                   0/2/3/5/7 pts
+      5yr revenue CAGR      0/2/2/5/8 pts
+      Max                   25 pts
+    """
+    score = 0
+    notes: list[str] = []
+
+    ebit_margin  = data.get("ebitda_margin")
+    roe          = data.get("roe_pct")
+    rev_cagr_5y  = data.get("revenue_cagr_5y")
+
+    # EBIT margin proxy — operational efficiency (max 10 pts)
+    if ebit_margin is None:
+        score += 3
+        notes.append("EBIT margin unknown (neutral)")
+    elif ebit_margin >= 25:
+        score += 10
+        notes.append(f"Excellent EBIT margin {ebit_margin:.1f}% — premium IT franchise")
+    elif ebit_margin >= 18:
+        score += 7
+        notes.append(f"Strong EBIT margin {ebit_margin:.1f}%")
+    elif ebit_margin >= 12:
+        score += 5
+        notes.append(f"Adequate EBIT margin {ebit_margin:.1f}%")
+    elif ebit_margin >= 5:
+        score += 2
+        notes.append(f"Thin EBIT margin {ebit_margin:.1f}%")
+    else:
+        notes.append(f"Very thin EBIT margin {ebit_margin:.1f}%")
+
+    # ROE — capital-light efficiency (max 7 pts)
+    if roe is None:
+        score += 2
+        notes.append("ROE unknown (neutral)")
+    elif roe >= 25:
+        score += 7
+        notes.append(f"Excellent ROE {roe:.1f}%")
+    elif roe >= 18:
+        score += 5
+        notes.append(f"Strong ROE {roe:.1f}%")
+    elif roe >= 12:
+        score += 3
+        notes.append(f"Adequate ROE {roe:.1f}%")
+    else:
+        notes.append(f"Weak ROE {roe:.1f}%")
+
+    # 5-year revenue CAGR — structural demand visibility (max 8 pts)
+    if rev_cagr_5y is None:
+        score += 2
+        notes.append("5yr revenue CAGR unknown (neutral)")
+    elif rev_cagr_5y >= 15:
+        score += 8
+        notes.append(f"Strong 5yr revenue CAGR {rev_cagr_5y:.1f}%")
+    elif rev_cagr_5y >= 8:
+        score += 5
+        notes.append(f"Healthy 5yr revenue CAGR {rev_cagr_5y:.1f}%")
+    elif rev_cagr_5y >= 3:
+        score += 2
+        notes.append(f"Moderate 5yr revenue CAGR {rev_cagr_5y:.1f}%")
+    else:
+        notes.append(f"Weak 5yr revenue CAGR {rev_cagr_5y:.1f}%")
+
+    return min(score, 25), "; ".join(notes)
+
+
+def _score_pharma(data: dict) -> tuple[int, str]:
+    """
+    Pharmaceutical sector quality score — max 25 pts.
+
+    Keys used: ebitda_margin, revenue_cagr_5y, roce
+
+    Design rationale
+    ----------------
+    Pharma quality is anchored in three fundamentals:
+      • EBITDA margin ≥25% = excellent (strong generics/specialty mix, lean COGS)
+      • 5yr revenue CAGR ≥12% = strong pipeline conversion and market penetration
+      • ROCE ≥20% = efficient R&D-to-return conversion; low ROCE signals poor pipeline
+
+    These thresholds are calibrated specifically for NSE pharma companies (Sun, Cipla,
+    Dr. Reddy's, Aurobindo, Lupin range).
+
+    Scale:
+      EBITDA margin    0/2/5/8/10 pts
+      5yr revenue CAGR 0/2/2/5/8 pts
+      ROCE             0/2/3/5/7 pts
+      Max              25 pts
+    """
+    score = 0
+    notes: list[str] = []
+
+    ebitda_margin = data.get("ebitda_margin")
+    rev_cagr_5y   = data.get("revenue_cagr_5y")
+    roce          = data.get("roce")
+
+    # EBITDA margin — pharma-specific thresholds (max 10 pts)
+    if ebitda_margin is None:
+        score += 3
+        notes.append("EBITDA margin unknown (neutral)")
+    elif ebitda_margin >= 25:
+        score += 10
+        notes.append(f"Excellent pharma EBITDA margin {ebitda_margin:.1f}%")
+    elif ebitda_margin >= 18:
+        score += 8
+        notes.append(f"Strong EBITDA margin {ebitda_margin:.1f}%")
+    elif ebitda_margin >= 12:
+        score += 5
+        notes.append(f"Adequate EBITDA margin {ebitda_margin:.1f}%")
+    elif ebitda_margin >= 5:
+        score += 2
+        notes.append(f"Thin EBITDA margin {ebitda_margin:.1f}%")
+    else:
+        notes.append(f"Very thin pharma EBITDA margin {ebitda_margin:.1f}%")
+
+    # 5-year revenue CAGR — pipeline + market penetration (max 8 pts)
+    if rev_cagr_5y is None:
+        score += 2
+        notes.append("5yr revenue CAGR unknown (neutral)")
+    elif rev_cagr_5y >= 12:
+        score += 8
+        notes.append(f"Strong 5yr revenue CAGR {rev_cagr_5y:.1f}%")
+    elif rev_cagr_5y >= 6:
+        score += 5
+        notes.append(f"Healthy 5yr revenue CAGR {rev_cagr_5y:.1f}%")
+    elif rev_cagr_5y >= 0:
+        score += 2
+        notes.append(f"Modest 5yr revenue CAGR {rev_cagr_5y:.1f}%")
+    else:
+        notes.append(f"Negative 5yr revenue CAGR {rev_cagr_5y:.1f}%")
+
+    # ROCE — R&D capital conversion efficiency (max 7 pts)
+    if roce is None:
+        score += 2
+        notes.append("ROCE unknown (neutral)")
+    elif roce >= 20:
+        score += 7
+        notes.append(f"Excellent ROCE {roce:.1f}% — strong R&D returns")
+    elif roce >= 12:
+        score += 5
+        notes.append(f"Good ROCE {roce:.1f}%")
+    elif roce >= 8:
+        score += 3
+        notes.append(f"Moderate ROCE {roce:.1f}%")
+    else:
+        notes.append(f"Weak ROCE {roce:.1f}%")
+
+    return min(score, 25), "; ".join(notes)
+
+
+def _score_realestate(data: dict) -> tuple[int, str]:
+    """
+    Real Estate sector quality score — max 25 pts.
+
+    Keys used: revenue_growth, debt_equity, roce, ocf_margin
+
+    Design rationale
+    ----------------
+    RE quality is tested on four axes:
+      • Revenue growth  — pre-sales booking momentum (≥20% signals strong cycle)
+      • D/E ratio       — RE-specific tolerance: ≤1.0 is acceptable vs ≤0.5 broadly
+      • ROCE            — project execution and land-bank conversion efficiency
+      • OCF margin      — cash conversion quality; distinguishes accrual-heavy devs
+                          from genuine cash generators (key for detecting book-padding)
+
+    Scale:
+      Revenue growth   0/2/3/6/8 pts
+      D/E (RE norms)   1/3/5/7 pts
+      ROCE             0/2/4/7 pts
+      OCF margin       0/1/1/2/3 pts
+      Max              25 pts
+    """
+    score = 0
+    notes: list[str] = []
+
+    revenue_growth = data.get("revenue_growth")
+    debt_equity    = data.get("debt_equity")
+    roce           = data.get("roce")
+    ocf_margin     = data.get("ocf_margin")
+
+    # Revenue growth — pre-sales cycle proxy (max 8 pts)
+    if revenue_growth is None:
+        score += 2
+        notes.append("Revenue growth unknown (neutral)")
+    elif revenue_growth >= 20:
+        score += 8
+        notes.append(f"Strong pre-sales momentum {revenue_growth:.1f}% revenue growth")
+    elif revenue_growth >= 10:
+        score += 6
+        notes.append(f"Healthy revenue growth {revenue_growth:.1f}%")
+    elif revenue_growth >= 0:
+        score += 3
+        notes.append(f"Moderate revenue growth {revenue_growth:.1f}%")
+    else:
+        notes.append(f"Revenue contraction {revenue_growth:.1f}%")
+
+    # D/E — RE-specific leverage tolerance (max 7 pts)
+    # Land + construction financing means ≤1.0 is acceptable (vs ≤0.5 broadly)
+    if debt_equity is None:
+        score += 2
+        notes.append("D/E unknown (neutral)")
+    elif debt_equity <= 0.5:
+        score += 7
+        notes.append(f"Conservative RE leverage D/E={debt_equity:.2f}")
+    elif debt_equity <= 1.0:
+        score += 5
+        notes.append(f"Acceptable RE leverage D/E={debt_equity:.2f}")
+    elif debt_equity <= 2.0:
+        score += 3
+        notes.append(f"Moderate RE leverage D/E={debt_equity:.2f}")
+    else:
+        score += 1
+        notes.append(f"High RE leverage D/E={debt_equity:.2f} — watch closely")
+
+    # ROCE — project execution efficiency (max 7 pts)
+    if roce is None:
+        score += 2
+        notes.append("ROCE unknown (neutral)")
+    elif roce >= 15:
+        score += 7
+        notes.append(f"Strong ROCE {roce:.1f}%")
+    elif roce >= 8:
+        score += 4
+        notes.append(f"Adequate ROCE {roce:.1f}%")
+    elif roce >= 4:
+        score += 2
+        notes.append(f"Weak ROCE {roce:.1f}%")
+    else:
+        notes.append(f"Very weak ROCE {roce:.1f}% — poor project returns")
+
+    # OCF margin — cash conversion quality (max 3 pts)
+    if ocf_margin is None:
+        score += 1
+        notes.append("OCF margin unknown (neutral)")
+    elif ocf_margin >= 15:
+        score += 3
+        notes.append(f"Strong OCF margin {ocf_margin:.1f}% — solid cash conversion")
+    elif ocf_margin >= 5:
+        score += 2
+        notes.append(f"Good OCF margin {ocf_margin:.1f}%")
+    elif ocf_margin >= 0:
+        score += 1
+        notes.append(f"Thin OCF margin {ocf_margin:.1f}%")
+    else:
+        notes.append(f"Negative OCF margin {ocf_margin:.1f}% — cash burn warning")
+
+    return min(score, 25), "; ".join(notes)
+
+
+# Module-level sector dispatch map.
+# Maps screener/yfinance sector key → sector-specific scoring function.
+# Functions are defined above; map is built once at import time.
+_SECTOR_MODULES: dict = {
+    # Banking / NBFC
+    "banking":            _score_banking,
+    "bank":               _score_banking,
+    "nbfc":               _score_banking,
+    "financial services": _score_banking,
+    "finance":            _score_banking,
+    # Technology / IT
+    "information technology": _score_it,
+    "it":                 _score_it,
+    "technology":         _score_it,
+    # Healthcare / Pharma
+    "pharmaceuticals":    _score_pharma,
+    "pharma":             _score_pharma,
+    "healthcare":         _score_pharma,
+    # Real Estate
+    "realty":             _score_realestate,
+    "real estate":        _score_realestate,
+}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Supabase helper
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -905,6 +1284,7 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
     icr:                Optional[float] = None   # Interest Coverage Ratio
     dividend_yield_pct: Optional[float] = None   # Dividend Yield (%)
     current_ratio:      Optional[float] = None   # Current Assets / Current Liabilities
+    roa_pct:            Optional[float] = None   # Return on Assets (%) — Tier 4
 
     def _safe_positive_float(val) -> Optional[float]:
         """Parse val as float; return None if invalid or non-positive."""
@@ -1004,6 +1384,15 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
         # Current Ratio
         current_ratio = _safe_positive_float(info.get("currentRatio"))
 
+        # Return on Assets — leverage-normalised efficiency (key for banking sector)
+        # yfinance returns as decimal (0.012 = 1.2%).
+        _roa_raw = info.get("returnOnAssets")
+        if _roa_raw is not None:
+            try:
+                roa_pct = round(float(_roa_raw) * 100, 2)
+            except (TypeError, ValueError):
+                pass
+
         # Current price (dropna for dividend-adjustment NaN artefacts)
         hist = yf_fetch_with_retry(ticker.history, period="1d")
         if not hist.empty:
@@ -1035,21 +1424,55 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
     if net_debt is not None and ebitda_abs is not None and ebitda_abs > 0:
         net_debt_ebitda = round(net_debt / ebitda_abs, 2)
 
+    # ── 3d. Live sector valuation regime ─────────────────────────────────────
+    # Fetches the current P/E regime for the sector (COMPRESSED → EXTREME) and
+    # applies a multiplier to ALL benchmark comparisons.  This prevents calling
+    # stocks "overvalued" in sectors trading at a historical COMPRESSED regime,
+    # and correctly tightens benchmarks when sectors are at EXTREME premiums.
+    #
+    # Examples:
+    #   Banking sector at 25% discount to long-run PE (COMPRESSED, mult=1.20):
+    #     → sector_pe_effective = 14.0 × 1.20 = 16.8  → stock at 16x looks fair not cheap
+    #   IT sector at 40% above long-run PE (STRETCHED, mult=0.88):
+    #     → sector_pe_effective = 30.0 × 0.88 = 26.4  → stock at 28x looks expensive not fair
+    _sv_regime: Optional[dict] = None
+    _regime_multiplier: float = 1.0
+    if effective_sector:
+        try:
+            from agents.sector_valuation import get_sector_regime
+            _sv_regime = get_sector_regime(effective_sector)
+            _regime_multiplier = float(_sv_regime.get("multiplier", 1.0))
+            if _sv_regime.get("data_source") != "fallback_fair":
+                data_sources.append("sector_valuation")
+        except Exception as exc:
+            log.debug("sector_valuation unavailable for %s: %s", symbol, exc)
+
+    # Effective benchmarks — static benchmark adjusted by regime multiplier
+    sector_pe_effective: float = round(sector_pe * _regime_multiplier, 2)
+    sector_ev_ebitda_effective: Optional[float] = (
+        round(sector_ev_ebitda * _regime_multiplier, 2)
+        if sector_ev_ebitda is not None else None
+    )
+    sector_pb_effective: Optional[float] = (
+        round(sector_pb * _regime_multiplier, 2)
+        if sector_pb is not None else None
+    )
+
     # ── 4. Score ─────────────────────────────────────────────────────────────
     growth_score,  growth_notes  = _score_growth(
         revenue_growth, revenue_growth_qoq, roce,
         roe=roe_pct,
     )
     profit_score,  profit_notes  = _score_profitability(
-        ebitda_margin, pe, sector_pe,
+        ebitda_margin, pe, sector_pe_effective,
         ev_ebitda=ev_ebitda,
-        sector_ev_ebitda=sector_ev_ebitda,
+        sector_ev_ebitda=sector_ev_ebitda_effective,
         prefer_ev_ebitda=prefer_ev_ebitda,
         peg_ratio=peg_ratio,
         fcf_yield=fcf_yield,
         pat_margin=pat_margin,
         pb_ratio=pb_ratio,
-        sector_pb=sector_pb,
+        sector_pb=sector_pb_effective,
         prefer_pb=prefer_pb,
     )
     bs_score,      bs_notes      = _score_balance_sheet(
@@ -1065,6 +1488,30 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
 
     total_score = growth_score + profit_score + bs_score + gov_score
     total_score = max(0, min(100, total_score))
+
+    # ── 4b. Sector-specific scoring ──────────────────────────────────────────
+    # Runs the relevant sector module (banking / IT / pharma / RE) when the
+    # effective sector is recognised.  The result is STANDALONE — it is NOT
+    # added to total_score.  It lives in detail["sector_specific"] and feeds
+    # the narrow signal modifier in step 6.
+    sector_score: Optional[int] = None
+    sector_notes: str = ""
+    _sector_fn = _SECTOR_MODULES.get(effective_sector)
+    if _sector_fn is not None:
+        _sector_data: dict = {
+            "ebitda_margin":   ebitda_margin,
+            "roe_pct":         roe_pct,
+            "roa_pct":         roa_pct,
+            "revenue_growth":  revenue_growth,
+            "revenue_cagr_3y": raw.get("revenue_cagr_3y"),
+            "revenue_cagr_5y": raw.get("revenue_cagr_5y"),
+            "eps_cagr_3y":     raw.get("eps_cagr_3y"),
+            "eps_cagr_5y":     raw.get("eps_cagr_5y"),
+            "roce":            roce,
+            "debt_equity":     debt_equity,
+            "ocf_margin":      raw.get("ocf_margin"),
+        }
+        sector_score, sector_notes = _sector_fn(_sector_data)
 
     # ── 5. Danger assessment ─────────────────────────────────────────────────
     danger_level, danger_drop_pct, danger_confidence, danger_triggers = _assess_danger(
@@ -1087,14 +1534,30 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
     else:
         signal = "SELL"
 
+    # Sector-specific signal modifier (only when a sector module ran AND
+    # danger is not CRITICAL — CRITICAL always forces SELL regardless):
+    #   • Weak sector score (<8)  → temper a borderline BUY → HOLD
+    #   • Strong sector score (≥20) → confirm a borderline HOLD → BUY
+    if sector_score is not None and danger_level != "CRITICAL":
+        if sector_score < 8 and signal == "BUY":
+            signal = "HOLD"
+            log.debug(
+                "Sector score %d < 8: BUY downgraded to HOLD for %s", sector_score, symbol
+            )
+        elif sector_score >= 20 and signal == "HOLD":
+            signal = "BUY"
+            log.debug(
+                "Sector score %d >= 20: HOLD upgraded to BUY for %s", sector_score, symbol
+            )
+
     # ── 7. Upside estimation ─────────────────────────────────────────────────
     # For EV/EBITDA-native sectors, fair value via EV/EBITDA is more reliable.
     # We compute both and prefer EV/EBITDA when the sector warrants it.
-    upside_pe: Optional[float] = _estimate_upside(pe, revenue_growth, current_price, sector_pe)
+    upside_pe: Optional[float] = _estimate_upside(pe, revenue_growth, current_price, sector_pe_effective)
     upside_ev: Optional[float] = None
-    if prefer_ev_ebitda and sector_ev_ebitda is not None:
+    if prefer_ev_ebitda and sector_ev_ebitda_effective is not None:
         upside_ev = _estimate_upside_ev_ebitda(
-            ebitda_abs, shares_outstanding, net_debt, current_price, sector_ev_ebitda
+            ebitda_abs, shares_outstanding, net_debt, current_price, sector_ev_ebitda_effective
         )
     # EV/EBITDA upside is primary for EV/EBITDA sectors when available;
     # P/E upside is kept as fallback or reference.
@@ -1124,21 +1587,25 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "notes":               growth_notes,
         },
         "profitability": {
-            "score":              profit_score,
-            "ebitda_margin":      ebitda_margin,
-            "pat_margin":         pat_margin,
-            "pe":                 pe,
-            "peg_ratio":          peg_ratio,
-            "sector_pe_used":     sector_pe,
-            "ev_ebitda":          ev_ebitda,
-            "sector_ev_ebitda":   sector_ev_ebitda,
-            "prefer_ev_ebitda":   prefer_ev_ebitda,
-            "pb_ratio":           pb_ratio,
-            "sector_pb":          sector_pb,
-            "prefer_pb":          prefer_pb,
-            "fcf_yield":          fcf_yield,
-            "valuation_method":   valuation_method,
-            "notes":              profit_notes,
+            "score":                    profit_score,
+            "ebitda_margin":            ebitda_margin,
+            "pat_margin":               pat_margin,
+            "pe":                       pe,
+            "peg_ratio":                peg_ratio,
+            "sector_pe_static":         sector_pe,
+            "sector_pe_effective":      sector_pe_effective,
+            "regime_multiplier":        _regime_multiplier,
+            "ev_ebitda":                ev_ebitda,
+            "sector_ev_ebitda_static":  sector_ev_ebitda,
+            "sector_ev_ebitda":         sector_ev_ebitda_effective,
+            "prefer_ev_ebitda":         prefer_ev_ebitda,
+            "pb_ratio":                 pb_ratio,
+            "sector_pb_static":         sector_pb,
+            "sector_pb":                sector_pb_effective,
+            "prefer_pb":                prefer_pb,
+            "fcf_yield":                fcf_yield,
+            "valuation_method":         valuation_method,
+            "notes":                    profit_notes,
         },
         "balance_sheet": {
             "score":            bs_score,
@@ -1163,6 +1630,25 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "drop_pct":   danger_drop_pct,
             "confidence": danger_confidence,
         },
+        "sector_specific": {
+            # Standalone sector quality score — NOT part of total_score.
+            # None when no recognised sector module exists for this stock.
+            "score":  sector_score,
+            "sector": effective_sector or None,
+            "notes":  sector_notes,
+        },
+        "sector_regime": {
+            # Live macro-level sector valuation regime from sector_valuation.py.
+            # regime_multiplier is applied to ALL three benchmark comparisons so
+            # the scoring reflects where the sector trades vs. its long-run median.
+            "regime":          _sv_regime.get("regime")       if _sv_regime else None,
+            "multiplier":      _regime_multiplier,
+            "live_pe":         _sv_regime.get("live_pe")      if _sv_regime else None,
+            "long_run_pe":     _sv_regime.get("long_run_pe")  if _sv_regime else None,
+            "deviation_pct":   _sv_regime.get("deviation_pct") if _sv_regime else None,
+            "data_source":     _sv_regime.get("data_source")  if _sv_regime else "not_fetched",
+            "note":            _sv_regime.get("note")         if _sv_regime else "sector_valuation not run",
+        },
         "raw_metrics": {
             # Screener.in sourced
             "pe":                  pe,
@@ -1174,10 +1660,13 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "promoter_holding":    promoter_holding,
             "promoter_pledging":   promoter_pledging,
             # yfinance sourced (existing)
-            "current_price":       current_price,
-            "sector_pe":           sector_pe,
-            "ev_ebitda":           ev_ebitda,
-            "sector_ev_ebitda":    sector_ev_ebitda,
+            "current_price":           current_price,
+            "sector_pe":               sector_pe,
+            "sector_pe_effective":     sector_pe_effective,
+            "regime_multiplier":       _regime_multiplier,
+            "ev_ebitda":               ev_ebitda,
+            "sector_ev_ebitda":        sector_ev_ebitda,
+            "sector_ev_ebitda_effective": sector_ev_ebitda_effective,
             "ebitda_abs":          ebitda_abs,
             "net_debt":            net_debt,
             "shares_outstanding":  shares_outstanding,
@@ -1194,6 +1683,7 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "net_debt_ebitda":     net_debt_ebitda,
             "current_ratio":       current_ratio,
             "dividend_yield":      dividend_yield_pct,
+            "roa_pct":             roa_pct,
             # Derived
             "peg_ratio":           peg_ratio,
         },

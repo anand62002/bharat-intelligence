@@ -302,8 +302,23 @@ def get_screener_data(symbol: str) -> dict | None:
         symbol: NSE symbol without exchange suffix, e.g. "RELIANCE", "TCS"
 
     Returns:
-        dict with keys: pe, revenue_growth, ebitda_margin, debt_equity, roce,
-        promoter_holding — values are floats or None if not found. Returns None on request failure.
+        dict with keys:
+          pe                  — Price/Earnings ratio
+          revenue_growth      — Revenue YoY growth % (TTM or 1-year)
+          ebitda_margin       — EBITDA / OPM margin %
+          debt_equity         — Debt/Equity ratio
+          roce                — Return on Capital Employed %
+          promoter_holding    — Promoter shareholding %
+          promoter_pledging   — Promoter pledged shares %
+          revenue_growth_qoq  — Quarter-on-quarter revenue growth %
+          revenue_cagr_3y     — 3-year compounded sales growth %
+          revenue_cagr_5y     — 5-year compounded sales growth %
+          eps_cagr_3y         — 3-year compounded profit growth %
+          eps_cagr_5y         — 5-year compounded profit growth %
+          roe                 — Return on equity % (from top-ratios bar)
+          interest_coverage   — Interest coverage ratio (from top-ratios bar)
+          ocf_margin          — Operating cash flow / revenue % (from cash flow table)
+        Values are floats or None if not found. Returns None on request failure.
     """
     from data.symbol_map import resolve_screener, is_excluded
     if is_excluded(symbol):
@@ -352,6 +367,14 @@ def get_screener_data(symbol: str) -> dict | None:
             "promoter_holding": None,
             "promoter_pledging": None,   # % of promoter shares pledged
             "revenue_growth_qoq": None,  # most recent quarter-on-quarter %
+            # Tier 3 new fields
+            "revenue_cagr_3y": None,     # 3-year compounded sales growth %
+            "revenue_cagr_5y": None,     # 5-year compounded sales growth %
+            "eps_cagr_3y": None,         # 3-year compounded profit growth %
+            "eps_cagr_5y": None,         # 5-year compounded profit growth %
+            "roe": None,                 # Return on equity %
+            "interest_coverage": None,   # Interest coverage ratio
+            "ocf_margin": None,          # Operating cash flow / revenue %
         }
 
         # ── Top ratios bar ──────────────────────────────────────────────────
@@ -369,6 +392,11 @@ def get_screener_data(symbol: str) -> dict | None:
                 result["debt_equity"] = val
             elif "roce" in name_txt:
                 result["roce"] = val
+            elif "roe" in name_txt and "roce" not in name_txt:
+                # ROE label contains "roe" but NOT "roce"
+                result["roe"] = val
+            elif "interest coverage" in name_txt:
+                result["interest_coverage"] = val
 
         # ── Promoter holding + pledging from shareholding table ─────────────
         found_promoter = False
@@ -424,20 +452,50 @@ def get_screener_data(symbol: str) -> dict | None:
             if result["revenue_growth_qoq"] is not None:
                 break
 
-        # ── Revenue growth and EBITDA margin from financial ratios section ──
+        # ── Revenue growth (CAGR) and Profit growth (CAGR) from section cards ──
+        # Single pass over all section.card elements; captures 1yr/3yr/5yr for
+        # both Sales Growth and Profit Growth sections.
         for section in soup.select("section.card"):
             header = section.find(["h2", "h3"])
             if not header:
                 continue
             header_txt = header.get_text(strip=True).lower()
-            if "compounded sales growth" in header_txt or "growth" in header_txt:
+
+            if "compounded sales growth" in header_txt:
+                # Extract all li items to capture 1yr/3yr/5yr
                 for li in section.select("li"):
-                    txt = li.get_text(strip=True)
-                    if "ttm" in txt.lower() or "1 year" in txt.lower():
-                        result["revenue_growth"] = _safe_float(
-                            re.sub(r"[^\d.\-]", "", txt.split(":")[-1])
-                        )
-                        break
+                    try:
+                        txt = li.get_text(strip=True)
+                        label = txt.split(":")[0].strip().lower()
+                        val_str = re.sub(r"[^\d.\-]", "", txt.split(":")[-1])
+                        val = _safe_float(val_str)
+                        if "ttm" in label or "1 year" in label:
+                            result["revenue_growth"] = val
+                        elif "3 year" in label:
+                            result["revenue_cagr_3y"] = val
+                        elif "5 year" in label:
+                            result["revenue_cagr_5y"] = val
+                        # "10 years" → ignore (too long-term)
+                    except Exception:
+                        continue
+
+            elif "compounded profit growth" in header_txt or (
+                "profit growth" in header_txt and "sales" not in header_txt
+            ):
+                # Extract eps/profit CAGR: 1yr/3yr/5yr
+                for li in section.select("li"):
+                    try:
+                        txt = li.get_text(strip=True)
+                        label = txt.split(":")[0].strip().lower()
+                        val_str = re.sub(r"[^\d.\-]", "", txt.split(":")[-1])
+                        val = _safe_float(val_str)
+                        if "3 year" in label:
+                            result["eps_cagr_3y"] = val
+                        elif "5 year" in label:
+                            result["eps_cagr_5y"] = val
+                        # 1yr / ttm → optional; not used downstream yet
+                    except Exception:
+                        continue
 
         # EBITDA margin — look for OPM in the top ratios or quarters table
         for li in soup.select("#top-ratios li"):
@@ -447,6 +505,63 @@ def get_screener_data(symbol: str) -> dict | None:
                 result["ebitda_margin"] = _safe_float(
                     val_el.get_text(strip=True).replace("%", "").replace(",", "")
                 )
+
+        # ── OCF margin from annual P&L + Cash Flows sections ────────────────────
+        # Scan for:
+        #   (a) Annual "Profit & Loss" section → latest Sales figure (denominator)
+        #   (b) "Cash Flows" section → latest "Cash from Operating Activity" figure
+        # Then compute  ocf_margin = OCF / Sales * 100
+        # This distinguishes EBITDA-rich but cash-poor companies (accrual distortion).
+        _annual_sales: Optional[float] = None
+        _ocf_abs: Optional[float] = None
+
+        for section in soup.select("section.card"):
+            header = section.find(["h2", "h3"])
+            if not header:
+                continue
+            htxt = header.get_text(strip=True).lower()
+
+            # Annual P&L card → latest Sales row (denominator for OCF margin)
+            if "profit & loss" in htxt or "profit and loss" in htxt:
+                for table in section.select("table.data-table"):
+                    for row in table.select("tbody tr"):
+                        cells = row.find_all("td")
+                        if not cells:
+                            continue
+                        if "sales" in cells[0].get_text(strip=True).lower():
+                            vals = [
+                                _safe_float(td.get_text(strip=True).replace(",", ""))
+                                for td in cells[1:]
+                            ]
+                            vals = [v for v in vals if v is not None]
+                            if vals:
+                                _annual_sales = vals[-1]
+                            break
+                    if _annual_sales is not None:
+                        break
+
+            # Cash Flows card → row containing "operating" (Cash from Operating Activity)
+            elif "cash flows" in htxt or "cash flow" in htxt:
+                for table in section.select("table.data-table"):
+                    for row in table.select("tbody tr"):
+                        cells = row.find_all("td")
+                        if not cells:
+                            continue
+                        row_label = cells[0].get_text(strip=True).lower()
+                        if "operating" in row_label:
+                            vals = [
+                                _safe_float(td.get_text(strip=True).replace(",", ""))
+                                for td in cells[1:]
+                            ]
+                            vals = [v for v in vals if v is not None]
+                            if vals:
+                                _ocf_abs = vals[-1]
+                            break
+                    if _ocf_abs is not None:
+                        break
+
+        if _annual_sales and _annual_sales > 0 and _ocf_abs is not None:
+            result["ocf_margin"] = round(_ocf_abs / _annual_sales * 100, 2)
 
         return result
     except Exception as e:
