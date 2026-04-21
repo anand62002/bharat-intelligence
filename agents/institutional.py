@@ -600,32 +600,89 @@ def analyse(
         if yf_inst:
             data_sources.append("yfinance_institutional")
 
+    # ── Data quality tier ─────────────────────────────────────────────────────
+    # Used to decide whether a score of 50 (neutral) should be forced.
+    # Absence of data ≠ bearish signal — explicitly label the gap.
+    nse_flow_available = bool(rows_5d)
+    nse_bulk_available = bool(bulk_deals)
+    yf_pct_available   = bool(yf_inst and yf_inst.get("pct_institutions") is not None
+                               and yf_inst["pct_institutions"] > 0)
+
+    if nse_flow_available and nse_bulk_available:
+        data_quality = "FULL"
+    elif nse_flow_available:
+        data_quality = "PARTIAL"          # FII/DII ok, bulk deals blocked
+    elif yf_pct_available:
+        data_quality = "SNAPSHOT_ONLY"    # only yfinance quarterly snapshot
+    else:
+        data_quality = "NO_DATA"
+
     # ── 4. Score ──────────────────────────────────────────────────────────────
     fii_score,  fii_note  = _score_fii(rows_5d)
     dii_score,  dii_note  = _score_dii(rows_5d, fii_score)
     bulk_score, bulk_note = _score_bulk_deals(bulk_deals, symbol)
 
-    # yfinance fallback nudge: ±5 pts based on institutional ownership %
-    # Only applied when NSE bulk deals were unavailable
-    yf_nudge = 0
+    # yfinance snapshot nudge — POSITIVE only.
+    #
+    # Rationale for NO negative nudge:
+    #   0% institutional ownership is AMBIGUOUS — it could mean:
+    #     (a) yfinance data unavailable for this ticker
+    #     (b) small-cap not yet on institutional radar (neutral, not bearish)
+    #   Penalising ambiguous data violates "data gap = neutral" principle.
+    #   We only add a positive signal when institutions are *confirmed* present.
+    yf_nudge      = 0
     yf_nudge_note = ""
     if yf_inst and not bulk_deals:
         pct = yf_inst.get("pct_institutions")
-        if pct is not None:
+        if pct is not None and pct > 0:
             if pct >= 20:
-                yf_nudge = 5
-                yf_nudge_note = f"Institutional ownership {pct:.1f}% (yfinance snapshot)"
-            elif pct < 5:
-                yf_nudge = -5
-                yf_nudge_note = f"Low institutional ownership {pct:.1f}% (yfinance snapshot)"
+                yf_nudge      = 5
+                yf_nudge_note = f"Strong institutional ownership {pct:.1f}% (yfinance snapshot)"
+            elif pct >= 5:
+                yf_nudge      = 2
+                yf_nudge_note = f"Moderate institutional ownership {pct:.1f}% (yfinance snapshot)"
             else:
-                yf_nudge_note = f"Institutional ownership {pct:.1f}% (yfinance snapshot)"
+                # 0 < pct < 5: token holding — informational only, no score impact
+                yf_nudge_note = (
+                    f"Minimal institutional ownership {pct:.1f}% (yfinance snapshot); "
+                    "insufficient to signal direction"
+                )
+        else:
+            # pct = 0 or None: ambiguous — do not penalise
+            yf_nudge_note = (
+                "Institutional ownership data unavailable or 0% (yfinance snapshot). "
+                "Treated as neutral — absence of data is not a bearish signal."
+            )
 
-    # Raw score range: [-30,30] + [0,15] + [-20,20] + [-5,5] = [-55, 70]
-    # Normalise to 0–100: (raw + 55) / 125 * 100
-    raw_score       = fii_score + dii_score + bulk_score + yf_nudge
-    normalised      = round((raw_score + 55) / 125 * 100)
-    total_score     = max(0, min(100, normalised))
+    # ── Normalise to 0–100 ────────────────────────────────────────────────────
+    # Formula centres at exactly 50 when raw_score = 0:
+    #   raw range: [-50, 65]  →  offset = 57.5, span = 115
+    #   (0 + 57.5) / 115 * 100 = 50.0 ✓
+    #
+    # OVERRIDE to 50 when no real flow data existed — data gap must not
+    # produce a sub-50 (negative-leaning) score.
+    raw_score = fii_score + dii_score + bulk_score + yf_nudge
+
+    data_unavailable_note = ""
+    if data_quality == "NO_DATA":
+        normalised = 50
+        data_unavailable_note = (
+            "NSE FII/DII API and bulk-deal API both unavailable; "
+            "yfinance institutional snapshot also returned no data. "
+            "Score forced to 50 (neutral). Do NOT interpret as bearish."
+        )
+    elif data_quality == "SNAPSHOT_ONLY":
+        # Only quarterly snapshot — no flow signal; score the snapshot nudge
+        # around the neutral midpoint
+        normalised = 50 + yf_nudge
+        data_unavailable_note = (
+            "NSE real-time data unavailable. Score based solely on "
+            "yfinance quarterly institutional ownership snapshot."
+        )
+    else:
+        normalised = round((raw_score + 57.5) / 115 * 100)
+
+    total_score = max(0, min(100, normalised))
 
     # ── 5. Danger / opportunity signals ───────────────────────────────────────
     danger_signals = _detect_signals(rows_5d, rows_10d, bulk_deals, promoter_pledging)
@@ -638,7 +695,13 @@ def analyse(
         s["type"] == "CRITICAL_OPPORTUNITY" for s in danger_signals
     )
 
-    if has_critical_danger:
+    # When no real-time flow data was available, emit NO_DATA so the
+    # synthesiser writes "insufficient data" — not "weak institutional signal".
+    # Critical danger/opportunity override even with missing data (they use
+    # promoter pledging or historical signals that don't need live NSE).
+    if data_quality == "NO_DATA" and not has_critical_danger and not has_critical_oppty:
+        signal = "NO_DATA"
+    elif has_critical_danger:
         signal = "SELL"
     elif has_critical_oppty or total_score >= 72:
         signal = "STRONG_BUY"
@@ -695,21 +758,24 @@ def analyse(
         "sessions_history": len(rows_10d),
     }
 
-    # Distinguish "NSE API returned no data" from "genuinely zero flow"
-    # so the synthesiser does not mis-read missing data as bearish signal.
-    nse_data_available = bool(live or historical)
-
     result = {
-        "signal":             signal,
-        "score":              total_score,
-        "detail":             detail,
-        "fii_net_5d":         fii_net_5d,
-        "dii_net_5d":         dii_net_5d,
-        "bulk_deals":         bulk_deals,
-        "danger_signals":     danger_signals,
-        "data_sources":       list(dict.fromkeys(data_sources)),
-        "nse_data_available": nse_data_available,   # False = NSE blocked/failed; not bearish
-        "agent_name":         AGENT_NAME,
+        "signal":                signal,
+        "score":                 total_score,
+        "detail":                detail,
+        "fii_net_5d":            fii_net_5d,
+        "dii_net_5d":            dii_net_5d,
+        "bulk_deals":            bulk_deals,
+        "danger_signals":        danger_signals,
+        "data_sources":          list(dict.fromkeys(data_sources)),
+        # ── Data quality metadata ─────────────────────────────────────────────
+        # Synthesiser MUST use these fields to avoid misreading data gaps.
+        #   FULL           — NSE FII/DII + bulk deals both available
+        #   PARTIAL        — FII/DII available, bulk-deal API blocked
+        #   SNAPSHOT_ONLY  — only yfinance quarterly ownership snapshot
+        #   NO_DATA        — nothing available; score = 50 (neutral by design)
+        "data_quality":          data_quality,
+        "data_unavailable_note": data_unavailable_note,
+        "agent_name":            AGENT_NAME,
     }
 
     try:
