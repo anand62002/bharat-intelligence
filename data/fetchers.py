@@ -176,37 +176,218 @@ def get_ohlcv(symbol: str, period: str = "1y"):
 
 # ─── 2. NSE FII/DII ──────────────────────────────────────────────────────────
 
-def get_nse_fii_dii() -> dict | None:
-    """
-    Scrape latest FII/DII activity from NSE's public data endpoint.
+# ── FII/DII source-specific headers ──────────────────────────────────────────
 
-    Returns:
-        dict with keys: date (str), fii_net (float, crores), dii_net (float, crores)
-        or None on failure.
+_NSE_FII_HEADERS = {
+    **_HEADERS,
+    "Accept":         "application/json, text/plain, */*",
+    "Referer":        "https://www.nseindia.com/market-data/fii-dii-activity",
+    "Accept-Encoding":"gzip, deflate, br",
+    "Cache-Control":  "no-cache",
+    "Pragma":         "no-cache",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+_BSE_HEADERS = {
+    **_HEADERS,
+    "Accept":  "application/json, text/plain, */*",
+    "Origin":  "https://www.bseindia.com",
+    "Referer": "https://www.bseindia.com/markets/equity/EQReports/FiidiiActivity.aspx",
+}
+
+_MC_HEADERS = {
+    **_HEADERS,
+    "Referer": "https://www.moneycontrol.com/",
+}
+
+
+def _try_nse_fii_dii() -> dict | None:
+    """
+    Source 1: NSE `fiidiiTradeReact` JSON endpoint.
+    Requires cookie-seeding from homepage; prone to 403 but fastest when working.
     """
     url = "https://www.nseindia.com/api/fiidiiTradeReact"
-    session = requests.Session()
     try:
-        # Seed cookies — NSE requires a prior visit to the main site
-        session.get("https://www.nseindia.com", headers=_HEADERS, timeout=10)
-        resp = session.get(url, headers=_HEADERS, timeout=10)
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=_NSE_FII_HEADERS, timeout=10)
+        resp = session.get(url, headers=_NSE_FII_HEADERS, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if not data:
+            return None
+        latest = data[0]
+        return {
+            "date":    latest.get("date") or latest.get("DATE") or "",
+            "fii_net": float(latest.get("fiiNet") or latest.get("FII_NET") or 0),
+            "dii_net": float(latest.get("diiNet") or latest.get("DII_NET") or 0),
+            "source":  "nse",
+        }
+    except Exception as exc:
+        log.warning("FII/DII NSE failed: %s", exc)
+        return None
+
+
+def _try_bse_fii_dii() -> dict | None:
+    """
+    Source 2: BSE India FiiDiiActivity API.
+    Different server infrastructure from NSE — primary fallback when NSE blocks.
+    Returns the same underlying SEBI-reported data, just via BSE's feed.
+    """
+    url = "https://api.bseindia.com/BseIndiaAPI/api/FiiDiiActivity/w"
+    try:
+        session = requests.Session()
+        # BSE also benefits from a homepage visit for cookie seeding
+        session.get("https://www.bseindia.com", headers=_BSE_HEADERS, timeout=10)
+        resp = session.get(url, headers=_BSE_HEADERS, timeout=12)
         resp.raise_for_status()
         data = resp.json()
 
-        if not data:
-            log.warning("get_nse_fii_dii: empty response")
+        # BSE can return either a list or a dict with "Table" key
+        rows = data if isinstance(data, list) else data.get("Table", data.get("table", []))
+        if not rows:
             return None
 
-        # Latest entry is first in the array
-        latest = data[0]
-        fii_net = float(latest.get("fiiNet") or latest.get("FII_NET") or 0)
-        dii_net = float(latest.get("diiNet") or latest.get("DII_NET") or 0)
-        date_str = latest.get("date") or latest.get("DATE") or ""
+        # Find most recent FII and DII rows
+        fii_net = dii_net = None
+        date_str = ""
+        for row in rows:
+            client = str(
+                row.get("ClientType") or row.get("CLIENT_TYPE") or
+                row.get("Category") or row.get("CATEGORY") or ""
+            ).upper()
+            net_raw = (
+                row.get("NetActivity") or row.get("NET_ACTIVITY") or
+                row.get("NetValue")    or row.get("NET_VALUE")    or
+                row.get("Net")         or 0
+            )
+            date_raw = (
+                row.get("TRDDTE") or row.get("TradeDate") or
+                row.get("TRADE_DATE") or row.get("Date") or ""
+            )
+            try:
+                net_val = float(str(net_raw).replace(",", ""))
+            except (ValueError, TypeError):
+                continue
 
-        return {"date": date_str, "fii_net": fii_net, "dii_net": dii_net}
-    except Exception as e:
-        log.error("get_nse_fii_dii: %s", e)
+            if not date_str and date_raw:
+                date_str = str(date_raw)
+            if "FII" in client or "FPI" in client:
+                fii_net = net_val
+            elif "DII" in client or "MF" in client or "DOM" in client:
+                dii_net = net_val
+
+        if fii_net is None and dii_net is None:
+            return None
+
+        return {
+            "date":    date_str,
+            "fii_net": fii_net or 0.0,
+            "dii_net": dii_net or 0.0,
+            "source":  "bse",
+        }
+    except Exception as exc:
+        log.warning("FII/DII BSE failed: %s", exc)
         return None
+
+
+def _try_moneycontrol_fii_dii() -> dict | None:
+    """
+    Source 3: Moneycontrol FII/DII activity page (HTML scrape).
+    Consumer-facing page — rarely blocked, stable table structure.
+    Falls back to this only when both NSE and BSE APIs are unavailable.
+    """
+    url = "https://www.moneycontrol.com/stocks/marketinfo/fiidii_activity/index.html"
+    try:
+        resp = requests.get(url, headers=_MC_HEADERS, timeout=12)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Moneycontrol table headers: Date | FII Buy | FII Sell | FII Net | DII Buy | DII Sell | DII Net
+        table = soup.find("table", {"id": "fiidii"}) or soup.find(
+            "table", class_=lambda c: c and ("fiidii" in c.lower() or "mctable" in c.lower())
+        )
+        if not table:
+            # Try first substantial table with > 5 columns
+            for t in soup.find_all("table"):
+                headers = [th.get_text(strip=True).lower() for th in t.find_all("th")]
+                if any("fii" in h for h in headers) and any("dii" in h for h in headers):
+                    table = t
+                    break
+
+        if not table:
+            return None
+
+        # Find column indices for FII net and DII net
+        header_row = table.find("tr")
+        if not header_row:
+            return None
+        headers = [th.get_text(strip=True).lower() for th in header_row.find_all(["th", "td"])]
+
+        fii_net_idx = dii_net_idx = date_idx = None
+        for i, h in enumerate(headers):
+            if "date" in h:
+                date_idx = i
+            elif "fii" in h and "net" in h:
+                fii_net_idx = i
+            elif "dii" in h and "net" in h:
+                dii_net_idx = i
+
+        if fii_net_idx is None or dii_net_idx is None:
+            return None
+
+        # First data row = most recent date
+        rows = table.find_all("tr")[1:]
+        for row in rows:
+            cells = [td.get_text(strip=True) for td in row.find_all("td")]
+            if len(cells) <= max(fii_net_idx, dii_net_idx):
+                continue
+            try:
+                fii_net = float(cells[fii_net_idx].replace(",", "").replace("−", "-"))
+                dii_net = float(cells[dii_net_idx].replace(",", "").replace("−", "-"))
+                date_str = cells[date_idx] if date_idx is not None else ""
+                return {
+                    "date":    date_str,
+                    "fii_net": fii_net,
+                    "dii_net": dii_net,
+                    "source":  "moneycontrol",
+                }
+            except (ValueError, IndexError):
+                continue
+
+        return None
+    except Exception as exc:
+        log.warning("FII/DII Moneycontrol failed: %s", exc)
+        return None
+
+
+def get_nse_fii_dii() -> dict | None:
+    """
+    Fetch latest daily FII/DII net flow data (₹ Crores).
+
+    Tries three sources in order until one succeeds:
+      1. NSE `fiidiiTradeReact` API  — official, fast, but prone to 403
+      2. BSE India FiiDiiActivity API — different infra, same SEBI data
+      3. Moneycontrol HTML scrape    — consumer page, rarely blocked
+
+    Returns:
+        {"date": str, "fii_net": float, "dii_net": float, "source": str}
+        or None if all three sources fail.
+
+    Note: All three sources report the SAME underlying data (SEBI filings).
+    The "source" key is informational — callers should treat the values
+    identically regardless of which source succeeded.
+    """
+    for attempt_fn in (_try_nse_fii_dii, _try_bse_fii_dii, _try_moneycontrol_fii_dii):
+        result = attempt_fn()
+        if result:
+            log.info("FII/DII data fetched via %s: FII=%.0f DII=%.0f Cr",
+                     result["source"], result["fii_net"], result["dii_net"])
+            return result
+
+    log.error("get_nse_fii_dii: all three sources (NSE, BSE, Moneycontrol) failed")
+    return None
 
 
 # ─── 3. MCX PRICES ───────────────────────────────────────────────────────────
@@ -410,6 +591,9 @@ def get_screener_data(symbol: str) -> dict | None:
             "eps_cagr_5y": None,         # 5-year compounded profit growth %
             "roe": None,                 # Return on equity %
             "interest_coverage": None,   # Interest coverage ratio
+            # Shareholding breakdown (quarterly snapshot from screener)
+            "fii_holding_pct": None,     # FII/FPI % ownership (latest quarter)
+            "dii_holding_pct": None,     # DII/MF % ownership (latest quarter)
             "ocf_margin": None,          # Operating cash flow / revenue %
         }
 
@@ -434,31 +618,37 @@ def get_screener_data(symbol: str) -> dict | None:
             elif "interest coverage" in name_txt:
                 result["interest_coverage"] = val
 
-        # ── Promoter holding + pledging from shareholding table ─────────────
+        # ── Shareholding table: promoter, pledging, FII/DII ────────────────────
+        # Screener's shareholding section has rows:
+        #   Promoters | FIIs | DIIs | Government | Public | ...
+        # Each row has one value per quarter; we take the most recent (last) cell.
         found_promoter = False
         for row in soup.select("table.data-table tbody tr"):
             cells = row.find_all("td")
             if not cells:
                 continue
             row_label = cells[0].get_text(strip=True).lower()
+
+            def _last_val(cells):
+                """Return the last non-None float value across all cells."""
+                v_all = [
+                    _safe_float(td.get_text(strip=True).replace("%", ""))
+                    for td in cells[1:]
+                ]
+                vals = [v for v in v_all if v is not None]
+                return vals[-1] if vals else None
+
             if not found_promoter and "promoter" in row_label and "pledg" not in row_label:
-                last_val = None
-                for td in cells[1:]:
-                    v = _safe_float(td.get_text(strip=True).replace("%", ""))
-                    if v is not None:
-                        last_val = v
-                result["promoter_holding"] = last_val
+                result["promoter_holding"] = _last_val(cells)
                 found_promoter = True
             elif "pledg" in row_label:
-                # Take the most recent quarter (last non-None value)
-                vals = []
-                for td in cells[1:]:
-                    v = _safe_float(td.get_text(strip=True).replace("%", ""))
-                    if v is not None:
-                        vals.append(v)
-                if vals:
-                    result["promoter_pledging"] = vals[-1]
-                break  # pledging row found — stop scanning
+                result["promoter_pledging"] = _last_val(cells)
+                # keep scanning — FII/DII rows come after pledging
+            elif any(k in row_label for k in ("fii", "fpi", "foreign")):
+                result["fii_holding_pct"] = _last_val(cells)
+            elif any(k in row_label for k in ("dii", "mutual fund", "insurance", "domestic inst")):
+                if result["dii_holding_pct"] is None:
+                    result["dii_holding_pct"] = _last_val(cells)
 
         # ── QoQ revenue growth from quarterly sales table ────────────────────
         # Look for the quarterly P&L section (Sales row) and compute QoQ
