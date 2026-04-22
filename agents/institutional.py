@@ -32,8 +32,15 @@ AGENT_NAME = "institutional"
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 
-# NSE bulk-deal CSV endpoint (public, no auth)
-_NSE_BULK_CSV_URL = "https://nseindia.com/api/historical/bulk-deals?from={from_date}&to={to_date}&symbol={symbol}"
+# NSE bulk-deal endpoints to try in order (the first has moved; we try both)
+_NSE_BULK_URLS = [
+    # Current endpoint (www subdomain, with session cookie)
+    "https://www.nseindia.com/api/historical/bulk-deals?from={from_date}&to={to_date}&symbol={symbol}",
+    # Legacy endpoint that was used previously
+    "https://nseindia.com/api/historical/bulk-deals?from={from_date}&to={to_date}&symbol={symbol}",
+    # allorigins proxy as last resort (bypasses cookie requirement)
+    "https://api.allorigins.win/get?url=https%3A//www.nseindia.com/api/historical/bulk-deals%3Ffrom%3D{from_date}%26to%3D{to_date}%26symbol%3D{symbol}",
+]
 
 # Fallback NSE headers (required or NSE blocks the request)
 _NSE_HEADERS = {
@@ -70,37 +77,48 @@ def _fetch_bulk_deals(symbol: str, days: int = 30) -> list[dict]:
     """
     Fetch bulk/block deal records from NSE for a symbol over the last `days`.
 
-    Uses a requests.Session so cookies from the NSE homepage seed request
-    are correctly carried into the data request (urllib did not do this).
-
-    Falls back to an empty list on any failure; caller handles gracefully.
+    Tries multiple URL patterns (the original endpoint returned 404 after NSE
+    restructured their API). Falls back to allorigins.win proxy when direct
+    calls fail. Returns [] on all failures; caller handles gracefully.
     """
+    import json as _json
+
     clean     = symbol.replace(".NS", "").replace(".BO", "").upper()
     to_date   = date.today()
     from_date = to_date - timedelta(days=days)
+    fmt       = {"symbol": clean,
+                 "from_date": from_date.strftime("%d-%m-%Y"),
+                 "to_date":   to_date.strftime("%d-%m-%Y")}
 
-    url = _NSE_BULK_CSV_URL.format(
-        symbol=clean,
-        from_date=from_date.strftime("%d-%m-%Y"),
-        to_date=to_date.strftime("%d-%m-%Y"),
-    )
+    raw = None
+    for url_tmpl in _NSE_BULK_URLS:
+        url = url_tmpl.format(**fmt)
+        is_proxy = "allorigins" in url
+        try:
+            if is_proxy:
+                resp = requests.get(url, headers=_NSE_HEADERS, timeout=15)
+                resp.raise_for_status()
+                raw = resp.json().get("contents", "")
+            else:
+                session = requests.Session()
+                session.get("https://www.nseindia.com/", headers=_NSE_HEADERS, timeout=10)
+                resp = session.get(url, headers=_NSE_HEADERS, timeout=12)
+                resp.raise_for_status()
+                raw = resp.text
+            if raw and raw.strip():
+                break
+        except requests.RequestException as exc:
+            log.debug("NSE bulk-deal (%s) failed: %s", url_tmpl[:60], exc)
+            raw = None
 
-    try:
-        session = requests.Session()
-        # NSE requires a prior visit so cookies are seeded before the API call
-        session.get("https://www.nseindia.com/", headers=_NSE_HEADERS, timeout=10)
-        resp = session.get(url, headers=_NSE_HEADERS, timeout=12)
-        resp.raise_for_status()
-        raw = resp.text
-    except requests.RequestException as exc:
-        log.warning("NSE bulk-deal fetch failed: %s", exc)
+    if not raw:
+        log.warning("NSE bulk-deal fetch failed: all %d URL variants exhausted", len(_NSE_BULK_URLS))
         return []
 
-    import json
     try:
-        data    = json.loads(raw)
+        data    = _json.loads(raw)
         records = data if isinstance(data, list) else data.get("data", [])
-    except (json.JSONDecodeError, AttributeError):
+    except (_json.JSONDecodeError, AttributeError):
         records = _parse_bulk_csv(raw, clean)
 
     deals = []
