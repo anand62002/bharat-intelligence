@@ -176,52 +176,152 @@ def get_ohlcv(symbol: str, period: str = "1y"):
 
 # ─── 2. NSE FII/DII ──────────────────────────────────────────────────────────
 
-# ── FII/DII source-specific headers ──────────────────────────────────────────
+# ── FII/DII helpers ───────────────────────────────────────────────────────────
 
-_NSE_FII_HEADERS = {
-    **_HEADERS,
-    "Accept":         "application/json, text/plain, */*",
-    "Referer":        "https://www.nseindia.com/market-data/fii-dii-activity",
-    "Accept-Encoding":"gzip, deflate, br",
-    "Cache-Control":  "no-cache",
-    "Pragma":         "no-cache",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-}
+def _parse_fii_crore(text: str) -> Optional[float]:
+    """
+    Parse an Indian number string that may include commas, rupee signs,
+    en-dashes (−) or minus signs, and return a float in crores.
+    Returns None if unparseable.
+    """
+    if not text:
+        return None
+    cleaned = (
+        text.replace(",", "").replace("₹", "").replace("−", "-")
+            .replace("\u2212", "-").replace("(", "-").replace(")", "").strip()
+    )
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
-_BSE_HEADERS = {
-    **_HEADERS,
-    "Accept":  "application/json, text/plain, */*",
-    "Origin":  "https://www.bseindia.com",
-    "Referer": "https://www.bseindia.com/markets/equity/EQReports/FiidiiActivity.aspx",
-}
 
-_MC_HEADERS = {
-    **_HEADERS,
-    "Referer": "https://www.moneycontrol.com/",
-}
+def _scrape_fii_table(soup: BeautifulSoup) -> Optional[dict]:
+    """
+    Generic FII/DII table parser.  Scans all <table> tags for one that has
+    both FII and DII columns, then extracts the most recent row.
+    Works across Goodreturns, BSE website, and other HTML layouts.
+    """
+    for tbl in soup.find_all("table"):
+        ths = [th.get_text(" ", strip=True).lower() for th in tbl.find_all("th")]
+        if not ths:
+            # Some tables use <td> in the header row
+            first_row = tbl.find("tr")
+            if first_row:
+                ths = [td.get_text(" ", strip=True).lower()
+                       for td in first_row.find_all("td")]
 
+        has_fii = any("fii" in h or "fpi" in h for h in ths)
+        has_dii = any("dii" in h or "mf" in h for h in ths)
+        if not (has_fii and has_dii):
+            continue
+
+        # Map column index → role
+        date_idx = fii_net_idx = dii_net_idx = None
+        fii_buy_idx = fii_sell_idx = dii_buy_idx = dii_sell_idx = None
+        for i, h in enumerate(ths):
+            if "date" in h:
+                date_idx = i
+            elif ("fii" in h or "fpi" in h) and "net" in h:
+                fii_net_idx = i
+            elif ("fii" in h or "fpi" in h) and "buy" in h:
+                fii_buy_idx = i
+            elif ("fii" in h or "fpi" in h) and "sell" in h:
+                fii_sell_idx = i
+            elif "dii" in h and "net" in h:
+                dii_net_idx = i
+            elif "dii" in h and "buy" in h:
+                dii_buy_idx = i
+            elif "dii" in h and "sell" in h:
+                dii_sell_idx = i
+
+        # Need at least buy+sell or net for each category
+        can_fii = fii_net_idx is not None or (
+            fii_buy_idx is not None and fii_sell_idx is not None
+        )
+        can_dii = dii_net_idx is not None or (
+            dii_buy_idx is not None and dii_sell_idx is not None
+        )
+        if not (can_fii and can_dii):
+            continue
+
+        # Walk data rows (skip header)
+        for row in tbl.find_all("tr")[1:]:
+            cells = [td.get_text(" ", strip=True) for td in row.find_all("td")]
+            if len(cells) < 3:
+                continue
+            try:
+                if fii_net_idx is not None:
+                    fii_net = _parse_fii_crore(cells[fii_net_idx])
+                else:
+                    b = _parse_fii_crore(cells[fii_buy_idx])
+                    s = _parse_fii_crore(cells[fii_sell_idx])
+                    fii_net = (b - s) if (b is not None and s is not None) else None
+
+                if dii_net_idx is not None:
+                    dii_net = _parse_fii_crore(cells[dii_net_idx])
+                else:
+                    b = _parse_fii_crore(cells[dii_buy_idx])
+                    s = _parse_fii_crore(cells[dii_sell_idx])
+                    dii_net = (b - s) if (b is not None and s is not None) else None
+
+                if fii_net is None or dii_net is None:
+                    continue
+
+                date_str = cells[date_idx].strip() if date_idx is not None else ""
+                return {"date": date_str, "fii_net": fii_net, "dii_net": dii_net}
+            except (IndexError, TypeError):
+                continue
+
+    return None
+
+
+# ── Per-source attempt functions ──────────────────────────────────────────────
 
 def _try_nse_fii_dii() -> dict | None:
     """
-    Source 1: NSE `fiidiiTradeReact` JSON endpoint.
-    Requires cookie-seeding from homepage; prone to 403 but fastest when working.
+    Source 1: NSE fiidiiTradeReact JSON endpoint.
+
+    NSE requires the `nsit` cookie which is generated by JavaScript on their
+    homepage. Simple requests often gets a 200 with an EMPTY body when the
+    cookie isn't set correctly. Fix: visit two pages (homepage + data page)
+    before hitting the API, with a short delay to let cookies settle.
     """
-    url = "https://www.nseindia.com/api/fiidiiTradeReact"
+    api_url  = "https://www.nseindia.com/api/fiidiiTradeReact"
+    seed_url = "https://www.nseindia.com"
+    warm_url = "https://www.nseindia.com/market-data/fii-dii-activity"
+    headers  = {
+        **_HEADERS,
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer":         warm_url,
+        "Cache-Control":   "no-cache",
+        "Pragma":          "no-cache",
+        "Sec-Fetch-Dest":  "empty",
+        "Sec-Fetch-Mode":  "cors",
+        "Sec-Fetch-Site":  "same-origin",
+        "X-Requested-With":"XMLHttpRequest",
+    }
     try:
         session = requests.Session()
-        session.get("https://www.nseindia.com", headers=_NSE_FII_HEADERS, timeout=10)
-        resp = session.get(url, headers=_NSE_FII_HEADERS, timeout=10)
+        session.get(seed_url, headers=headers, timeout=10)       # seed homepage cookie
+        time.sleep(1)                                             # let nsit cookie settle
+        session.get(warm_url, headers=headers, timeout=10)       # warm up data page
+        resp = session.get(api_url, headers=headers, timeout=10)
         resp.raise_for_status()
+        text = resp.text.strip()
+        if not text:                                              # empty body = anti-bot
+            return None
         data = resp.json()
         if not data:
             return None
-        latest = data[0]
+        latest  = data[0]
+        fii_net = float(latest.get("fiiNet") or latest.get("FII_NET") or 0)
+        dii_net = float(latest.get("diiNet") or latest.get("DII_NET") or 0)
         return {
             "date":    latest.get("date") or latest.get("DATE") or "",
-            "fii_net": float(latest.get("fiiNet") or latest.get("FII_NET") or 0),
-            "dii_net": float(latest.get("diiNet") or latest.get("DII_NET") or 0),
+            "fii_net": fii_net,
+            "dii_net": dii_net,
             "source":  "nse",
         }
     except Exception as exc:
@@ -231,162 +331,126 @@ def _try_nse_fii_dii() -> dict | None:
 
 def _try_bse_fii_dii() -> dict | None:
     """
-    Source 2: BSE India FiiDiiActivity API.
-    Different server infrastructure from NSE — primary fallback when NSE blocks.
-    Returns the same underlying SEBI-reported data, just via BSE's feed.
+    Source 2: BSE India website FII/DII activity page (HTML scrape).
+
+    The previous attempt used api.bseindia.com/BseIndiaAPI which returns
+    an HTML error page (char 4 = '<') — that JSON endpoint requires auth.
+    Instead we scrape the public-facing BSE page, which has the same data
+    in a plain HTML table.
     """
-    url = "https://api.bseindia.com/BseIndiaAPI/api/FiiDiiActivity/w"
+    url = "https://www.bseindia.com/markets/equity/EQReports/FiidiiActivity.aspx"
+    headers = {
+        **_HEADERS,
+        "Accept":  "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.bseindia.com/",
+    }
     try:
         session = requests.Session()
-        # BSE also benefits from a homepage visit for cookie seeding
-        session.get("https://www.bseindia.com", headers=_BSE_HEADERS, timeout=10)
-        resp = session.get(url, headers=_BSE_HEADERS, timeout=12)
+        session.get("https://www.bseindia.com", headers=headers, timeout=10)
+        resp = session.get(url, headers=headers, timeout=12)
         resp.raise_for_status()
-        data = resp.json()
-
-        # BSE can return either a list or a dict with "Table" key
-        rows = data if isinstance(data, list) else data.get("Table", data.get("table", []))
-        if not rows:
-            return None
-
-        # Find most recent FII and DII rows
-        fii_net = dii_net = None
-        date_str = ""
-        for row in rows:
-            client = str(
-                row.get("ClientType") or row.get("CLIENT_TYPE") or
-                row.get("Category") or row.get("CATEGORY") or ""
-            ).upper()
-            net_raw = (
-                row.get("NetActivity") or row.get("NET_ACTIVITY") or
-                row.get("NetValue")    or row.get("NET_VALUE")    or
-                row.get("Net")         or 0
-            )
-            date_raw = (
-                row.get("TRDDTE") or row.get("TradeDate") or
-                row.get("TRADE_DATE") or row.get("Date") or ""
-            )
-            try:
-                net_val = float(str(net_raw).replace(",", ""))
-            except (ValueError, TypeError):
-                continue
-
-            if not date_str and date_raw:
-                date_str = str(date_raw)
-            if "FII" in client or "FPI" in client:
-                fii_net = net_val
-            elif "DII" in client or "MF" in client or "DOM" in client:
-                dii_net = net_val
-
-        if fii_net is None and dii_net is None:
-            return None
-
-        return {
-            "date":    date_str,
-            "fii_net": fii_net or 0.0,
-            "dii_net": dii_net or 0.0,
-            "source":  "bse",
-        }
+        soup = BeautifulSoup(resp.text, "html.parser")
+        result = _scrape_fii_table(soup)
+        if result:
+            result["source"] = "bse"
+            return result
+        return None
     except Exception as exc:
         log.warning("FII/DII BSE failed: %s", exc)
         return None
 
 
-def _try_moneycontrol_fii_dii() -> dict | None:
+def _try_goodreturns_fii_dii() -> dict | None:
     """
-    Source 3: Moneycontrol FII/DII activity page (HTML scrape).
-    Consumer-facing page — rarely blocked, stable table structure.
-    Falls back to this only when both NSE and BSE APIs are unavailable.
+    Source 3: Goodreturns.in FII/DII activity page (HTML scrape).
+
+    Goodreturns is an Indian financial news site with daily FII/DII data
+    in a standard HTML table. It applies far less aggressive anti-bot
+    protection than Moneycontrol or NSE.
     """
-    url = "https://www.moneycontrol.com/stocks/marketinfo/fiidii_activity/index.html"
+    url = "https://www.goodreturns.in/fii-dii-activity/"
+    headers = {
+        **_HEADERS,
+        "Accept":  "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.goodreturns.in/",
+    }
     try:
-        resp = requests.get(url, headers=_MC_HEADERS, timeout=12)
+        resp = requests.get(url, headers=headers, timeout=12)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Moneycontrol table headers: Date | FII Buy | FII Sell | FII Net | DII Buy | DII Sell | DII Net
-        table = soup.find("table", {"id": "fiidii"}) or soup.find(
-            "table", class_=lambda c: c and ("fiidii" in c.lower() or "mctable" in c.lower())
-        )
-        if not table:
-            # Try first substantial table with > 5 columns
-            for t in soup.find_all("table"):
-                headers = [th.get_text(strip=True).lower() for th in t.find_all("th")]
-                if any("fii" in h for h in headers) and any("dii" in h for h in headers):
-                    table = t
-                    break
-
-        if not table:
-            return None
-
-        # Find column indices for FII net and DII net
-        header_row = table.find("tr")
-        if not header_row:
-            return None
-        headers = [th.get_text(strip=True).lower() for th in header_row.find_all(["th", "td"])]
-
-        fii_net_idx = dii_net_idx = date_idx = None
-        for i, h in enumerate(headers):
-            if "date" in h:
-                date_idx = i
-            elif "fii" in h and "net" in h:
-                fii_net_idx = i
-            elif "dii" in h and "net" in h:
-                dii_net_idx = i
-
-        if fii_net_idx is None or dii_net_idx is None:
-            return None
-
-        # First data row = most recent date
-        rows = table.find_all("tr")[1:]
-        for row in rows:
-            cells = [td.get_text(strip=True) for td in row.find_all("td")]
-            if len(cells) <= max(fii_net_idx, dii_net_idx):
-                continue
-            try:
-                fii_net = float(cells[fii_net_idx].replace(",", "").replace("−", "-"))
-                dii_net = float(cells[dii_net_idx].replace(",", "").replace("−", "-"))
-                date_str = cells[date_idx] if date_idx is not None else ""
-                return {
-                    "date":    date_str,
-                    "fii_net": fii_net,
-                    "dii_net": dii_net,
-                    "source":  "moneycontrol",
-                }
-            except (ValueError, IndexError):
-                continue
-
+        result = _scrape_fii_table(soup)
+        if result:
+            result["source"] = "goodreturns"
+            return result
         return None
     except Exception as exc:
-        log.warning("FII/DII Moneycontrol failed: %s", exc)
+        log.warning("FII/DII Goodreturns failed: %s", exc)
         return None
+
+
+def _try_moneycontrol_fii_dii() -> dict | None:
+    """
+    Source 4: Moneycontrol FII/DII activity page (HTML scrape).
+
+    Moneycontrol sometimes returns 403 on the /index.html variant.
+    Try the canonical URL without the filename — Moneycontrol's CDN
+    treats these differently.
+    """
+    for url in (
+        "https://www.moneycontrol.com/stocks/marketinfo/fiidii_activity/",
+        "https://www.moneycontrol.com/markets/fii-dii-activity/",
+    ):
+        headers = {
+            **_HEADERS,
+            "Accept":          "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Referer":         "https://www.moneycontrol.com/markets/",
+            "Accept-Language": "en-IN,en;q=0.9",
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=12)
+            if resp.status_code == 403:
+                continue
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            result = _scrape_fii_table(soup)
+            if result:
+                result["source"] = "moneycontrol"
+                return result
+        except Exception as exc:
+            log.warning("FII/DII Moneycontrol (%s) failed: %s", url, exc)
+    return None
 
 
 def get_nse_fii_dii() -> dict | None:
     """
     Fetch latest daily FII/DII net flow data (₹ Crores).
 
-    Tries three sources in order until one succeeds:
-      1. NSE `fiidiiTradeReact` API  — official, fast, but prone to 403
-      2. BSE India FiiDiiActivity API — different infra, same SEBI data
-      3. Moneycontrol HTML scrape    — consumer page, rarely blocked
+    Tries four sources in order until one succeeds:
+      1. NSE fiidiiTradeReact  — official JSON; needs JS cookie (often fails)
+      2. BSE website HTML      — scrapes BSE public page; different infra
+      3. Goodreturns.in HTML   — Indian finance site; low anti-bot aggression
+      4. Moneycontrol HTML     — last resort; sometimes 403
 
-    Returns:
-        {"date": str, "fii_net": float, "dii_net": float, "source": str}
-        or None if all three sources fail.
+    All four report the same SEBI-filed data. The "source" key is
+    informational; callers treat values identically regardless of source.
 
-    Note: All three sources report the SAME underlying data (SEBI filings).
-    The "source" key is informational — callers should treat the values
-    identically regardless of which source succeeded.
+    Returns {"date", "fii_net", "dii_net", "source"} or None.
     """
-    for attempt_fn in (_try_nse_fii_dii, _try_bse_fii_dii, _try_moneycontrol_fii_dii):
+    for attempt_fn in (
+        _try_nse_fii_dii,
+        _try_bse_fii_dii,
+        _try_goodreturns_fii_dii,
+        _try_moneycontrol_fii_dii,
+    ):
         result = attempt_fn()
         if result:
-            log.info("FII/DII data fetched via %s: FII=%.0f DII=%.0f Cr",
-                     result["source"], result["fii_net"], result["dii_net"])
+            log.info(
+                "FII/DII fetched via %s: FII=%.0f Cr  DII=%.0f Cr",
+                result["source"], result["fii_net"], result["dii_net"],
+            )
             return result
 
-    log.error("get_nse_fii_dii: all three sources (NSE, BSE, Moneycontrol) failed")
+    log.error("get_nse_fii_dii: all four sources (NSE, BSE, Goodreturns, Moneycontrol) failed")
     return None
 
 
