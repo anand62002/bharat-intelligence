@@ -507,6 +507,10 @@ class GitHubManager:
 
     # ── Introspection helpers ─────────────────────────────────────────────────
 
+    def list_branches(self) -> list[str]:
+        """Return a sorted list of all branch names in the repo."""
+        return sorted(branch.name for branch in self._repo.get_branches())
+
     def list_open_prs(self) -> list[dict]:
         """Return a list of open PR summaries for this repo."""
         return [
