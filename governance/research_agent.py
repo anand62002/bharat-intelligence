@@ -75,15 +75,18 @@ SONNET_MAX_TOKENS   = 1024
 RELEVANCE_THRESHOLD = 75    # papers scoring >= this get a Sonnet proposal
 MAX_PAPERS_PER_SOURCE = 15  # per source per run
 DAYS_LOOKBACK       = 7     # only process papers from the last N days
-SS_REQUESTS_DELAY   = 1.2   # seconds between Semantic Scholar calls (rate limit)
+SS_REQUESTS_DELAY   = 2.0   # seconds between Semantic Scholar calls (rate limit)
 
 # arXiv RSS categories to scan
 ARXIV_RSS_CATEGORIES = [
-    "cs.AI",  # Artificial Intelligence
-    "cs.LG",  # Machine Learning
+    "cs.AI",     # Artificial Intelligence
+    "cs.LG",     # Machine Learning
+    "cs.CL",     # Computation and Language (NLP/LLM papers)
+    "cs.IR",     # Information Retrieval (RAG / embedding papers)
     "q-fin.CP",  # Computational Finance
     "q-fin.ST",  # Statistical Finance
     "q-fin.TR",  # Trading and Market Microstructure
+    "q-fin.PM",  # Portfolio Management
 ]
 
 # Keyword queries for arXiv API search
@@ -92,6 +95,8 @@ ARXIV_KEYWORD_QUERIES = [
     "multi-agent stock analysis",
     "hallucination detection financial",
     "large language model trading",
+    "RAG retrieval augmented generation finance",
+    "reinforcement learning portfolio management LLM",
 ]
 
 # Keyword queries for Semantic Scholar (covers arXiv + SSRN + all venues)
@@ -100,6 +105,24 @@ SEMANTIC_SCHOLAR_QUERIES = [
     "multi-agent trading system",
     "hallucination detection finance",
     "large language model stock prediction India",
+    "sentiment analysis stock market NLP",
+]
+
+# Keyword pre-filter for HuggingFace Daily Papers
+# (50 community-curated ML papers/day; Haiku scoring does final relevance check)
+HF_KEYWORD_FILTER = {
+    "llm", "language model", "agent", "multi-agent", "financ", "trading",
+    "forecast", "predict", "sentiment", "portfolio", "stock", "market",
+    "reinforcement", "transformer", "retrieval", "rag", "embedding",
+    "hallucin", "fact", "ground", "reason", "chain", "tool", "function",
+}
+
+# Queries Claude AI Scout searches for (via web_search tool)
+AI_SCOUT_QUERIES = [
+    "LLM-based financial forecasting emerging markets 2025 arxiv paper",
+    "multi-agent AI trading system hallucination detection 2025",
+    "Indian stock market NLP sentiment analysis language model 2025",
+    "RAG retrieval augmented generation financial analysis new paper 2025",
 ]
 
 DEBATE_AGENTS = [
@@ -335,7 +358,13 @@ def _fetch_arxiv_rss(
             for entry in feed.entries[:MAX_PAPERS_PER_SOURCE]:
                 title    = (entry.get("title") or "").strip().replace("\n", " ")
                 abstract = (entry.get("summary") or "").strip()
-                link     = entry.get("id") or entry.get("link") or ""
+                # Prefer link (HTTPS URL) over id (may be OAI format like oai:arXiv.org:2604.18873v1)
+                link = entry.get("link") or entry.get("id") or ""
+                # Convert OAI identifiers to proper HTTPS arXiv URLs
+                if link and not link.startswith("http"):
+                    m = re.search(r"(\d{4}\.\d{4,5})", link)
+                    if m:
+                        link = f"https://arxiv.org/abs/{m.group(1)}"
 
                 if not title or not abstract or not link:
                     continue
@@ -451,7 +480,7 @@ def _fetch_semantic_scholar(
         "fields": "title,abstract,year,url,externalIds,venue,authors,publicationDate",
         "limit":  max_results,
         # Only 2024+ papers
-        "year":   f"{date.today().year - 1}-",
+        "year":   "2024-",
     }
     headers = dict(_REQUEST_HEADERS)
     ss_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
@@ -509,9 +538,189 @@ def _fetch_semantic_scholar(
         return []
 
 
-def _gather_papers(days: int = DAYS_LOOKBACK) -> list[ResearchPaper]:
+def _fetch_huggingface_papers(days: int = DAYS_LOOKBACK) -> list[ResearchPaper]:
     """
-    Collect papers from all sources and de-duplicate by URL within the run.
+    Fetch the daily curated ML papers from Hugging Face Daily Papers.
+
+    HuggingFace community members submit arXiv papers daily. The endpoint
+    returns ~50 high-signal ML papers per day — all with full abstracts,
+    authors, and arXiv IDs.  We pre-filter by domain keywords before
+    sending to Haiku relevance scoring.
+
+    URL: https://huggingface.co/api/daily_papers
+    """
+    url = "https://huggingface.co/api/daily_papers"
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    papers: list[ResearchPaper] = []
+    try:
+        resp = requests.get(url, timeout=20, headers=_REQUEST_HEADERS)
+        resp.raise_for_status()
+        items = resp.json()
+        if not isinstance(items, list):
+            log.warning("HuggingFace: unexpected response format")
+            return []
+
+        for item in items:
+            paper = item.get("paper") or {}
+            title    = str(paper.get("title") or "").strip()
+            abstract = str(paper.get("summary") or "").strip()
+            arxiv_id = str(paper.get("id") or "").strip()
+
+            if not title or not abstract or not arxiv_id:
+                continue
+
+            arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
+
+            # Date filter
+            pub_str = paper.get("publishedAt") or item.get("publishedAt") or ""
+            if pub_str:
+                try:
+                    pub_dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
+                    if pub_dt < cutoff:
+                        continue
+                except Exception:
+                    pass
+
+            # Keyword pre-filter: skip clearly unrelated CS papers
+            combined = (title + " " + abstract).lower()
+            if not any(kw in combined for kw in HF_KEYWORD_FILTER):
+                continue
+
+            authors = [
+                str(a.get("name", "")) for a in (paper.get("authors") or [])
+                if isinstance(a, dict) and a.get("name")
+            ]
+            papers.append(ResearchPaper(
+                title     = title,
+                abstract  = abstract[:1200],
+                url       = arxiv_url,
+                source    = "huggingface_daily",
+                published = pub_str,
+                authors   = authors[:5],
+                venue     = "HuggingFace Daily / arXiv",
+            ))
+
+        log.info("HuggingFace Daily Papers: %d relevant papers collected "
+                 "(from %d total)", len(papers), len(items))
+    except Exception as exc:
+        log.warning("HuggingFace Daily Papers failed: %s", exc)
+    return papers
+
+
+def _fetch_ai_scout_papers(claude_client, days: int = DAYS_LOOKBACK) -> list[ResearchPaper]:
+    """
+    AI Research Scout: uses Claude Sonnet with the web_search_20250305 built-in
+    tool to actively search the web for recent papers the RSS/API sources
+    missed (conference papers not yet on arXiv, preprints on institutional
+    pages, late-breaking workshop papers, etc.).
+
+    Falls back gracefully if:
+      - No Claude client available
+      - web_search tool not enabled for the account
+      - Any other API error
+
+    The scout performs up to 3 web searches and returns a structured JSON
+    list of papers.  We re-use _extract_json() for robustness.
+    """
+    if claude_client is None:
+        return []
+
+    query_bullets = "\n".join(f"- {q}" for q in AI_SCOUT_QUERIES)
+    prompt = f"""\
+Search the web for recent academic papers published within the last {days * 2} days
+(year 2025-2026) that are highly relevant to any of these topics:
+{query_bullets}
+
+Search on arxiv.org, papers.ssrn.com, recent conference proceedings
+(NeurIPS 2025, ICLR 2025, ICML 2025, ACL 2025, EMNLP 2025, AAAI 2025,
+FinNLP, FinLLM workshops), and institutional preprint servers.
+
+Return ONLY valid JSON (no prose before or after):
+{{
+  "papers": [
+    {{
+      "title": "Full paper title",
+      "abstract": "1-3 sentence summary of key findings",
+      "url": "https://arxiv.org/abs/XXXX.XXXXX or https://papers.ssrn.com/...",
+      "authors": ["Author Name"],
+      "venue": "arXiv | SSRN | NeurIPS 2025 | etc",
+      "published": "YYYY-MM-DD"
+    }}
+  ]
+}}
+
+Include ONLY papers with real, specific URLs.  Aim for 5-8 papers."""
+
+    papers: list[ResearchPaper] = []
+    try:
+        resp = claude_client.messages.create(
+            model      = SONNET_MODEL,
+            max_tokens = 2000,
+            tools      = [{
+                "type":     "web_search_20250305",
+                "name":     "web_search",
+                "max_uses": 3,
+            }],
+            messages = [{"role": "user", "content": prompt}],
+        )
+
+        # Collect all text blocks (tool-result blocks have no .text)
+        text_content = "".join(
+            block.text for block in resp.content
+            if hasattr(block, "text")
+        )
+        if not text_content.strip():
+            log.warning("AI Scout: no text in response (only tool-use blocks?)")
+            return []
+
+        parsed     = _extract_json(text_content)
+        paper_list = parsed.get("papers") or []
+
+        for item in paper_list:
+            title    = str(item.get("title",    "")).strip()
+            abstract = str(item.get("abstract", "")).strip()
+            url      = str(item.get("url",      "")).strip()
+            if not title or not abstract or not url:
+                continue
+            # Basic URL sanity check
+            if not url.startswith("http"):
+                continue
+            papers.append(ResearchPaper(
+                title     = title,
+                abstract  = abstract[:1200],
+                url       = url,
+                source    = "ai_scout",
+                published = str(item.get("published", "")),
+                authors   = [str(a) for a in (item.get("authors") or [])][:5],
+                venue     = str(item.get("venue", "")),
+            ))
+        log.info("AI Scout: %d papers discovered via web search", len(papers))
+
+    except Exception as exc:
+        # Gracefully skip if web_search tool is unavailable or quota exceeded
+        err_str = str(exc).lower()
+        if any(kw in err_str for kw in ("web_search", "tool", "beta", "not supported")):
+            log.info("AI Scout: web_search tool unavailable -- skipping (%s)", exc)
+        else:
+            log.warning("AI Scout failed: %s", exc)
+
+    return papers
+
+
+def _gather_papers(
+    days: int = DAYS_LOOKBACK,
+    claude_client=None,
+) -> list[ResearchPaper]:
+    """
+    Collect papers from all four source tiers and de-duplicate by URL.
+
+    Source tiers:
+      Tier 1 – arXiv RSS (cs.AI/LG/CL/IR + q-fin.*)   : newest preprints
+      Tier 2 – arXiv API keyword search                 : targeted recall
+      Tier 3 – Semantic Scholar keyword search          : covers SSRN + venues
+      Tier 4 – HuggingFace Daily Papers                 : curated community picks
+      Tier 5 – AI Research Scout (Claude + web_search)  : deep web search
+
     Returns a list of unique ResearchPaper objects.
     """
     all_papers: list[ResearchPaper] = []
@@ -523,22 +732,35 @@ def _gather_papers(days: int = DAYS_LOOKBACK) -> list[ResearchPaper]:
                 seen_urls.add(p.url)
                 all_papers.append(p)
 
-    log.info("Gathering papers from arXiv RSS (%d categories)...",
-             len(ARXIV_RSS_CATEGORIES))
+    # Tier 1 — arXiv RSS
+    log.info("[Tier 1] arXiv RSS (%d categories)...", len(ARXIV_RSS_CATEGORIES))
     _add(_fetch_arxiv_rss(days=days))
 
-    log.info("Searching arXiv API (%d queries)...", len(ARXIV_KEYWORD_QUERIES))
+    # Tier 2 — arXiv API keyword search
+    log.info("[Tier 2] arXiv API (%d queries)...", len(ARXIV_KEYWORD_QUERIES))
     for query in ARXIV_KEYWORD_QUERIES:
         _add(_fetch_arxiv_api(query, max_results=10, days=days))
-        time.sleep(0.5)  # be polite to arXiv
+        time.sleep(0.5)
 
-    log.info("Searching Semantic Scholar (%d queries)...",
+    # Tier 3 — Semantic Scholar (covers arXiv + SSRN + conference venues)
+    log.info("[Tier 3] Semantic Scholar (%d queries)...",
              len(SEMANTIC_SCHOLAR_QUERIES))
     for query in SEMANTIC_SCHOLAR_QUERIES:
         _add(_fetch_semantic_scholar(query, max_results=10))
         time.sleep(SS_REQUESTS_DELAY)
 
-    log.info("Total unique papers gathered: %d", len(all_papers))
+    # Tier 4 — HuggingFace Daily Papers
+    log.info("[Tier 4] HuggingFace Daily Papers...")
+    _add(_fetch_huggingface_papers(days=days))
+
+    # Tier 5 — AI Research Scout (optional; requires Claude client)
+    if claude_client is not None:
+        log.info("[Tier 5] AI Research Scout (Claude + web_search)...")
+        _add(_fetch_ai_scout_papers(claude_client, days=days))
+    else:
+        log.info("[Tier 5] AI Research Scout skipped (no Claude client)")
+
+    log.info("Total unique papers gathered: %d across all tiers", len(all_papers))
     return all_papers
 
 
@@ -1106,7 +1328,7 @@ def run(dry_run: bool = False) -> dict:
         )
 
     # ── Step 1: Gather papers ─────────────────────────────────────────────────
-    papers = _gather_papers(days=DAYS_LOOKBACK)
+    papers = _gather_papers(days=DAYS_LOOKBACK, claude_client=claude)
 
     print()
     print("-" * 72)

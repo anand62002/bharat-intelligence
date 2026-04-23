@@ -573,28 +573,37 @@ class TestFetchSemanticScholar:
 
 class TestGatherPapers:
 
+    def _all_sources_patched(self, rss=None, api=None, ss=None, hf=None, scout=None):
+        """Context manager that mocks ALL five source fetchers."""
+        from unittest.mock import patch
+        return (
+            patch("governance.research_agent._fetch_arxiv_rss",      return_value=rss    or []),
+            patch("governance.research_agent._fetch_arxiv_api",       return_value=api    or []),
+            patch("governance.research_agent._fetch_semantic_scholar", return_value=ss     or []),
+            patch("governance.research_agent._fetch_huggingface_papers", return_value=hf  or []),
+            patch("governance.research_agent._fetch_ai_scout_papers",  return_value=scout or []),
+            patch("time.sleep"),
+        )
+
     def test_deduplication_by_url(self):
         from governance.research_agent import _gather_papers, ResearchPaper
         paper1 = ResearchPaper(
             title="Paper A", abstract="Abstract A",
             url="https://arxiv.org/abs/001", source="arxiv_rss_cs.AI"
         )
-        paper2 = ResearchPaper(
+        paper2 = ResearchPaper(            # duplicate URL of paper1
             title="Paper A (duplicate)", abstract="Abstract A",
             url="https://arxiv.org/abs/001", source="arxiv_api"
         )
         paper3 = ResearchPaper(
             title="Paper B", abstract="Abstract B",
-            url="https://arxiv.org/abs/002", source="arxiv_api"
+            url="https://arxiv.org/abs/002", source="huggingface_daily"
         )
-        with patch("governance.research_agent._fetch_arxiv_rss",
-                   return_value=[paper1]):
-            with patch("governance.research_agent._fetch_arxiv_api",
-                       return_value=[paper2, paper3]):
-                with patch("governance.research_agent._fetch_semantic_scholar",
-                           return_value=[]):
-                    with patch("time.sleep"):
-                        papers = _gather_papers()
+        p_rss, p_api, p_ss, p_hf, p_scout, p_sleep = self._all_sources_patched(
+            rss=[paper1], api=[paper2, paper3]
+        )
+        with p_rss, p_api, p_ss, p_hf, p_scout, p_sleep:
+            papers = _gather_papers()
 
         urls = [p.url for p in papers]
         assert len(set(urls)) == len(urls), "Duplicate URLs found"
@@ -602,12 +611,9 @@ class TestGatherPapers:
 
     def test_empty_sources_returns_empty_list(self):
         from governance.research_agent import _gather_papers
-        with patch("governance.research_agent._fetch_arxiv_rss", return_value=[]):
-            with patch("governance.research_agent._fetch_arxiv_api", return_value=[]):
-                with patch("governance.research_agent._fetch_semantic_scholar",
-                           return_value=[]):
-                    with patch("time.sleep"):
-                        papers = _gather_papers()
+        p_rss, p_api, p_ss, p_hf, p_scout, p_sleep = self._all_sources_patched()
+        with p_rss, p_api, p_ss, p_hf, p_scout, p_sleep:
+            papers = _gather_papers()
         assert papers == []
 
 
