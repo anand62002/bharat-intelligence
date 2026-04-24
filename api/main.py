@@ -91,6 +91,118 @@ _market_cache: list[dict] = []
 _market_cache_ts: float   = 0.0
 MARKET_CACHE_TTL           = 60   # seconds
 
+# =============================================================================
+# NSE / BSE symbol resolver
+# =============================================================================
+
+# Overrides for symbols that don't follow the plain {NAME}.NS pattern
+# (indices, commodity ETFs, currency pairs, mutual fund ETFs)
+_NSE_OVERRIDES: dict[str, str] = {
+    # Indices
+    "NIFTY":        "^NSEI",
+    "NIFTY50":      "^NSEI",
+    "NIFTY 50":     "^NSEI",
+    "SENSEX":       "^BSESN",
+    "BANKNIFTY":    "^NSEBANK",
+    "BANK NIFTY":   "^NSEBANK",
+    "NIFTYBANK":    "^NSEBANK",
+    "VIX":          "^INDIAVIX",
+    "INDIAVIX":     "^INDIAVIX",
+    # Gold
+    "GOLDBEES":     "GOLDBEES.NS",
+    "GOLD BEES":    "GOLDBEES.NS",
+    "NIPPONINDGOLD":"NIPPONINDGOLD.NS",
+    "SGBSEP31":     "SGBSEP31.NS",
+    # Silver / Commodities
+    "SILVERBEES":   "SILVERBEES.NS",
+    # Liquid / Overnight ETFs
+    "LIQUIDBEES":   "LIQUIDBEES.NS",
+    "LIQUID BEES":  "LIQUIDBEES.NS",
+    "LIQUIDETF":    "LIQUIDETF.NS",
+    # Index ETFs
+    "NIFTYBEES":    "NIFTYBEES.NS",
+    "JUNIORBEES":   "JUNIORBEES.NS",
+    "BANKBEES":     "BANKBEES.NS",
+    "ITBEES":       "ITBEES.NS",
+    "MON100":       "MON100.NS",
+    "MAFANG":       "MAFANG.NS",
+    # International / USD proxies
+    "GOLD":         "GC=F",
+    "CRUDE":        "CL=F",
+    "CRUDEOIL":     "CL=F",
+    "USDINR":       "USDINR=X",
+    "INRUSD":       "USDINR=X",
+    # Well-known company aliases
+    "HDFCLIFE":     "HDFCLIFE.NS",
+    "SBILIFE":      "SBILIFE.NS",
+    "SBICARDS":     "SBICARD.NS",
+    "PAYTM":        "PAYTM.NS",
+    "ZOMATO":       "ZOMATO.NS",
+}
+
+# Cache for resolved symbols so we don't hit yfinance on every request
+_symbol_cache: dict[str, str] = {}
+
+
+def _resolve_yf_symbol(raw: str) -> str:
+    """
+    Maps any user-provided input to the correct yfinance ticker symbol.
+
+    Resolution order:
+      1. Exact match in _NSE_OVERRIDES (indices, ETFs, known aliases)
+      2. Already has a recognised suffix (.NS / .BO / =X / =F) or starts with ^
+      3. Live probe: try {SYMBOL}.NS — validate with a 1-day history call
+      4. Live probe: try {SYMBOL}.BO as BSE fallback
+      5. Default to {SYMBOL}.NS (most NSE stocks work without probing)
+
+    Results are cached in _symbol_cache for the lifetime of the process.
+    """
+    key = raw.upper().strip()
+    if key in _symbol_cache:
+        return _symbol_cache[key]
+
+    # 1. Known override
+    if key in _NSE_OVERRIDES:
+        result = _NSE_OVERRIDES[key]
+        _symbol_cache[key] = result
+        return result
+
+    # Remove spaces for the remaining checks
+    sym = key.replace(" ", "")
+
+    # 2. Already has a suffix or is an index / forex symbol
+    if (sym.endswith(".NS") or sym.endswith(".BO")
+            or sym.endswith("=X") or sym.endswith("=F")
+            or sym.startswith("^")):
+        _symbol_cache[key] = sym
+        return sym
+
+    # 3 & 4. Live probe — try NSE first, then BSE
+    for candidate in (f"{sym}.NS", f"{sym}.BO"):
+        try:
+            hist = yf.Ticker(candidate).history(period="1d", progress=False)
+            if not hist.empty and float(hist["Close"].iloc[-1]) > 0:
+                log.info("Symbol resolved: %s → %s", raw, candidate)
+                _symbol_cache[key] = candidate
+                return candidate
+        except Exception:
+            pass
+
+    # 5. Default: assume NSE
+    fallback = f"{sym}.NS"
+    log.info("Symbol resolution defaulted: %s → %s", raw, fallback)
+    _symbol_cache[key] = fallback
+    return fallback
+
+
+def _fetch_current_price(yf_symbol: str) -> float | None:
+    """Fetches the latest closing price for a single yfinance symbol."""
+    try:
+        hist = yf.Ticker(yf_symbol).history(period="2d", progress=False)["Close"].dropna()
+        return float(hist.iloc[-1]) if not hist.empty else None
+    except Exception:
+        return None
+
 
 # =============================================================================
 # WebSocket connection manager
@@ -563,9 +675,14 @@ async def get_discovery(
 
 @app.get("/api/portfolio", tags=["portfolio"])
 async def get_portfolio(
-    _: None = Depends(require_api_key),
+    refresh_prices: bool = Query(True, description="Refresh current_price from yfinance"),
+    _:              None = Depends(require_api_key),
 ):
-    """Returns all OPEN portfolio holdings, danger holdings first."""
+    """
+    Returns all OPEN portfolio holdings, danger holdings first.
+    By default, refreshes current_price for every holding from yfinance (run in executor).
+    Pass ?refresh_prices=false to skip the live-price fetch and return stored prices only.
+    """
     rows = (_db()
             .table("portfolio_holdings")
             .select("*")
@@ -573,6 +690,28 @@ async def get_portfolio(
             .order("created_at", desc=True)
             .execute()
             .data or [])
+
+    # Refresh live prices via yfinance (non-blocking — runs in thread executor)
+    if refresh_prices and rows:
+        def _refresh_all(rows_: list[dict]) -> list[dict]:
+            updated: list[dict] = []
+            for row in rows_:
+                yf_sym = _resolve_yf_symbol(row.get("yf_symbol") or row["symbol"])
+                price  = _fetch_current_price(yf_sym)
+                if price:
+                    row = {**row, "current_price": price}
+                    # Persist the refreshed price back to DB (best-effort, no await)
+                    try:
+                        _supabase and _supabase.table("portfolio_holdings").update(
+                            {"current_price": price, "yf_symbol": yf_sym}
+                        ).eq("id", row["id"]).execute()
+                    except Exception:
+                        pass
+                updated.append(row)
+            return updated
+
+        loop = asyncio.get_event_loop()
+        rows = await loop.run_in_executor(None, _refresh_all, rows)
 
     holdings = [_transform_holding(r) for r in rows]
     # Critical danger holdings first
@@ -588,30 +727,57 @@ async def upsert_portfolio(
     """
     Add a new holding or update an existing OPEN one (matched by symbol).
 
-    Required body field: symbol
+    Required body field: symbol  (plain NSE name like RELIANCE, HDFC, or ZOMATO —
+                                  the backend auto-resolves to the correct yfinance ticker)
     Optional: name, sector, qty, avg_buy, target_price, stoploss_price,
               notes, linked_rec_id, status, current_price
+
+    Auto-resolution:
+      • "RELIANCE"  → RELIANCE.NS
+      • "HDFCBANK"  → HDFCBANK.NS
+      • "GOLD"      → GC=F  (international gold futures)
+      • "SENSEX"    → ^BSESN
+    Live current_price is fetched from yfinance if not supplied by the caller.
     """
-    db     = _db()
-    symbol = (payload.get("symbol") or "").upper().strip()
-    if not symbol:
+    db  = _db()
+    raw = (payload.get("symbol") or "").strip()
+    if not raw:
         raise HTTPException(status_code=400, detail="symbol is required")
+
+    # ── Symbol resolution (runs in thread to avoid blocking the event loop) ──────
+    loop          = asyncio.get_event_loop()
+    yf_symbol     = await loop.run_in_executor(None, _resolve_yf_symbol, raw)
+
+    # Normalise stored symbol: use upper-case base name (without suffix) for display,
+    # keep yf_symbol in a separate metadata field so GET /api/portfolio can refresh it.
+    display_symbol = raw.upper().replace(" ", "")
+
+    # ── Fetch current price if caller didn't supply one ──────────────────────────
+    supplied_price = payload.get("current_price") or payload.get("avg_buy")
+    if supplied_price:
+        current_price: float | None = float(supplied_price)
+    else:
+        current_price = await loop.run_in_executor(None, _fetch_current_price, yf_symbol)
+
+    log.info("Portfolio upsert: %s → yf=%s  price=%.2f",
+             display_symbol, yf_symbol, current_price or 0)
 
     existing = (db.table("portfolio_holdings")
                   .select("id")
-                  .eq("symbol", symbol)
+                  .eq("symbol", display_symbol)
                   .eq("status", "OPEN")
                   .limit(1)
                   .execute()
                   .data or [])
 
     row: dict[str, Any] = {
-        "symbol":         symbol,
-        "name":           payload.get("name")           or symbol,
+        "symbol":         display_symbol,
+        "yf_symbol":      yf_symbol,          # stored for future price refreshes
+        "name":           payload.get("name")           or display_symbol,
         "sector":         payload.get("sector")         or "—",
         "qty":            int(payload.get("qty") or 1),
         "avg_buy":        float(payload.get("avg_buy") or 0),
-        "current_price":  float(payload.get("current_price") or payload.get("avg_buy") or 0) or None,
+        "current_price":  current_price,
         "target_price":   float(payload.get("target_price")  or 0) or None,
         "stoploss_price": float(payload.get("stoploss_price") or 0) or None,
         "notes":          payload.get("notes")          or "",
@@ -630,6 +796,53 @@ async def upsert_portfolio(
     if result.data:
         return _transform_holding(result.data[0])
     raise HTTPException(status_code=500, detail="Upsert returned no data")
+
+
+# ── 4b. Symbol resolver ────────────────────────────────────────────────────────
+
+@app.get("/api/symbol/resolve", tags=["portfolio"])
+async def resolve_symbol(
+    q: str  = Query(..., min_length=1, description="Raw symbol or company name to resolve"),
+    _: None = Depends(require_api_key),
+):
+    """
+    Maps any user-provided string to the correct yfinance ticker symbol.
+
+    Examples
+    --------
+      ?q=RELIANCE   → {"input": "RELIANCE", "yf_symbol": "RELIANCE.NS",  "exchange": "NSE"}
+      ?q=HDFCBANK   → {"input": "HDFCBANK",  "yf_symbol": "HDFCBANK.NS",  "exchange": "NSE"}
+      ?q=GOLD       → {"input": "GOLD",       "yf_symbol": "GC=F",         "exchange": "COMEX"}
+      ?q=SENSEX     → {"input": "SENSEX",     "yf_symbol": "^BSESN",       "exchange": "INDEX"}
+      ?q=ZOMATO.NS  → {"input": "ZOMATO.NS",  "yf_symbol": "ZOMATO.NS",    "exchange": "NSE"}
+
+    Also attempts to fetch the current price so the frontend can show a
+    confirmation (e.g. "Found RELIANCE.NS — ₹2,847").
+    """
+    loop      = asyncio.get_event_loop()
+    yf_symbol = await loop.run_in_executor(None, _resolve_yf_symbol, q)
+    price     = await loop.run_in_executor(None, _fetch_current_price, yf_symbol)
+
+    # Derive a human-readable exchange label
+    if yf_symbol.startswith("^"):
+        exchange = "INDEX"
+    elif yf_symbol.endswith("=X"):
+        exchange = "FOREX"
+    elif yf_symbol.endswith("=F"):
+        exchange = "COMEX"
+    elif yf_symbol.endswith(".BO"):
+        exchange = "BSE"
+    else:
+        exchange = "NSE"
+
+    return {
+        "input":      q,
+        "yf_symbol":  yf_symbol,
+        "exchange":   exchange,
+        "price":      price,
+        "price_str":  f"₹{price:,.2f}" if price and exchange in ("NSE", "BSE", "INDEX") else (f"{price:.4f}" if price else None),
+        "resolved":   True,
+    }
 
 
 # ── 5. Portfolio alerts ────────────────────────────────────────────────────────
