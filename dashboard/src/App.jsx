@@ -32,6 +32,31 @@ const FONT_STYLE = `
   .ticker-scroll::-webkit-scrollbar{display:none;}
 `;
 
+// ─── API CONFIGURATION ────────────────────────────────────────────────────────
+// Set REACT_APP_API_URL (e.g. http://localhost:8000 or https://api.yourdomain.com)
+// and REACT_APP_API_KEY in dashboard/.env to connect to the FastAPI backend.
+// When API_URL is empty the dashboard keeps displaying the built-in mock data.
+const API_URL = (process.env.REACT_APP_API_URL || "").replace(/\/$/, "");
+const API_KEY = process.env.REACT_APP_API_KEY  || "";
+
+/**
+ * Authenticated fetch helper.
+ * Returns parsed JSON or throws on non-2xx.
+ * Silently skips when API_URL is not configured.
+ */
+const apiFetch = (path, opts = {}) =>
+  fetch(`${API_URL}${path}`, {
+    ...opts,
+    headers: {
+      ...(API_KEY ? { "x-api-key": API_KEY } : {}),
+      "Content-Type": "application/json",
+      ...(opts.headers || {}),
+    },
+  }).then(r => {
+    if (!r.ok) throw new Error(`API ${r.status} ${path}`);
+    return r.json();
+  });
+
 // ─── CRITICAL THRESHOLDS ─────────────────────────────────────────────────────
 // Discovery: flag if upsidePct >= 100 AND upsideConfidence >= 70
 // Portfolio danger: flag if dangerDropPct >= 70 AND dangerConfidence >= 65 within 2-3 months
@@ -641,14 +666,16 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
 }
 
 // ─── RESEARCH DISCOVERY TAB ───────────────────────────────────────────────────
-function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA}){
-  const [selectedId, setSelectedId] = useState("d1");
+function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discoveryUniverse: _du}){
+  // Use live API data when available; fall back to built-in mock for local dev
+  const _universe = (_du && _du.length > 0) ? _du : DISCOVERY_UNIVERSE;
+  const [selectedId, setSelectedId] = useState(_universe[0]?.id || "d1");
   const [filter, setFilter] = useState("All");
-  const selected = DISCOVERY_UNIVERSE.find(s=>s.id===selectedId);
-  const sectors = ["All",...new Set(DISCOVERY_UNIVERSE.map(s=>s.sector))];
-  const criticalStocks = DISCOVERY_UNIVERSE.filter(isCriticalDiscovery);
+  const selected = _universe.find(s=>s.id===selectedId);
+  const sectors = ["All",...new Set(_universe.map(s=>s.sector))];
+  const criticalStocks = _universe.filter(isCriticalDiscovery);
   // Sort: critical first, then by discoveryScore
-  const sorted = [...DISCOVERY_UNIVERSE].sort((a,b)=>{
+  const sorted = [..._universe].sort((a,b)=>{
     const ac=isCriticalDiscovery(a)?1:0, bc=isCriticalDiscovery(b)?1:0;
     if(ac!==bc) return bc-ac;
     return b.discoveryScore-a.discoveryScore;
@@ -674,7 +701,7 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA}){
             <span style={{fontSize:14,fontWeight:700,color:"white"}}>Research Discovery Engine</span>
             <Tag color={C.cyan} small>PROACTIVE SCREENING</Tag>
           </div>
-          <div style={{fontSize:10,color:C.muted}}>Stocks NOT in your portfolio — surfaced daily by the agent network scanning NSE/BSE universe · {DISCOVERY_UNIVERSE.length} ideas today</div>
+          <div style={{fontSize:10,color:C.muted}}>Stocks NOT in your portfolio — surfaced daily by the agent network scanning NSE/BSE universe · {_universe.length} ideas today</div>
         </div>
         <button onClick={()=>onOpenARIA("discovery")} style={{background:C.purple+"22",border:`1px solid ${C.purple}44`,borderRadius:7,padding:"6px 12px",color:C.purple,fontSize:11,fontWeight:700,cursor:"pointer"}}>
           ✦ Ask ARIA
@@ -793,10 +820,13 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA}){
 }
 
 // ─── GOVERNANCE RESEARCH AGENT TAB ───────────────────────────────────────────
-function GovernanceResearchTab({onOpenARIA}){
+function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, agentDebateLog: _dl}){
+  // Use live data when available; fall back to built-in mock for local dev
+  const _feed   = (_rf && _rf.length  > 0) ? _rf  : AI_RESEARCH_FEED;
+  const _debate = (_dl && _dl.length  > 0) ? _dl  : AGENT_DEBATE_LOG;
   const [sec,setSec]=useState("research");
-  const [selectedPaper,setSelectedPaper]=useState("r1");
-  const paper = AI_RESEARCH_FEED.find(r=>r.id===selectedPaper);
+  const [selectedPaper,setSelectedPaper]=useState(_feed[0]?.id || "r1");
+  const paper = _feed.find(r=>r.id===selectedPaper);
   const tagColors={Architecture:C.blue,"Signal Quality":C.green,Governance:C.purple,Performance:C.teal};
   const debateColors={for:C.green,against:C.red,abstain:C.muted};
   const statusColors={approved:C.green,debating:C.accent,pending_review:C.blue};
@@ -815,7 +845,7 @@ function GovernanceResearchTab({onOpenARIA}){
       </div>
 
       <div style={{display:"flex",gap:3,marginBottom:14,borderBottom:`1px solid ${C.border}`}}>
-        {[["research",`Research Feed (${AI_RESEARCH_FEED.length})`],["debate",`Agent Debates (${AGENT_DEBATE_LOG.length} entries)`],["health","Agent Health"]].map(([id,lbl])=>(
+        {[["research",`Research Feed (${_feed.length})`],["debate",`Agent Debates (${_debate.length} entries)`],["health","Agent Health"]].map(([id,lbl])=>(
           <button key={id} onClick={()=>setSec(id)} style={{background:sec===id?C.panel:"transparent",border:`1px solid ${sec===id?C.purple+"44":"transparent"}`,borderRadius:"5px 5px 0 0",padding:"6px 12px",color:sec===id?C.purple:C.muted,fontSize:10,fontWeight:sec===id?700:400,cursor:"pointer",marginBottom:-1}}>{lbl}</button>
         ))}
       </div>
@@ -825,7 +855,7 @@ function GovernanceResearchTab({onOpenARIA}){
         <div style={{display:"grid",gridTemplateColumns:"340px 1fr",gap:16}}>
           <div>
             <div style={{fontSize:10,color:C.muted,marginBottom:8}}>Sources monitored: arXiv, SSRN, Google Scholar, Anthropic blog, Morgan Stanley Research, SEBI circulars, RBI papers, DeepMind, OpenAI, academic finance journals</div>
-            {AI_RESEARCH_FEED.map(r=>{
+            {_feed.map(r=>{
               const tc=tagColors[r.tag]||C.muted;
               const sc2=statusColors[r.debateStatus]||C.muted;
               return(
@@ -931,7 +961,7 @@ function GovernanceResearchTab({onOpenARIA}){
             <div style={{fontSize:11,fontWeight:700,color:C.accent,marginBottom:2}}>Active Debate: DeepMind Debate Paper (r3)</div>
             <div style={{fontSize:9,color:C.muted,marginBottom:8}}>Topic: Should Governance fact-checker use multi-agent debate loops? · Current: 2 FOR · 2 AGAINST · 2 ABSTAIN</div>
             <div style={{display:"flex",flexDirection:"column",gap:7}}>
-              {AGENT_DEBATE_LOG.map((entry,i)=>(
+              {_debate.map((entry,i)=>(
                 <div key={i} style={{background:C.bg,border:`1px solid ${debateColors[entry.stance]}33`,borderRadius:7,padding:10,borderLeft:`3px solid ${debateColors[entry.stance]}`}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                     <span style={{fontSize:11,fontWeight:700,color:"white"}}>{entry.agent}</span>
@@ -942,7 +972,7 @@ function GovernanceResearchTab({onOpenARIA}){
               ))}
             </div>
             <div style={{marginTop:12}}>
-              <button onClick={()=>onOpenARIA("research_debate",AI_RESEARCH_FEED.find(r=>r.id==="r3"))} style={{background:`linear-gradient(135deg,${C.accent},${C.accentDim})`,border:"none",borderRadius:6,padding:"8px 14px",color:C.bg,fontSize:11,fontWeight:700,cursor:"pointer",width:"100%"}}>
+              <button onClick={()=>onOpenARIA("research_debate",_feed.find(r=>r.debateStatus==="debating")||_feed[0])} style={{background:`linear-gradient(135deg,${C.accent},${C.accentDim})`,border:"none",borderRadius:6,padding:"8px 14px",color:C.bg,fontSize:11,fontWeight:700,cursor:"pointer",width:"100%"}}>
                 ⚡ You are the Tiebreaker — Discuss with ARIA to Decide
               </button>
             </div>
@@ -1095,7 +1125,7 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA}){
 }
 
 // ─── ARIA PANEL ───────────────────────────────────────────────────────────────
-function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolioUpdate,discoveryStock}){
+function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolioUpdate,discoveryStock,discoveryUniverse:_ariaDu}){
   const [messages,setMessages]=useState([{role:"assistant",text:"Hello — I'm **ARIA**, your Adaptive Research Intelligence Assistant.\n\nI'm the bridge between you and every module of Bharat Intelligence:\n\n• **Explain** any recommendation or discovery idea\n• **Update your portfolio** — just tell me what you traded\n• **Vote or decide** on Governance research proposals\n• **Deep dive** on any stock, sector, or macro theme\n• **Fact-check** any claim in real time\n\nWhat would you like to explore?"}]);
   const [input,setInput]=useState("");
   const [loading,setLoading]=useState(false);
@@ -1130,7 +1160,7 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
   },[ariaContext,discoveryStock,portfolio]);
 
   const portfolioSummary=portfolio.map(h=>`${h.symbol}:${h.qty}@₹${h.avgBuy}(now ₹${h.currentPrice},${((h.currentPrice-h.avgBuy)/h.avgBuy*100).toFixed(1)}%),tgt₹${h.targetPrice},stop₹${h.stoplossPrice}`).join("|");
-  const discoverySummary=DISCOVERY_UNIVERSE.map(s=>`${s.symbol}:${s.action} conf${s.confidence}% tgt${s.target} risk${s.riskScore}`).join("|");
+  const discoverySummary=(_ariaDu||DISCOVERY_UNIVERSE).map(s=>`${s.symbol}:${s.action} conf${s.confidence}% tgt${s.target} risk${s.riskScore}`).join("|");
 
   const SYSTEM=`You are ARIA (Adaptive Research Intelligence Assistant) for Bharat Intelligence — Indian stock and commodity market multi-agent system.
 
@@ -1249,10 +1279,76 @@ export default function App(){
   const [govBanner,setGovBanner]=useState(true);
   const [now,setNow]=useState(new Date());
 
+  // ── Live data state — initialised from mock, replaced by API on mount ────────
+  const [discoveryUniverse, setDiscoveryUniverse] = useState(DISCOVERY_UNIVERSE);
+  const [portfolioRecs,     setPortfolioRecs]     = useState(PORTFOLIO_RECOMMENDATIONS);
+  const [marketPulse,       setMarketPulse]       = useState(MARKET_PULSE);
+  const [govAlerts,         setGovAlerts]         = useState(GOV_ALERTS);
+  const [researchFeed,      setResearchFeed]      = useState(AI_RESEARCH_FEED);
+  const [agentDebateLog]                          = useState(AGENT_DEBATE_LOG);
+  const wsRef = useRef(null);
+
   useEffect(()=>{const t=setInterval(()=>setNow(new Date()),30000);return()=>clearInterval(t);},[]);
-  const openAlerts=GOV_ALERTS.filter(a=>!a.resolved).length;
+
+  // ── API data loading + WebSocket ──────────────────────────────────────────────
+  useEffect(()=>{
+    if(!API_URL) return; // no backend set — keep mock data for local dev
+
+    // Initial parallel load
+    Promise.allSettled([
+      apiFetch("/api/discovery")
+        .then(d=>{ if(d&&d.length){ setDiscoveryUniverse(d); setSelDiscoveryId(d[0].id); } })
+        .catch(()=>{}),
+      apiFetch("/api/recommendations")
+        .then(d=>{ if(d&&d.length){ setPortfolioRecs(d); setSelRecId(d[0].id); } })
+        .catch(()=>{}),
+      apiFetch("/api/portfolio")
+        .then(d=>{ if(d&&d.length) setPortfolio(d); })
+        .catch(()=>{}),
+      apiFetch("/api/market/pulse")
+        .then(d=>{ if(d&&d.length) setMarketPulse(d); })
+        .catch(()=>{}),
+      apiFetch("/api/governance/alerts")
+        .then(d=>{ if(d&&d.length) setGovAlerts(d); })
+        .catch(()=>{}),
+      apiFetch("/api/governance/research")
+        .then(d=>{ const arr=d?.proposals||d; if(arr&&arr.length) setResearchFeed(arr); })
+        .catch(()=>{}),
+    ]);
+
+    // Refresh market pulse every 60 s
+    const pulseTimer = setInterval(()=>{
+      apiFetch("/api/market/pulse").then(d=>{ if(d&&d.length) setMarketPulse(d); }).catch(()=>{});
+    }, 60000);
+
+    // WebSocket for real-time critical-danger alerts
+    try{
+      const wsProto = API_URL.startsWith("https") ? "wss" : "ws";
+      const wsBase  = API_URL.replace(/^https?/, wsProto);
+      const wsUrl   = `${wsBase}/ws/alerts${API_KEY ? `?api_key=${API_KEY}` : ""}`;
+      const ws      = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      ws.onmessage  = evt => {
+        try{
+          const msg = JSON.parse(evt.data);
+          if(msg.type === "critical_alert" && msg.alerts){
+            setGovAlerts(prev=>{
+              const newOnes = msg.alerts.filter(a => !prev.find(p => p.id === a.id));
+              return newOnes.length ? [...newOnes, ...prev] : prev;
+            });
+          }
+        }catch(_){}
+      };
+      ws.onerror = ()=>{};
+    }catch(_){}
+
+    return()=>{ clearInterval(pulseTimer); wsRef.current?.close(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
+
+  const openAlerts=govAlerts.filter(a=>!a.resolved).length;
   const portfolioAlerts=computePortfolioAlerts(portfolio);
-  const discoveryStock=DISCOVERY_UNIVERSE.find(s=>s.id===selDiscoveryId);
+  const discoveryStock=discoveryUniverse.find(s=>s.id===selDiscoveryId);
 
   const openARIA=useCallback((type,extra=null)=>{
     if(type==="discovery"){setAriaContext({type:"discovery",id:selDiscoveryId});setSelDiscoveryId(selDiscoveryId);}
@@ -1264,21 +1360,54 @@ export default function App(){
 
   const handlePortfolioUpdate=useCallback(action=>{
     if(action.action==="add"){
+      const newHolding={
+        id:"p"+Date.now(), symbol:action.symbol, name:action.name||action.symbol,
+        sector:action.sector||"—", qty:Number(action.qty)||1,
+        avgBuy:Number(action.avgBuy),
+        currentPrice:LIVE_PRICES[action.symbol]||Number(action.avgBuy),
+        buyDate:new Date().toISOString().slice(0,10),
+        linkedRecId:action.linkedRecId||null,
+        notes:action.notes||"Added via ARIA",
+        targetPrice:Number(action.targetPrice)||Number(action.avgBuy)*1.25,
+        stoplossPrice:Number(action.stoplossPrice)||Number(action.avgBuy)*0.88,
+        status:"holding",
+        dangerDropPct:0, dangerConfidence:0, dangerTrigger:null, dangerWindow:null, dangerSources:[],
+      };
       setPortfolio(p=>{
         if(p.find(h=>h.symbol===action.symbol&&h.status==="holding"))return p;
-        return[...p,{id:"p"+Date.now(),symbol:action.symbol,name:action.name||action.symbol,sector:action.sector||"—",qty:Number(action.qty)||1,avgBuy:Number(action.avgBuy),currentPrice:LIVE_PRICES[action.symbol]||Number(action.avgBuy),buyDate:new Date().toISOString().slice(0,10),linkedRecId:action.linkedRecId||null,notes:action.notes||"Added via ARIA",targetPrice:Number(action.targetPrice)||Number(action.avgBuy)*1.25,stoplossPrice:Number(action.stoplossPrice)||Number(action.avgBuy)*0.88,status:"holding"}];
+        return [...p, newHolding];
       });
+      // Persist to API (fire-and-forget — UI already updated optimistically)
+      if(API_URL){
+        apiFetch("/api/portfolio",{
+          method:"POST",
+          body:JSON.stringify({
+            symbol:       newHolding.symbol,
+            name:         newHolding.name,
+            sector:       newHolding.sector,
+            qty:          newHolding.qty,
+            avg_buy:      newHolding.avgBuy,
+            current_price:newHolding.currentPrice,
+            target_price: newHolding.targetPrice,
+            stoploss_price:newHolding.stoplossPrice,
+            notes:        newHolding.notes,
+            linked_rec_id:newHolding.linkedRecId,
+          }),
+        }).catch(()=>{});
+      }
     } else if(action.action==="exit"){
-      setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="holding"?{...h,status:"exited",currentPrice:Number(action.exitPrice)||h.currentPrice,notes:action.notes||"Exited"}:h));
+      setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="holding"
+        ?{...h,status:"exited",currentPrice:Number(action.exitPrice)||h.currentPrice,notes:action.notes||"Exited"}
+        :h));
     }
   },[]);
 
   const TABS=[
-    {id:"discovery",icon:"🔍",label:"Discovery",badge:DISCOVERY_UNIVERSE.length,badgeColor:C.cyan},
+    {id:"discovery",icon:"🔍",label:"Discovery",badge:discoveryUniverse.length,badgeColor:C.cyan},
     {id:"recommendations",icon:"🎯",label:"Portfolio Recs"},
     {id:"portfolio",icon:"💼",label:"Portfolio",badge:portfolioAlerts.length,badgeColor:C.orange},
     {id:"market",icon:"📡",label:"Market"},
-    {id:"governance_research",icon:"🧬",label:"Gov Research",badge:AI_RESEARCH_FEED.filter(r=>r.debateStatus==="pending").length,badgeColor:C.purple},
+    {id:"governance_research",icon:"🧬",label:"Gov Research",badge:researchFeed.filter(r=>r.debateStatus==="pending").length,badgeColor:C.purple},
     {id:"governance",icon:"🛡",label:"Governance",badge:openAlerts,badgeColor:C.red},
   ];
 
@@ -1294,7 +1423,7 @@ export default function App(){
           <span style={{fontSize:8,color:C.muted}}>v3.0</span>
         </div>
         <div className="ticker-scroll" style={{flex:1,display:"flex",gap:12,overflowX:"auto",msOverflowStyle:"none",scrollbarWidth:"none"}}>
-          {MARKET_PULSE.slice(0,6).map(m=>(
+          {marketPulse.slice(0,6).map(m=>(
             <div key={m.key} style={{display:"flex",gap:4,alignItems:"center",whiteSpace:"nowrap"}}>
               <span style={{fontSize:8,color:C.muted}}>{m.key}</span>
               <span style={{fontSize:9,fontWeight:700,color:"white",fontFamily:"JetBrains Mono"}}>{m.value}</span>
@@ -1314,7 +1443,7 @@ export default function App(){
       {govBanner&&openAlerts>0&&(
         <div style={{background:C.red+"0d",borderBottom:`1px solid ${C.red}33`,padding:"3px 15px",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
           <span style={{fontSize:9,color:C.red,fontWeight:700}}>⚠ Governance:</span>
-          <span style={{fontSize:9,color:C.textDim,flex:1}}>{GOV_ALERTS.find(a=>!a.resolved)?.title}</span>
+          <span style={{fontSize:9,color:C.textDim,flex:1}}>{govAlerts.find(a=>!a.resolved)?.title}</span>
           <button onClick={()=>setTab("governance")} style={{background:C.red+"18",border:`1px solid ${C.red}44`,borderRadius:3,padding:"1px 6px",color:C.red,fontSize:8,cursor:"pointer"}}>View</button>
           <button onClick={()=>setGovBanner(false)} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:9}}>✕</button>
         </div>
@@ -1349,11 +1478,11 @@ export default function App(){
             {tab==="discovery"&&(
               <ResearchDiscoveryTab
                 portfolio={portfolio}
+                discoveryUniverse={discoveryUniverse}
                 onAddToPortfolio={(stock)=>{
                   setAriaContext({type:"discovery",id:stock.id});
                   setSelDiscoveryId(stock.id);
                   setAriaOpen(true);
-                  setSelDiscoveryId(stock.id);
                 }}
                 onOpenARIA={(type,extra)=>openARIA(type,extra)}
               />
@@ -1368,7 +1497,7 @@ export default function App(){
                 </div>
                 <div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:14}}>
                   <div>
-                    {PORTFOLIO_RECOMMENDATIONS.map(r=>{
+                    {portfolioRecs.map(r=>{
                       const ac=r.action==="BUY"?C.green:r.action==="SELL"?C.red:C.accent;
                       const inPort=portfolio.some(h=>h.symbol===r.symbol&&h.status==="holding");
                       return(
@@ -1399,9 +1528,9 @@ export default function App(){
                       );
                     })}
                   </div>
-                  {PORTFOLIO_RECOMMENDATIONS.find(r=>r.id===selRecId)&&(
+                  {portfolioRecs.find(r=>r.id===selRecId)&&(
                     <div style={{animation:"fadeUp .2s ease"}}>
-                      {(()=>{const r=PORTFOLIO_RECOMMENDATIONS.find(x=>x.id===selRecId);const icons={technical:"📊",fundamental:"🏭",sentiment:"📰",institutional:"🏛",macro:"🌍",historical:"📜"};const sc=s=>({BUY:C.green,SELL:C.red,NEUTRAL:C.muted,POSITIVE:C.green,"VERY POSITIVE":C.green,HOLD:C.accent}[s]||C.muted);return(<>
+                      {(()=>{const r=portfolioRecs.find(x=>x.id===selRecId);const icons={technical:"📊",fundamental:"🏭",sentiment:"📰",institutional:"🏛",macro:"🌍",historical:"📜"};const sc=s=>({BUY:C.green,SELL:C.red,NEUTRAL:C.muted,POSITIVE:C.green,"VERY POSITIVE":C.green,HOLD:C.accent}[s]||C.muted);return(<>
                         <div style={{fontSize:12,fontWeight:700,color:"white",marginBottom:2}}>{r.symbol} — Full Analysis</div>
                         <div style={{fontSize:10,color:C.textDim,lineHeight:1.55,marginBottom:11}}>{r.summary}</div>
                         <div style={{fontSize:9,fontWeight:700,color:C.accent,marginBottom:7,textTransform:"uppercase",letterSpacing:1}}>Agent Breakdown</div>
@@ -1430,7 +1559,7 @@ export default function App(){
               <div style={{animation:"fadeUp .3s ease"}}>
                 <div style={{fontSize:12,fontWeight:700,color:"white",marginBottom:11}}>Live Market Pulse</div>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
-                  {MARKET_PULSE.map(m=>(
+                  {marketPulse.map(m=>(
                     <div key={m.key} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:9}}>
                       <div style={{fontSize:7,color:C.muted,marginBottom:2,textTransform:"uppercase"}}>{m.key}</div>
                       <div style={{fontSize:14,fontWeight:800,color:"white",fontFamily:"JetBrains Mono"}}>{m.value}</div>
@@ -1449,7 +1578,7 @@ export default function App(){
               </div>
             )}
 
-            {tab==="governance_research"&&<GovernanceResearchTab onOpenARIA={openARIA}/>}
+            {tab==="governance_research"&&<GovernanceResearchTab onOpenARIA={openARIA} researchFeed={researchFeed} agentDebateLog={agentDebateLog}/>}
 
             {tab==="governance"&&(
               <div style={{animation:"fadeUp .3s ease"}}>
@@ -1458,7 +1587,7 @@ export default function App(){
                   <div style={{marginLeft:"auto",background:C.green+"12",border:`1px solid ${C.green}33`,borderRadius:5,padding:"3px 8px",display:"flex",alignItems:"center",gap:4}}><Dot color={C.green} pulse/><span style={{fontSize:9,color:C.green,fontWeight:600}}>Running</span></div>
                 </div>
                 <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
-                  {GOV_ALERTS.map(a=>{const sc={critical:C.red,warning:C.accent,info:C.blue}[a.severity];return(
+                  {govAlerts.map(a=>{const sc={critical:C.red,warning:C.accent,info:C.blue}[a.severity];return(
                     <div key={a.id} style={{background:C.surface,border:`1px solid ${sc}33`,borderRadius:7,padding:11}}>
                       <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><div style={{display:"flex",gap:5,alignItems:"center"}}><Tag color={sc}>{a.severity.toUpperCase()}</Tag><span style={{fontSize:9,color:C.muted}}>{a.module} · {a.time}</span></div><Tag color={a.resolved?C.green:C.red}>{a.resolved?"RESOLVED":"OPEN"}</Tag></div>
                       <div style={{fontSize:11,fontWeight:600,color:"white",marginBottom:3}}>{a.title}</div>
@@ -1487,12 +1616,13 @@ export default function App(){
         {ariaOpen&&(
           <div style={{width:340,borderLeft:`1px solid ${C.border}`,flexShrink:0,display:"flex",flexDirection:"column",animation:"slideIn .2s ease"}}>
             <ARIAPanel
-              selectedRec={PORTFOLIO_RECOMMENDATIONS.find(r=>r.id===selRecId)}
+              selectedRec={portfolioRecs.find(r=>r.id===selRecId)}
               ariaContext={ariaContext}
               onClearContext={()=>setAriaContext(null)}
               portfolio={portfolio}
               onPortfolioUpdate={handlePortfolioUpdate}
-              discoveryStock={ariaContext?.type==="discovery"?DISCOVERY_UNIVERSE.find(s=>s.id===(ariaContext.id||selDiscoveryId)):null}
+              discoveryUniverse={discoveryUniverse}
+              discoveryStock={ariaContext?.type==="discovery"?discoveryUniverse.find(s=>s.id===(ariaContext.id||selDiscoveryId)):null}
             />
           </div>
         )}
