@@ -1,0 +1,133 @@
+name: CI — Test Suite
+
+on:
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same PR when a new commit is pushed
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (Python 3.11)
+    runs-on: ubuntu-latest
+
+    env:
+      # Provide stub env vars so modules that call load_dotenv() don't crash
+      SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+      GITHUB_TOKEN_GH:      ${{ secrets.GH_PAT }}
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Python ────────────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # ── 3. Dependencies ──────────────────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Run tests ─────────────────────────────────────────────────────────
+      - name: Run pytest
+        id: pytest
+        run: |
+          set +e   # don't exit on failure — we want to capture the output first
+          pytest tests/ -v --tb=short \
+            --json-report --json-report-file=pytest-report.json \
+            2>&1 | tee pytest-output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          exit ${PIPESTATUS[0]}
+        continue-on-error: true   # post comment even if tests fail
+
+      # ── 5. Post results as PR comment ─────────────────────────────────────────
+      - name: Post test results as PR comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs   = require('fs');
+            const exit = '${{ steps.pytest.outputs.exit_code }}';
+            const passed = exit === '0';
+
+            // Read raw pytest output (cap at 60 000 chars to stay inside comment limit)
+            let raw = '';
+            try {
+              raw = fs.readFileSync('pytest-output.txt', 'utf8').slice(-60000);
+            } catch (_) {
+              raw = '(output file not found)';
+            }
+
+            // Parse JSON report for a summary table
+            let summary = '';
+            try {
+              const report = JSON.parse(fs.readFileSync('pytest-report.json', 'utf8'));
+              const { passed: p = 0, failed: f = 0, error: e = 0,
+                      skipped: s = 0, duration = 0 } = report.summary || {};
+              summary = `| ✅ Passed | ❌ Failed | ⚠️ Errors | ⏭️ Skipped | ⏱️ Duration |\n`
+                      + `|---|---|---|---|---|\n`
+                      + `| ${p} | ${f} | ${e} | ${s} | ${duration.toFixed(1)}s |`;
+            } catch (_) {
+              summary = '_Could not parse JSON report._';
+            }
+
+            const icon  = passed ? '✅' : '❌';
+            const title = passed ? 'All tests passed' : 'Tests failed — merge blocked';
+            const body  = [
+              `## ${icon} CI — ${title}`,
+              '',
+              `**Commit:** \`${{ github.event.pull_request.head.sha }}\``,
+              `**Branch:** \`${{ github.head_ref }}\``,
+              '',
+              '### Summary',
+              summary,
+              '',
+              '<details>',
+              '<summary>Full pytest output</summary>',
+              '',
+              '```',
+              raw,
+              '```',
+              '</details>',
+            ].join('\n');
+
+            // Find existing bot comment and update it, or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('CI —')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner:       context.repo.owner,
+                repo:        context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body,
+              });
+            }
+
+      # ── 6. Fail the job if tests failed (blocks PR merge) ───────────────────
+      - name: Enforce test gate
+        if: steps.pytest.outputs.exit_code != '0'
+        run: |
+          echo "Tests failed. PR merge is blocked."
+          exit 1

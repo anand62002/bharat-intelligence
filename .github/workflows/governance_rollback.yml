@@ -1,0 +1,203 @@
+name: Governance — Emergency Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for emergency rollback (logged in PR and Telegram)"
+        required: true
+        type: string
+      commits_to_revert:
+        description: "Number of commits to revert (default: 1)"
+        required: false
+        default: "1"
+        type: string
+
+jobs:
+  rollback:
+    name: Revert + Emergency PR + Notify
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write       # push revert branch
+      pull-requests: write  # create emergency PR
+
+    steps:
+      # ── 1. Checkout with full history ────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed for git revert
+          token: ${{ secrets.GH_PAT }}   # PAT so the push can trigger CI on the new branch
+
+      # ── 2. Configure git identity ────────────────────────────────────────────
+      - name: Configure git
+        run: |
+          git config user.name  "Bharat Intelligence Governance"
+          git config user.email "governance-bot@bharat-intelligence.ai"
+
+      # ── 3. Resolve what we're reverting ─────────────────────────────────────
+      - name: Resolve commits to revert
+        id: resolve
+        run: |
+          N="${{ inputs.commits_to_revert }}"
+          # Validate N is a positive integer
+          if ! [[ "$N" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid commits_to_revert: ${N}. Must be a positive integer."
+            exit 1
+          fi
+
+          # Collect the last N commit SHAs and messages
+          SHAS=$(git log -"${N}" --pretty=format:"%h" | tr '\n' ' ')
+          MSGS=$(git log -"${N}" --pretty=format:"- %h: %s" | head -20)
+          HEAD_SHA=$(git rev-parse --short HEAD)
+          BRANCH="governance/emergency-rollback-${HEAD_SHA}-$(date +%s)"
+
+          echo "n=${N}"           >> "$GITHUB_OUTPUT"
+          echo "shas=${SHAS}"     >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+          # Write multi-line msgs to env file
+          {
+            echo "REVERT_MSGS<<EOF"
+            echo "${MSGS}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      # ── 4. Notify Telegram: rollback starting ────────────────────────────────
+      - name: Telegram — rollback initiated
+        run: |
+          TEXT="🚨 *EMERGENCY ROLLBACK INITIATED*
+
+Triggered by: ${{ github.actor }}
+Reason: ${{ inputs.reason }}
+Reverting: ${{ steps.resolve.outputs.n }} commit(s) from \`${{ steps.resolve.outputs.head_sha }}\`
+
+Commits being reverted:
+${REVERT_MSGS}
+
+Status: Creating revert branch..."
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="Markdown" \
+            --data-urlencode "text=${TEXT}"
+
+      # ── 5. Create revert branch and commit ───────────────────────────────────
+      - name: Create revert branch
+        id: revert
+        run: |
+          BRANCH="${{ steps.resolve.outputs.branch }}"
+          git checkout -b "${BRANCH}"
+
+          N="${{ steps.resolve.outputs.n }}"
+          # Revert last N commits in order (most recent first), no auto-commit
+          for SHA in $(git log -"${N}" --pretty=format:"%H"); do
+            git revert --no-edit --no-commit "${SHA}"
+          done
+
+          # Single commit for the whole revert
+          git commit -m "revert: emergency rollback — ${{ inputs.reason }}
+
+Reverts last ${{ steps.resolve.outputs.n }} commit(s):
+${REVERT_MSGS}
+
+Triggered by: ${{ github.actor }}
+Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          git push origin "${BRANCH}"
+          echo "Revert branch pushed: ${BRANCH}"
+
+      # ── 6. Open emergency PR ─────────────────────────────────────────────────
+      - name: Create emergency PR
+        id: create_pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const branch = '${{ steps.resolve.outputs.branch }}';
+            const reason = `${{ inputs.reason }}`;
+            const n      = '${{ steps.resolve.outputs.n }}';
+            const actor  = '${{ github.actor }}';
+            const runUrl = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+
+            const body = [
+              '## 🚨 Emergency Rollback',
+              '',
+              `**Triggered by:** @${actor}`,
+              `**Reason:** ${reason}`,
+              `**Reverting:** last ${n} commit(s)`,
+              `**Workflow run:** ${runUrl}`,
+              '',
+              '### Commits reverted',
+              '```',
+              process.env.REVERT_MSGS || '(see commit message)',
+              '```',
+              '',
+              '---',
+              '> ⚠️ This is an automated emergency PR created by the Governance module.',
+              '> Review and merge immediately to apply the rollback to production.',
+              '> Once merged, the deploy workflow will automatically redeploy Railway.',
+            ].join('\n');
+
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: `🚨 Emergency Rollback: ${reason}`,
+              head:  branch,
+              base:  'main',
+              body,
+              draft: false,
+            });
+
+            // Add emergency label (create it if it doesn't exist)
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                name:  'emergency-rollback',
+                color: 'B60205',
+                description: 'Automated emergency rollback from Governance module',
+              });
+            } catch (_) { /* label already exists */ }
+
+            await github.rest.issues.addLabels({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: pr.number,
+              labels:       ['emergency-rollback'],
+            });
+
+            core.setOutput('pr_url',    pr.html_url);
+            core.setOutput('pr_number', pr.number);
+            console.log(`Emergency PR created: ${pr.html_url}`);
+
+      # ── 7. Notify Telegram: PR ready ─────────────────────────────────────────
+      - name: Telegram — PR ready for review
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            ICON="✅"
+            STATUS="Emergency PR created — merge to deploy rollback"
+            PR_LINE="PR: ${{ steps.create_pr.outputs.pr_url }}"
+          else
+            ICON="❌"
+            STATUS="Rollback workflow FAILED — manual intervention required"
+            PR_LINE="Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+
+          TEXT="${ICON} *ROLLBACK UPDATE*
+
+Reason: ${{ inputs.reason }}
+Triggered by: ${{ github.actor }}
+Status: ${STATUS}
+
+${PR_LINE}
+
+⚡ Merge the PR immediately to apply rollback to production."
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d parse_mode="Markdown" \
+            --data-urlencode "text=${TEXT}"
