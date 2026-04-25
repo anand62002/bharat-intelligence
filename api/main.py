@@ -5,15 +5,16 @@ Serves live data to the React dashboard.
 
 Endpoints
 ---------
-  GET  /api/recommendations      Latest recs sorted by upside_pct, critical first
-  GET  /api/discovery            is_discovery=true recs created today (7-day fallback)
-  GET  /api/portfolio            Open portfolio holdings (status = OPEN)
-  POST /api/portfolio            Add or update a holding (upsert by symbol+OPEN)
-  GET  /api/portfolio/alerts     Unresolved portfolio alerts
-  GET  /api/governance/alerts    Open governance / agent-health alerts
-  GET  /api/governance/research  Research proposals ordered by relevance desc
-  GET  /api/market/pulse         Live prices (yfinance) + FII net from Supabase
-  WS   /ws/alerts                Real-time critical-danger broadcast
+  GET  /api/recommendations        Latest recs sorted by upside_pct, critical first
+  GET  /api/discovery              is_discovery=true recs created today (7-day fallback)
+  GET  /api/portfolio              Open portfolio holdings (status = OPEN)
+  POST /api/portfolio              Add or update a holding (upsert by symbol+OPEN)
+  GET  /api/portfolio/alerts       Unresolved portfolio alerts
+  GET  /api/governance/alerts      Open governance / agent-health alerts
+  GET  /api/governance/research    Research proposals ordered by relevance desc
+  GET  /api/market/pulse           Live prices (yfinance) + FII net from Supabase
+  GET  /api/warren_bot/{symbol}    On-demand Buffett quality analysis (24h Supabase cache)
+  WS   /ws/alerts                  Real-time critical-danger broadcast
 
 Auth
 ----
@@ -90,6 +91,12 @@ MARKET_SYMBOLS: list[tuple[str, str, str]] = [
 _market_cache: list[dict] = []
 _market_cache_ts: float   = 0.0
 MARKET_CACHE_TTL           = 60   # seconds
+
+# 24-hour in-memory fallback cache for warren_bot on-demand results.
+# Primary cache is the warren_bot_cache Supabase table; this is the fallback
+# for when the table has not been created yet.
+_warren_bot_mem_cache: dict[str, tuple[dict, float]] = {}   # symbol → (result, unix_ts)
+WARREN_BOT_CACHE_TTL = 86_400   # 24 hours in seconds
 
 # =============================================================================
 # NSE / BSE symbol resolver
@@ -388,10 +395,21 @@ def _transform_recommendation(row: dict) -> dict:
     else:
         entry_str = "—"
 
-    meta    = row.get("metadata") or {}
-    agents  = row.get("agent_signals") or {}
-    gov     = row.get("gov_check")     or {}
-    horizon = row.get("horizon_days")
+    meta           = row.get("metadata") or {}
+    agent_signals  = row.get("agent_signals") or {}
+    gov            = row.get("gov_check")     or {}
+    horizon        = row.get("horizon_days")
+
+    # warren_bot is stored nested inside agent_signals JSONB by the orchestrator.
+    # Extract it and surface it as a top-level field so the frontend can render
+    # the Buffett quality panel without digging into the agents dict.
+    warren_bot_data: dict | None = None
+    agents: dict = {}
+    if isinstance(agent_signals, dict):
+        warren_bot_data = agent_signals.get("warren_bot")   # None if absent
+        agents = {k: v for k, v in agent_signals.items() if k != "warren_bot"}
+    else:
+        agents = agent_signals
 
     return {
         "id":               row["id"],
@@ -414,6 +432,7 @@ def _transform_recommendation(row: dict) -> dict:
         "upsideConfidence": float(row.get("upside_confidence") or 0),
         "isDiscovery":      bool(row.get("is_discovery")),
         "agents":           agents,
+        "warrenBot":        warren_bot_data,   # None if warren_bot hasn't run for this rec
         "govCheck":         gov,
         "createdAt":        str(row.get("created_at") or ""),
         # Discovery-tab extra fields (stored in metadata by the discovery screener)
@@ -970,7 +989,120 @@ async def get_market_pulse(
     return await _get_market_pulse()
 
 
-# ── 9. WebSocket — real-time critical alerts ───────────────────────────────────
+# ── 9. Warren Bot — on-demand Buffett quality analysis ────────────────────────
+
+async def _get_warren_bot_cached(symbol: str, force_refresh: bool) -> dict:
+    """
+    Return warren_bot analysis for *symbol*, using a 24-hour cache.
+
+    Cache hierarchy:
+      1. Supabase warren_bot_cache table (survives process restarts)
+      2. In-process _warren_bot_mem_cache dict (fallback when table doesn't exist)
+      3. Live warren_bot.analyse() run
+    """
+    import json as _json
+    from agents.warren_bot import analyse as _warren_analyse
+
+    key     = symbol.upper()
+    loop    = asyncio.get_event_loop()
+    cutoff  = datetime.now(timezone.utc) - timedelta(seconds=WARREN_BOT_CACHE_TTL)
+
+    # ── 1. Supabase cache ─────────────────────────────────────────────────────
+    if not force_refresh and _supabase:
+        try:
+            rows = (
+                _supabase.table("warren_bot_cache")
+                .select("result, cached_at")
+                .eq("symbol", key)
+                .gte("cached_at", cutoff.isoformat())
+                .order("cached_at", desc=True)
+                .limit(1)
+                .execute()
+                .data or []
+            )
+            if rows:
+                log.info("warren_bot cache hit (Supabase): %s", key)
+                return rows[0]["result"]
+        except Exception as exc:
+            # Table may not exist yet — silently fall through
+            log.debug("warren_bot Supabase cache lookup skipped: %s", exc)
+
+    # ── 2. In-memory cache ────────────────────────────────────────────────────
+    if not force_refresh and key in _warren_bot_mem_cache:
+        cached_result, cached_ts = _warren_bot_mem_cache[key]
+        if time.time() - cached_ts < WARREN_BOT_CACHE_TTL:
+            log.info("warren_bot cache hit (memory): %s", key)
+            return cached_result
+
+    # ── 3. Live run ───────────────────────────────────────────────────────────
+    log.info("Running warren_bot on-demand for %s...", key)
+    result: dict = await loop.run_in_executor(None, _warren_analyse, symbol)
+
+    # Normalise to JSON-serialisable form before caching
+    result_clean: dict = _json.loads(_json.dumps(result, default=str))
+
+    # Write to in-memory cache
+    _warren_bot_mem_cache[key] = (result_clean, time.time())
+
+    # Write to Supabase cache (best-effort; silently skipped if table missing)
+    if _supabase:
+        try:
+            _supabase.table("warren_bot_cache").upsert(
+                {"symbol": key, "result": result_clean,
+                 "cached_at": datetime.now(timezone.utc).isoformat()},
+                on_conflict="symbol",
+            ).execute()
+            log.info("warren_bot result cached (Supabase): %s", key)
+        except Exception as exc:
+            log.debug("warren_bot Supabase cache write skipped: %s", exc)
+
+    return result_clean
+
+
+@app.get("/api/warren_bot/{symbol}", tags=["analysis"])
+async def get_warren_bot(
+    symbol:        str,
+    force_refresh: bool = Query(False, description="Bypass cache and re-run analysis"),
+    _:             None = Depends(require_api_key),
+):
+    """
+    On-demand Buffett + Jhunjhunwala quality analysis for any NSE symbol.
+
+    Results are cached for 24 hours (Supabase warren_bot_cache table, with
+    an in-process dict fallback). Use ?force_refresh=true to bypass the cache.
+
+    The response is the full warren_bot output dict:
+      score, conviction_rating, moat_type, roce_avg_10yr, margin_of_safety_pct,
+      intrinsic_value_per_share, why_buffett_would_like, why_buffett_would_pass,
+      key_risks, data_gaps, signal, commentary … (28 keys total)
+
+    Powers the ARIA "analyse this stock like Buffett" on-demand feature.
+
+    Cache setup (one-time SQL, run in Supabase SQL Editor):
+      CREATE TABLE IF NOT EXISTS warren_bot_cache (
+        symbol     TEXT PRIMARY KEY,
+        result     JSONB NOT NULL,
+        cached_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    """
+    raw = symbol.strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="symbol path parameter is required")
+
+    try:
+        result = await _get_warren_bot_cached(raw, force_refresh=force_refresh)
+    except Exception as exc:
+        log.error("warren_bot on-demand failed for %s: %s", raw, exc)
+        raise HTTPException(status_code=500, detail=f"warren_bot analysis failed: {exc}") from exc
+
+    return {
+        "symbol":        raw.upper(),
+        "cached":        not force_refresh,
+        "analysis":      result,
+    }
+
+
+# ── 10. WebSocket — real-time critical alerts ──────────────────────────────────
 
 @app.websocket("/ws/alerts")
 async def websocket_alerts(
