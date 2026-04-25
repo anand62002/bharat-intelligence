@@ -10,9 +10,12 @@ Pipeline  : (LangGraph nodes, run sequentially)
   →  fact_check  →  save_recs  →  monitor       →  log_run
 
 Agents run in two async phases per symbol:
-  Phase 1 (parallel): technical, fundamental, sentiment
+  Phase 1 (parallel): technical, fundamental, sentiment, warren_bot
   Phase 2 (parallel): institutional (+ pledging from fund), historical_rag
   Pre-fetched (once): macro, commodities  (symbol-agnostic)
+
+warren_bot is NON-BLOCKING: its score does not feed into the weighted
+confidence calculation. Output is stored under agent_signals["warren_bot"].
 
 Usage:
     python scheduler/orchestrator.py                         # start 06:00 IST scheduler
@@ -56,6 +59,7 @@ from agents.institutional  import analyse as inst_analyse      # noqa: E402
 from agents.macro          import analyse as macro_analyse     # noqa: E402
 from agents.historical_rag import analyse as rag_analyse       # noqa: E402
 from agents.commodities    import analyse as comm_analyse      # noqa: E402
+from agents.warren_bot     import analyse as warren_analyse    # noqa: E402
 
 # ── LangGraph ─────────────────────────────────────────────────────────────────
 from langgraph.graph import StateGraph, END                    # noqa: E402
@@ -368,10 +372,12 @@ async def _run_agents_for_symbol(
     macro and commodities are passed in pre-fetched (symbol-agnostic).
     """
     # ── Phase 1 ──────────────────────────────────────────────────────────────
-    t_res, f_res, s_res = await asyncio.gather(
+    # warren_bot is fully symbol-independent so it runs here in parallel.
+    t_res, f_res, s_res, w_res = await asyncio.gather(
         asyncio.to_thread(lambda: tech_analyse(symbol)),
         asyncio.to_thread(lambda: fund_analyse(symbol)),
         asyncio.to_thread(lambda: sent_analyse(symbol)),
+        asyncio.to_thread(lambda: warren_analyse(symbol)),
         return_exceptions=True,
     )
 
@@ -382,6 +388,13 @@ async def _run_agents_for_symbol(
             results[name] = {"signal": "NO_DATA", "score": 50, "agent_name": name}
         else:
             results[name] = res
+
+    # warren_bot — stored separately; None on any failure (non-blocking)
+    if isinstance(w_res, Exception):
+        log.warning("[%s] warren_bot agent error: %s", symbol, w_res)
+        results["warren_bot"] = None
+    else:
+        results["warren_bot"] = w_res
 
     # Pre-fetched symbol-agnostic results
     results["macro"]       = macro_res
@@ -654,6 +667,44 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             rec = _build_recommendation(
                 symbol, synthesis_data, agent_results, weights, composite
             )
+
+            # ── Warren bot — NON-BLOCKING, stored independently ──────────────
+            # warren_bot score does NOT feed into composite / confidence.
+            try:
+                wb = agent_results.get("warren_bot") or {}
+                if wb and wb.get("score") is not None:
+                    rec["warren_bot"] = {
+                        "score":                   wb["score"],
+                        "conviction_rating":        wb["conviction_rating"],
+                        "moat_type":               wb["moat_type"],
+                        "moat_strength_score":     wb["moat_strength_score"],
+                        "roce_score":              wb["roce_score"],
+                        "management_score":        wb["management_score"],
+                        "earnings_score":          wb["earnings_score"],
+                        "valuation_score":         wb["valuation_score"],
+                        "intrinsic_value_per_share": wb["intrinsic_value_per_share"],
+                        "margin_of_safety_pct":    wb["margin_of_safety_pct"],
+                        "ten_year_eps_cagr":       wb["ten_year_eps_cagr"],
+                        "roce_avg_10yr":           wb["roce_avg_10yr"],
+                        "promoter_quality":        wb["promoter_quality"],
+                        "india_consumption_play":  wb["india_consumption_play"],
+                        "jhunjhunwala_cyclical_flag": wb["jhunjhunwala_cyclical_flag"],
+                        "why_like":                wb["why_buffett_would_like"],
+                        "why_pass":                wb["why_buffett_would_pass"],
+                        "key_risks":               wb["key_risks"],
+                        "data_gaps":               wb.get("data_gaps", []),
+                    }
+                    log.info(
+                        "[%s] warren_bot → score=%d  conviction=%s",
+                        symbol, wb["score"], wb["conviction_rating"],
+                    )
+                else:
+                    rec["warren_bot"] = None
+                    log.info("[%s] warren_bot → no result (set to None)", symbol)
+            except Exception as wb_exc:
+                log.warning("[%s] warren_bot attachment failed: %s", symbol, wb_exc)
+                rec["warren_bot"] = None
+
             recommendations.append(rec)
             log.info(
                 "[%s] → %s  confidence=%.0f%%  upside=%.1f%%  risk=%.0f",
@@ -769,6 +820,19 @@ async def save_recs_node(state: OrchestratorState) -> dict:
                 if withheld:
                     gov_line += "  [WITHHELD]"
                 print(gov_line)
+            # Warren bot summary
+            wb = rec.get("warren_bot")
+            if wb and isinstance(wb, dict):
+                print(f"   Warren Bot      : score={wb.get('score', 'N/A')}/100  "
+                      f"conviction={wb.get('conviction_rating', 'N/A')}")
+                if wb.get("moat_type"):
+                    print(f"   Moat            : {wb['moat_type']}")
+                if wb.get("margin_of_safety_pct") is not None:
+                    print(f"   Margin of safety: {wb['margin_of_safety_pct']:.1f}%")
+                if wb.get("intrinsic_value_per_share") is not None:
+                    print(f"   Intrinsic value : Rs {wb['intrinsic_value_per_share']:.2f}")
+            elif wb is None:
+                print("   Warren Bot      : N/A")
             print()
         print(sep)
         return {"saved_ids": [], "errors": errors}
@@ -797,6 +861,12 @@ async def save_recs_node(state: OrchestratorState) -> dict:
             row["valid_till"] = str(
                 date.today() + timedelta(days=int(rec.get("horizon_days", 180)))
             )
+            # Nest warren_bot output inside agent_signals JSONB before saving.
+            # warren_bot is not a top-level DB column — it lives under agent_signals["warren_bot"].
+            if "agent_signals" in row and isinstance(row["agent_signals"], dict):
+                wb_data = rec.get("warren_bot")
+                if wb_data is not None:
+                    row["agent_signals"]["warren_bot"] = wb_data
             # Ensure agent_signals is JSON-serialisable (remove non-standard keys)
             if "agent_signals" in row and isinstance(row["agent_signals"], dict):
                 row["agent_signals"] = json.loads(json.dumps(row["agent_signals"]))
