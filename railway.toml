@@ -2,9 +2,9 @@
 builder = "nixpacks"
 
 [deploy]
-# startCommand intentionally omitted — set per-service in Railway dashboard
-# or read from Procfile (web: uvicorn ..., worker: python worker.py)
-healthcheckPath = "/health"
-healthcheckTimeout = 30
+# startCommand and healthcheckPath intentionally omitted —
+# set per-service in Railway dashboard so web and worker can differ:
+#   web service    → start: uvicorn ...  healthcheck: /health
+#   worker service → start: python worker.py  healthcheck: none
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
