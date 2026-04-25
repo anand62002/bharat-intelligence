@@ -2,7 +2,8 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "uvicorn api.main:app --host 0.0.0.0 --port $PORT"
+# startCommand intentionally omitted — set per-service in Railway dashboard
+# or read from Procfile (web: uvicorn ..., worker: python worker.py)
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
