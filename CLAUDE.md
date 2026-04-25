@@ -21,7 +21,7 @@ A multi-agent Indian stock/commodity market intelligence platform.
 
 ```
 Stock analysis/
-├── agents/                     # 9 analysis agents (all extend a common pattern)
+├── agents/                     # 10 analysis agents (all extend a common pattern)
 │   ├── technical.py            # TA indicators via yfinance
 │   ├── fundamental.py          # Valuation, ratios, screeners
 │   ├── sentiment.py            # News + social sentiment NLP
@@ -30,7 +30,8 @@ Stock analysis/
 │   ├── sector_valuation.py     # Live sector PE regime vs 5-yr average
 │   ├── commodities.py          # Gold, crude, silver MCX
 │   ├── historical_rag.py       # pgvector semantic similarity on past events
-│   └── discovery_screener.py   # Proactive stock discovery (multi-screen)
+│   ├── discovery_screener.py   # Proactive stock discovery (multi-screen)
+│   └── warren_bot.py           # Long-term business quality (Buffett+Jhunjhunwala)
 │
 ├── governance/                 # Agent oversight & self-improvement
 │   ├── fact_checker.py         # Cross-agent claim verification
@@ -47,6 +48,7 @@ Stock analysis/
 │
 ├── data/
 │   ├── fetchers.py             # India market data fetchers (NSE, BSE, RBI, SEBI)
+│   │                           # + get_screener_history() — 10yr annual time series from screener.in
 │   └── symbol_map.py           # NSE symbol normalisation (same logic as api/main.py _resolve_yf_symbol)
 │
 ├── api/
@@ -244,6 +246,13 @@ Edit `api/main.py` → add `@app.get("/api/...")` function → add corresponding
 2. Register it in `scheduler/orchestrator.py`
 3. Add test in `tests/test_new_agent.py`
 
+**Add warren_bot to the daily pipeline:**
+In `scheduler/orchestrator.py`, import and call `warren_bot.analyse(symbol)` alongside other agents.
+Warren bot returns a 28-key dict — key fields used by orchestrator:
+`signal` (STRONG_BUY/BUY/HOLD/SELL/AVOID), `score` (0–100), `margin_of_safety_pct`,
+`intrinsic_value`, `moat_type`, `commentary` (Haiku-generated), `disqualifiers` (list),
+`data_quality` (GOOD/PARTIAL/POOR), `jhunjhunwala_bonus_pts`
+
 **Run all tests:**
 ```powershell
 python -m pytest tests/ -q --tb=short
@@ -264,15 +273,54 @@ python -c "from governance.github_manager import GitHubManager; gm=GitHubManager
 
 ---
 
-## Git history (recent)
+## Warren bot — `agents/warren_bot.py`
+
+Entry point: `analyse(symbol: str) -> dict` — never raises, always returns a result dict.
+
+### Scoring dimensions (20 pts each, total 100 before bonuses)
+| Dimension | Key inputs |
+|---|---|
+| Moat Strength | ROCE consistency, OPM%, revenue CAGR, promoter holding trend |
+| ROCE Quality | 10-yr ROCE avg, consistency score, recent acceleration |
+| Management Quality | Pledging %, promoter holding trend, dividend payout, capex efficiency |
+| Earnings Consistency | EPS CAGR (5yr/10yr), consecutive growth years, recent PAT direction |
+| DCF Valuation | Owner earnings DCF, 3-stage (5yr growth + 5yr fade + terminal), 12% discount rate, MOS% |
+
+### Jhunjhunwala India Lens (bonus pts, cap 100 total)
+- India consumption play (FMCG/Consumer/Retail/Finance/Pharma): +4 pts
+- Early penetration (<30% national, large addressable market): +3 pts
+- Cyclical trough (P/E < 10): +4 pts
+
+### Hard disqualifiers (any one → signal = AVOID, score capped at 30)
+- <5 years of screener data
+- Market cap < ₹500 Cr
+- Promoter pledging > 40%
+- Loss-making in 3+ of last 5 years
+
+### Data fetching
+- `get_screener_data(symbol)` → snapshot ratios, P/E, P/B, market cap, sector
+- `get_screener_history(symbol)` → 10-yr annual: revenue, OPM%, PAT, EPS, depreciation, capex, ROCE, ROE, dividend payout, promoter holding
+- `get_ohlcv(symbol)` → current price (yfinance)
+
+### Output keys (28 total)
+`symbol`, `signal`, `score`, `moat_score`, `roce_score`, `mgmt_score`, `earnings_score`, `dcf_score`,
+`moat_type`, `roce_avg`, `eps_cagr_5yr`, `eps_cagr_10yr`, `revenue_cagr`,
+`intrinsic_value`, `current_price`, `margin_of_safety_pct`, `owner_earnings`,
+`jhunjhunwala_bonus_pts`, `is_consumption_play`, `is_early_penetration`, `is_cyclical_trough`,
+`disqualifiers`, `commentary`, `data_quality`, `years_available`,
+`agent_name` ("warren_bot"), `analysed_at`, `error`
+
+---
+
+## git history (recent)
 
 | Commit | Change |
 |---|---|
+| `d86bd83` | Add warren_bot: Buffett+Jhunjhunwala long-term quality agent + get_screener_history |
+| `4813119` | Simplify deploy.yml — remove Railway webhooks, keep Telegram notify |
+| `f5952d9` | Add GitHub Actions: CI, deploy, and governance rollback workflows |
+| `452c5e5` | Fix worker logging to stdout so Railway shows [inf] not [err] |
+| `e5910a2` | Remove healthcheckPath from railway.toml — not valid for worker service |
+| `22f0508` | Remove startCommand from railway.toml so each service sets its own |
 | `aa1e5d0` | Fix Vercel deployment — move build config to dashboard/vercel.json |
-| `40fc5f8` | Fix vercel.json monorepo build (broke functions — reverted in aa1e5d0) |
-| `c7fd22a` | Add Railway deployment config (Procfile + railway.toml) |
 | `5b1fb1d` | Symbol auto-resolution, live price refresh, /api/symbol/resolve endpoint |
-| `15c8fe4` | Add FastAPI backend (api/main.py) + wire React dashboard to live data |
-| `18b5de4` | Add list_branches() to GitHubManager |
-| `b887bcc` | Add service_role RLS access migration |
-| `d7fef77` | Fix arXiv RSS OAI URLs, add HuggingFace+AI Scout sources, integration tests |
