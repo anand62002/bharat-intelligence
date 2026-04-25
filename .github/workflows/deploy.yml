@@ -4,76 +4,35 @@ on:
   push:
     branches: [main]
 
+# Railway and Vercel auto-deploy on push to main via their GitHub integrations.
+# This workflow only sends a Telegram notification confirming the push landed.
+
 jobs:
-  deploy:
-    name: Trigger Railway + notify Telegram
+  notify:
+    name: Notify Telegram
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout (needed to read commit message) ──────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Resolve commit info ───────────────────────────────────────────────
       - name: Resolve commit info
         id: commit
         run: |
-          MSG=$(git log -1 --pretty=format:"%s")
-          SHA=$(git log -1 --pretty=format:"%h")
-          AUTHOR=$(git log -1 --pretty=format:"%an")
-          echo "message=${MSG}"  >> "$GITHUB_OUTPUT"
-          echo "sha=${SHA}"      >> "$GITHUB_OUTPUT"
-          echo "author=${AUTHOR}" >> "$GITHUB_OUTPUT"
+          echo "message=$(git log -1 --pretty=format:'%s')"  >> "$GITHUB_OUTPUT"
+          echo "sha=$(git log -1 --pretty=format:'%h')"      >> "$GITHUB_OUTPUT"
+          echo "author=$(git log -1 --pretty=format:'%an')"  >> "$GITHUB_OUTPUT"
 
-      # ── 3. Trigger Railway redeploy (web service) ────────────────────────────
-      - name: Trigger Railway redeploy — web
-        id: railway_web
-        run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "${{ secrets.RAILWAY_WEBHOOK_URL_WEB }}")
-          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
-          if [ "$STATUS" != "200" ] && [ "$STATUS" != "202" ]; then
-            echo "Railway web webhook returned HTTP ${STATUS}" >&2
-            exit 1
-          fi
-          echo "Railway web redeploy triggered (HTTP ${STATUS})"
-
-      # ── 4. Trigger Railway redeploy (worker service) ─────────────────────────
-      - name: Trigger Railway redeploy — worker
-        id: railway_worker
-        run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "${{ secrets.RAILWAY_WEBHOOK_URL_WORKER }}")
-          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
-          if [ "$STATUS" != "200" ] && [ "$STATUS" != "202" ]; then
-            echo "Railway worker webhook returned HTTP ${STATUS}" >&2
-            exit 1
-          fi
-          echo "Railway worker redeploy triggered (HTTP ${STATUS})"
-
-      # ── 5. Notify Telegram ────────────────────────────────────────────────────
       - name: Notify Telegram
-        if: always()   # send even if Railway step failed, so you know about it
         run: |
-          WEB_OK="${{ steps.railway_web.outputs.status }}"
-          WORKER_OK="${{ steps.railway_worker.outputs.status }}"
-
-          if [ "${{ job.status }}" = "success" ]; then
-            ICON="🚀"
-            STATUS_LINE="Both services redeploying"
-          else
-            ICON="⚠️"
-            STATUS_LINE="Deploy may have issues (web: ${WEB_OK}, worker: ${WORKER_OK})"
-          fi
-
-          TEXT="${ICON} *New deployment to production*
+          TEXT="🚀 *New deployment to production*
 
 Commit: \`${{ steps.commit.outputs.sha }}\`
 Author: ${{ steps.commit.outputs.author }}
 Message: ${{ steps.commit.outputs.message }}
 
-Status: ${STATUS_LINE}
-Repo: https://github.com/${{ github.repository }}/commit/${{ github.sha }}"
+Railway + Vercel are redeploying automatically.
+View run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
