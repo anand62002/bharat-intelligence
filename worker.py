@@ -37,6 +37,7 @@ if str(_ROOT) not in sys.path:
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    stream=sys.stdout,   # Railway shows stdout as [inf], stderr as [err]
 )
 log = logging.getLogger("worker")
 
