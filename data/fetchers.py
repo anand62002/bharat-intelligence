@@ -994,6 +994,312 @@ def get_india_vix() -> float | None:
         return None
 
 
+# ─── 8. SCREENER HISTORICAL DATA ─────────────────────────────────────────────
+
+def get_screener_history(symbol: str) -> dict | None:
+    """
+    Fetch multi-year historical financial data from screener.in for a company.
+
+    Parses four sections from the company HTML page:
+      - Profit & Loss: revenue, OPM%, net profit, EPS, depreciation series
+      - Cash Flows:    investing cash flow (capex proxy, absolute value)
+      - Ratios:        ROCE%, ROE, dividend payout series
+      - Shareholding:  promoter holding quarterly trend
+
+    Args:
+        symbol: NSE symbol without exchange suffix, e.g. "RELIANCE", "TCS"
+
+    Returns:
+        dict with keys:
+          years                    — list of year strings, oldest first, e.g. ["Mar 2015", ...]
+          revenue_history          — annual revenue in Cr (list[float|None])
+          ebitda_margins           — OPM % series (list[float|None])
+          pat_history              — Net Profit in Cr (list[float|None])
+          eps_history              — EPS series (list[float|None])
+          depreciation_history     — Depreciation in Cr (list[float|None])
+          capex_history            — abs(investing CF) in Cr (list[float|None])
+          roce_history             — ROCE % annual series (list[float|None])
+          roe_history              — ROE % annual series (list[float|None])
+          dividend_payout_history  — Dividend payout % series (list[float|None])
+          promoter_holding_history — Promoter % quarterly trend (list[float|None])
+          promoter_holding_quarters — quarter labels for promoter series (list[str])
+          years_available          — int, length of years list
+        Returns None on request failure. Never raises.
+    """
+    from data.symbol_map import resolve_screener, is_excluded
+
+    if is_excluded(symbol):
+        log.debug("get_screener_history: skipping excluded symbol %s", symbol)
+        return None
+
+    slug = resolve_screener(symbol)
+    base_fallback = symbol.replace(".NS", "").replace(".BO", "").upper()
+    candidates = [slug]
+    if base_fallback != slug:
+        candidates.append(base_fallback)
+
+    resp = None
+    for candidate in candidates:
+        for variant in ("", "consolidated/"):
+            url = f"https://www.screener.in/company/{candidate}/{variant}"
+            try:
+                r = requests.get(url, headers=_HEADERS, timeout=15)
+                if r.status_code == 200:
+                    resp = r
+                    break
+                log.debug("get_screener_history: %s → HTTP %s", url, r.status_code)
+            except Exception as req_exc:
+                log.debug("get_screener_history: request error %s: %s", url, req_exc)
+        if resp is not None:
+            break
+
+    if resp is None:
+        log.error("get_screener_history(%s): all URL variants returned non-200", symbol)
+        return None
+
+    try:
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        def _clean_cell(td) -> Optional[float]:
+            """Extract plain text from a cell and parse as float."""
+            raw = td.get_text(strip=True)
+            cleaned = raw.replace(",", "").replace("%", "").strip()
+            return _safe_float(cleaned)
+
+        def _extract_table_rows(section) -> dict[str, list]:
+            """
+            Parse all data rows in a section's data-table.
+            Returns {row_label_lower: [cell_values_as_float_or_None], ...}
+            Also returns the header years under key '__headers__'.
+            Skips the TTM column if the last header is 'TTM'.
+            """
+            result: dict[str, list] = {}
+            for table in section.select("table.data-table"):
+                # Parse headers
+                header_row = table.select_one("thead tr")
+                if not header_row:
+                    continue
+                headers = [th.get_text(strip=True) for th in header_row.find_all("th")]
+                if not headers:
+                    continue
+
+                # Determine if last column is TTM — skip it if so
+                skip_last = headers[-1].strip().upper() == "TTM"
+                # First header is usually the row label column; data starts at index 1
+                data_headers = headers[1:]
+                if skip_last and data_headers:
+                    data_headers = data_headers[:-1]
+
+                result["__headers__"] = data_headers
+
+                for row in table.select("tbody tr"):
+                    cells = row.find_all("td")
+                    if not cells:
+                        continue
+                    label = cells[0].get_text(strip=True).lower().strip()
+                    # Data cells (skip label cell, skip TTM if applicable)
+                    data_cells = cells[1:]
+                    if skip_last and data_cells:
+                        data_cells = data_cells[:-1]
+                    values = [_clean_cell(td) for td in data_cells]
+                    result[label] = values
+
+                # Use first table found in the section
+                break
+            return result
+
+        def _find_row(rows: dict[str, list], *keywords: str) -> Optional[list]:
+            """
+            Find a row whose label contains ALL of the given keywords (case-insensitive).
+            Returns the value list or None if not found.
+            """
+            for label, values in rows.items():
+                if label == "__headers__":
+                    continue
+                label_lower = label.lower()
+                if all(kw.lower() in label_lower for kw in keywords):
+                    return values
+            return None
+
+        def _find_row_any(rows: dict[str, list], *keyword_groups) -> Optional[list]:
+            """
+            Find a row whose label contains ANY of the keyword groups (each group is a tuple).
+            Returns the first match's value list.
+            """
+            for group in keyword_groups:
+                if isinstance(group, str):
+                    group = (group,)
+                result = _find_row(rows, *group)
+                if result is not None:
+                    return result
+            return None
+
+        # Initialise output containers
+        years: list[str] = []
+        revenue_history: list[Optional[float]] = []
+        ebitda_margins: list[Optional[float]] = []
+        pat_history: list[Optional[float]] = []
+        eps_history: list[Optional[float]] = []
+        depreciation_history: list[Optional[float]] = []
+        capex_history: list[Optional[float]] = []
+        roce_history: list[Optional[float]] = []
+        roe_history: list[Optional[float]] = []
+        dividend_payout_history: list[Optional[float]] = []
+        promoter_holding_history: list[Optional[float]] = []
+        promoter_holding_quarters: list[str] = []
+
+        # ── Iterate over all section.card elements ────────────────────────────
+        for section in soup.select("section.card"):
+            header_el = section.find(["h2", "h3"])
+            if not header_el:
+                continue
+            header_txt = header_el.get_text(strip=True).lower()
+
+            # ── Profit & Loss section ─────────────────────────────────────────
+            if "profit" in header_txt and ("loss" in header_txt or "&" in header_txt or "and" in header_txt):
+                rows = _extract_table_rows(section)
+                hdrs = rows.get("__headers__", [])
+                if hdrs and not years:
+                    years = hdrs
+
+                # Sales / Revenue
+                rev_row = _find_row_any(rows, ("sales",), ("revenue",))
+                if rev_row is not None:
+                    revenue_history = rev_row
+
+                # OPM % (EBITDA margin)
+                opm_row = _find_row_any(rows, ("opm %",), ("opm%",), ("operating profit margin",))
+                if opm_row is not None:
+                    ebitda_margins = opm_row
+
+                # Net Profit / PAT
+                pat_row = _find_row_any(rows, ("net profit",), ("profit after tax",), ("pat",))
+                if pat_row is not None:
+                    pat_history = pat_row
+
+                # EPS
+                eps_row = _find_row_any(rows, ("eps",), ("earnings per share",))
+                if eps_row is not None:
+                    eps_history = eps_row
+
+                # Depreciation
+                dep_row = _find_row_any(rows, ("depreciation",), ("dep.",), ("depr.",))
+                if dep_row is not None:
+                    depreciation_history = dep_row
+
+            # ── Cash Flow section ─────────────────────────────────────────────
+            elif "cash flow" in header_txt or "cash flows" in header_txt:
+                rows = _extract_table_rows(section)
+                if not years:
+                    hdrs = rows.get("__headers__", [])
+                    if hdrs:
+                        years = hdrs
+
+                # Investing CF (capex proxy) — take absolute value
+                inv_row = _find_row_any(
+                    rows,
+                    ("cash from investing",),
+                    ("investing activities",),
+                    ("investing",),
+                )
+                if inv_row is not None:
+                    capex_history = [abs(v) if v is not None else None for v in inv_row]
+
+            # ── Ratios / Key Metrics section ──────────────────────────────────
+            elif "ratio" in header_txt or "key metric" in header_txt:
+                rows = _extract_table_rows(section)
+                if not years:
+                    hdrs = rows.get("__headers__", [])
+                    if hdrs:
+                        years = hdrs
+
+                # ROCE %
+                roce_row = _find_row_any(rows, ("roce %",), ("roce",))
+                if roce_row is not None:
+                    roce_history = roce_row
+
+                # ROE
+                roe_row = _find_row(rows, "roe")
+                if roe_row is not None:
+                    roe_history = roe_row
+
+                # Dividend payout
+                div_row = _find_row_any(
+                    rows,
+                    ("dividend payout",),
+                    ("dividend payout %",),
+                    ("payout %",),
+                )
+                if div_row is not None:
+                    dividend_payout_history = div_row
+
+            # ── Shareholding section ──────────────────────────────────────────
+            elif "shareholding" in header_txt or "share holding" in header_txt:
+                for table in section.select("table.data-table"):
+                    # Parse header quarters
+                    header_row = table.select_one("thead tr")
+                    if not header_row:
+                        continue
+                    all_ths = [th.get_text(strip=True) for th in header_row.find_all("th")]
+                    # First col is label; rest are quarters
+                    quarters = all_ths[1:] if len(all_ths) > 1 else []
+
+                    for row in table.select("tbody tr"):
+                        cells = row.find_all("td")
+                        if not cells:
+                            continue
+                        label = cells[0].get_text(strip=True).lower()
+                        if "promoter" in label and "pledg" not in label:
+                            data_cells = cells[1:]
+                            values = [_clean_cell(td) for td in data_cells]
+                            promoter_holding_history = values
+                            promoter_holding_quarters = quarters
+                            break
+                    break  # use first table in shareholding section
+
+        # ── Align all annual series to the years list ─────────────────────────
+        # If some series are shorter than years (e.g. ratios section has fewer
+        # columns), pad from the left with None so indices align with years.
+        def _align_to_years(series: list, target_len: int) -> list:
+            if not series:
+                return [None] * target_len
+            if len(series) >= target_len:
+                return series[-target_len:]
+            return [None] * (target_len - len(series)) + series
+
+        n = len(years)
+        if n > 0:
+            revenue_history         = _align_to_years(revenue_history, n)
+            ebitda_margins          = _align_to_years(ebitda_margins, n)
+            pat_history             = _align_to_years(pat_history, n)
+            eps_history             = _align_to_years(eps_history, n)
+            depreciation_history    = _align_to_years(depreciation_history, n)
+            capex_history           = _align_to_years(capex_history, n)
+            roce_history            = _align_to_years(roce_history, n)
+            roe_history             = _align_to_years(roe_history, n)
+            dividend_payout_history = _align_to_years(dividend_payout_history, n)
+
+        return {
+            "years":                    years,
+            "revenue_history":          revenue_history,
+            "ebitda_margins":           ebitda_margins,
+            "pat_history":              pat_history,
+            "eps_history":              eps_history,
+            "depreciation_history":     depreciation_history,
+            "capex_history":            capex_history,
+            "roce_history":             roce_history,
+            "roe_history":              roe_history,
+            "dividend_payout_history":  dividend_payout_history,
+            "promoter_holding_history": promoter_holding_history,
+            "promoter_holding_quarters": promoter_holding_quarters,
+            "years_available":          n,
+        }
+
+    except Exception as exc:
+        log.error("get_screener_history(%s): %s", symbol, exc)
+        return None
+
+
 # ─── SMOKE TEST ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
