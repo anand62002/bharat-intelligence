@@ -427,6 +427,111 @@ const GovShield=({size=18})=>(
   </svg>
 );
 
+// ─── WARREN BOT PANEL ────────────────────────────────────────────────────────
+const WarrenBotPanel=({wb})=>{
+  if(!wb) return(
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:"8px 12px",marginTop:10,marginBottom:6}}>
+      <span style={{fontSize:10,color:C.muted}}>🏦 WarrenBot — data not yet available for this stock</span>
+    </div>
+  );
+
+  const convColor=wb.conviction_rating?.includes("STRONG")?C.green
+                 :wb.conviction_rating?.includes("MODERATE")?C.accent
+                 :C.muted;
+
+  const promoColor=wb.promoter_quality==="EXCELLENT"?C.green
+                  :wb.promoter_quality==="GOOD"?C.accent
+                  :C.red;
+
+  const inrFmt=v=>v!=null?"₹"+new Intl.NumberFormat("en-IN",{maximumFractionDigits:0}).format(v):"—";
+
+  const subScores=[
+    {label:"Moat",     val:wb.moat_strength_score},
+    {label:"ROCE",     val:wb.roce_score},
+    {label:"Mgmt",     val:wb.management_score},
+    {label:"Earnings", val:wb.earnings_score},
+    {label:"Valuation",val:wb.valuation_score},
+  ];
+
+  return(
+    <div style={{background:C.accent+"08",border:`1px solid ${C.accent}33`,borderRadius:7,padding:10,marginTop:10,marginBottom:6}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+        <div>
+          <div style={{fontSize:11,fontWeight:700,color:C.accent}}>🏦 WarrenBot</div>
+          <div style={{fontSize:9,color:C.muted,marginTop:2}}>Long-term quality lens · Not a momentum signal</div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <Tag color={convColor} small>{wb.conviction_rating}</Tag>
+          <span style={{fontSize:20,fontWeight:800,color:convColor,fontFamily:"JetBrains Mono",lineHeight:1}}>
+            {wb.score}<span style={{fontSize:10,color:C.muted,fontWeight:400}}>/100</span>
+          </span>
+        </div>
+      </div>
+
+      {/* Five sub-score boxes */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:5,marginBottom:9}}>
+        {subScores.map(({label,val})=>(
+          <div key={label} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:5,padding:"5px 6px"}}>
+            <div style={{fontSize:8,color:C.muted,marginBottom:2}}>{label}</div>
+            <div style={{fontSize:12,fontWeight:700,color:C.accent,fontFamily:"JetBrains Mono",marginBottom:3}}>
+              {val??0}<span style={{fontSize:8,color:C.muted,fontWeight:400}}>/20</span>
+            </div>
+            <Bar pct={(val??0)/20*100} color={C.accent} h={3}/>
+          </div>
+        ))}
+      </div>
+
+      {/* Three metric boxes */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5,marginBottom:9}}>
+        {[
+          {label:"Intrinsic Value",  val:inrFmt(wb.intrinsic_value_per_share), color:"white"},
+          {label:"Margin of Safety", val:wb.margin_of_safety_pct!=null?`${wb.margin_of_safety_pct.toFixed(1)}%`:"—",
+           color:wb.margin_of_safety_pct>0?C.green:wb.margin_of_safety_pct<0?C.red:C.muted},
+          {label:"10yr EPS CAGR",   val:wb.ten_year_eps_cagr!=null?`${wb.ten_year_eps_cagr.toFixed(1)}%`:"—", color:"white"},
+        ].map(({label,val,color})=>(
+          <div key={label} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:5,padding:"5px 7px"}}>
+            <div style={{fontSize:8,color:C.muted,marginBottom:2}}>{label}</div>
+            <div style={{fontSize:12,fontWeight:700,color,fontFamily:"JetBrains Mono"}}>{val}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Tags row */}
+      <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:9}}>
+        {wb.moat_type&&<Tag color={C.accent} small>{wb.moat_type}</Tag>}
+        {wb.india_consumption_play&&<Tag color={C.green} small>🇮🇳 India Consumption Play</Tag>}
+        {wb.jhunjhunwala_cyclical_flag&&<Tag color={C.blue} small>📉 Cyclical Trough</Tag>}
+        {wb.promoter_quality&&<Tag color={promoColor} small>Promoter: {wb.promoter_quality}</Tag>}
+      </div>
+
+      {/* Why like / Why pass */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:9}}>
+        <div style={{background:C.green+"08",border:`1px solid ${C.green}22`,borderRadius:5,padding:"6px 8px"}}>
+          <div style={{fontSize:9,fontWeight:700,color:C.green,marginBottom:4}}>✅ Why Buffett/RJ would like it</div>
+          <div style={{fontSize:9,color:C.green+"cc",lineHeight:1.55}}>{wb.why_like||"—"}</div>
+        </div>
+        <div style={{background:C.red+"08",border:`1px solid ${C.red}22`,borderRadius:5,padding:"6px 8px"}}>
+          <div style={{fontSize:9,fontWeight:700,color:C.red,marginBottom:4}}>⛔ Why they would pass</div>
+          <div style={{fontSize:9,color:C.red+"cc",lineHeight:1.55}}>{wb.why_pass||"—"}</div>
+        </div>
+      </div>
+
+      {/* Data gaps notice */}
+      {wb.data_gaps?.length>0&&(
+        <div style={{background:C.accent+"0f",border:`1px solid ${C.accent}33`,borderRadius:4,padding:"4px 8px",marginBottom:7,fontSize:9,color:C.accent}}>
+          ⚠ Data gaps: {wb.data_gaps.join(", ")} — score may be understated
+        </div>
+      )}
+
+      {/* Bottom disclaimer */}
+      <div style={{fontSize:8,color:C.muted,fontStyle:"italic",lineHeight:1.55}}>
+        WarrenBot scores long-term business quality only. A low score means momentum-driven, not fundamentals-driven. Your call based on your time horizon.
+      </div>
+    </div>
+  );
+};
+
 // ─── CRITICAL OPPORTUNITY BANNER ─────────────────────────────────────────────
 function CriticalOpportunityBanner({stocks, onSelect, onOpenARIA}){
   if(!stocks.length) return null;
@@ -783,6 +888,9 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discover
                 </div>
               ))}
             </div>
+
+            {/* Warren Bot panel */}
+            <WarrenBotPanel wb={selected.warrenBot}/>
 
             {/* Risks + Catalysts */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
@@ -1563,6 +1671,7 @@ export default function App(){
                             </div>
                           ))}
                         </div>
+                        <WarrenBotPanel wb={r.warrenBot}/>
                       </>);})()}
                     </div>
                   )}
