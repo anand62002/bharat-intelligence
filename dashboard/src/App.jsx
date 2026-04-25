@@ -1367,8 +1367,9 @@ export default function App(){
 
   const handlePortfolioUpdate=useCallback(action=>{
     if(action.action==="add"){
+      const tempId="p"+Date.now();
       const newHolding={
-        id:"p"+Date.now(), symbol:action.symbol, name:action.name||action.symbol,
+        id:tempId, symbol:action.symbol, name:action.name||action.symbol,
         sector:action.sector||"—", qty:Number(action.qty)||1,
         avgBuy:Number(action.avgBuy),
         currentPrice:LIVE_PRICES[action.symbol]||Number(action.avgBuy),
@@ -1379,28 +1380,37 @@ export default function App(){
         stoplossPrice:Number(action.stoplossPrice)||Number(action.avgBuy)*0.88,
         status:"holding",
         dangerDropPct:0, dangerConfidence:0, dangerTrigger:null, dangerWindow:null, dangerSources:[],
+        _saving:true,
       };
       setPortfolio(p=>{
         if(p.find(h=>h.symbol===action.symbol&&h.status==="holding"))return p;
         return [...p, newHolding];
       });
-      // Persist to API (fire-and-forget — UI already updated optimistically)
+      // Persist to backend — replace optimistic row with real saved row (gets real id + live price)
       if(API_URL){
         apiFetch("/api/portfolio",{
           method:"POST",
           body:JSON.stringify({
-            symbol:       newHolding.symbol,
-            name:         newHolding.name,
-            sector:       newHolding.sector,
-            qty:          newHolding.qty,
-            avg_buy:      newHolding.avgBuy,
-            current_price:newHolding.currentPrice,
-            target_price: newHolding.targetPrice,
+            symbol:        newHolding.symbol,
+            name:          newHolding.name,
+            sector:        newHolding.sector,
+            qty:           newHolding.qty,
+            avg_buy:       newHolding.avgBuy,
+            target_price:  newHolding.targetPrice,
             stoploss_price:newHolding.stoplossPrice,
-            notes:        newHolding.notes,
-            linked_rec_id:newHolding.linkedRecId,
+            notes:         newHolding.notes,
+            linked_rec_id: newHolding.linkedRecId,
           }),
-        }).catch(()=>{});
+        }).then(saved=>{
+          // Replace temp optimistic row with the real persisted row from Supabase
+          setPortfolio(p=>p.map(h=>h.id===tempId ? {...saved, _saving:false} : h));
+        }).catch(err=>{
+          // Mark the row as failed so the user can see it didn't save
+          console.error("Portfolio save failed:", err);
+          setPortfolio(p=>p.map(h=>h.id===tempId
+            ? {...h, _saving:false, _error:true, notes:"⚠️ Not saved — check connection"}
+            : h));
+        });
       }
     } else if(action.action==="exit"){
       setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="holding"
