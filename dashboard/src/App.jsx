@@ -35,9 +35,13 @@ const FONT_STYLE = `
 // ─── API CONFIGURATION ────────────────────────────────────────────────────────
 // Set REACT_APP_API_URL (e.g. http://localhost:8000 or https://api.yourdomain.com)
 // and REACT_APP_API_KEY in dashboard/.env to connect to the FastAPI backend.
-// When API_URL is empty the dashboard keeps displaying the built-in mock data.
+// When API_URL is empty the dashboard keeps displaying the built-in mock data (local dev only).
 const API_URL = (process.env.REACT_APP_API_URL || "").replace(/\/$/, "");
 const API_KEY = process.env.REACT_APP_API_KEY  || "";
+// IS_LIVE: true when a backend URL is configured.
+// When IS_LIVE, all states start empty and NEVER fall back to mock constants —
+// users see a proper empty-state placeholder instead of fabricated data.
+const IS_LIVE = Boolean(API_URL);
 
 /**
  * Authenticated fetch helper.
@@ -63,14 +67,8 @@ const apiFetch = (path, opts = {}) =>
 const isCriticalDiscovery = (s) => s.upsidePct >= 100 && s.upsideConfidence >= 70;
 const isCriticalDanger    = (h) => h.dangerDropPct >= 70 && h.dangerConfidence >= 65;
 
-// ─── LIVE PRICES ─────────────────────────────────────────────────────────────
-const LIVE_PRICES = {
-  RELIANCE:2847.5,HDFCBANK:1632.0,TCS:3489.0,INFY:1756.0,TATAMOTORS:812.0,
-  SUNPHARMA:1642.0,GOLDBEES:5824.0,CRUDEOIL:6240.0,WIPRO:445.0,ICICIBANK:1089.0,
-  AXISBANK:1124.0,BAJFINANCE:7240.0,MARUTI:12340.0,NESTLEIND:2456.0,LTIM:5620.0,
-  DIXON:15840.0,POLYCAB:6720.0,ABFRL:192.0,IRFC:186.0,ZOMATO:212.0,
-  ADANIPORTS:1340.0,COALINDIA:455.0,ONGC:274.0,NTPC:368.0,POWERGRID:322.0,
-};
+// LIVE_PRICES removed — optimistic portfolio adds now use avgBuy as the temporary
+// price until the backend returns the live yfinance-refreshed value.
 
 // ─── DISCOVERY UNIVERSE — stocks NOT in portfolio, screened by agents ─────────
 const DISCOVERY_UNIVERSE = [
@@ -275,13 +273,8 @@ const MARKET_PULSE = [
   {key:"INDIA VIX",value:"14.2",change:"-0.8",up:false},
 ];
 
-const NEWS_FEED = [
-  {time:"11:32",src:"ET Markets",text:"RBI MPC minutes signal accommodative stance — rate cut likely in June",sector:"Banking",tone:"positive"},
-  {time:"10:58",src:"Moneycontrol",text:"JLR March retail sales up 22% YoY — Tata Motors in focus",sector:"Auto",tone:"positive"},
-  {time:"10:22",src:"Business Standard",text:"FII flows positive for 8th consecutive session — Nifty IT leads",sector:"IT",tone:"positive"},
-  {time:"09:45",src:"SEBI Notice",text:"SEBI tightens F&O position limits for individual stocks",sector:"Derivatives",tone:"neutral"},
-  {time:"09:15",src:"Reuters",text:"Brent crude falls to $79.2 on OPEC+ concerns — aviation/paint stocks benefit",sector:"Commodity",tone:"mixed"},
-];
+// NEWS_FEED removed — replaced by empty-state placeholder in the Market tab.
+// A live news integration is planned as a future enhancement.
 
 const GOV_ALERTS = [
   {id:"G1",severity:"warning",module:"Sentiment Agent",title:"Coordinated misinformation detected — TATAMOTORS",detail:"3 Reddit posts about TATAMOTORS UK factory closure appear coordinated. Cross-referenced with BSE filings — no such announcement. Signal down-weighted 40%.",action:"Source quarantined. Confidence maintained at 78%.",time:"10:44 IST",resolved:true},
@@ -358,29 +351,10 @@ const AI_RESEARCH_FEED = [
   },
 ];
 
-const AGENT_DEBATE_LOG = [
-  {agent:"Macro Agent",stance:"FOR",paper:"r3",argument:"DeepMind debate paper shows 44% error reduction. Our Governance fact-checker has 2.1% hallucination rate in Sentiment — this directly addresses that. $2/month is justified."},
-  {agent:"Governance Engine",stance:"FOR",paper:"r3",argument:"Current single-model verification has known failure modes on numerical claims. Debate structure catches contradictions the single model misses."},
-  {agent:"Historical RAG Agent",stance:"AGAINST",paper:"r3",argument:"Debate loop adds 800ms latency per claim. With 40+ claims per daily run, morning analysis could be delayed 30+ minutes. Latency cost outweighs accuracy benefit."},
-  {agent:"Technical Agent",stance:"AGAINST",paper:"r3",argument:"DeepMind paper tested on general knowledge claims, not financial data. Financial facts are verifiable via source lookup — debate adds complexity without proportional benefit."},
-  {agent:"Fundamental Agent",stance:"ABSTAIN",paper:"r3",argument:"Neutral — would benefit from debate on balance sheet claims but concern about latency valid. Suggest testing on 20% of claims first before full rollout."},
-  {agent:"Sentiment Agent",stance:"ABSTAIN",paper:"r3",argument:"Would help my hallucination rate specifically. But Historical RAG's latency concern is valid. Suggest async debate — doesn't block main run."},
-];
-
-const ENHANCEMENT_PROPOSALS = [
-  {id:"E1",title:"Screener.in Pro API — Real-time fundamentals",proposedBy:"Fundamental Agent + Governance",rationale:"Free tier has 200 req/day, 24h lag. Pro API: real-time results, concall transcripts, peer comparison. Governance estimates +10% Fundamental Agent accuracy.",costImpact:{monthly:"₹2,499/month (~$30)",annual:"₹29,988/year"},isPaid:true,riskOfNotDoing:"Stale fundamentals post-earnings",status:"pending_review",steps:[{n:1,who:"You",action:"Visit screener.in/plans → select Pro"},{n:2,who:"You",action:"Pay ₹2,499/month — system cannot pay for you"},{n:3,who:"You",action:"Account → Settings → API Keys → Generate"},{n:4,who:"System",action:"Paste key: SCREENER_API_KEY=<key>"},{n:5,who:"Governance",action:"Validates within 48h, reports via ARIA"}]},
-  {id:"E2",title:"NSE Live Option Chain PCR Signal",proposedBy:"Technical Agent",rationale:"Put-Call Ratio leads price moves by 1–3 sessions. NSE is public — free. Governance estimates +9% Technical Agent accuracy.",costImpact:{monthly:"₹0",annual:"₹0"},isPaid:false,riskOfNotDoing:"Missing F&O expiry week signals",status:"pending_review",steps:[{n:1,who:"You",action:"Confirm deployment — say 'approve' to ARIA"},{n:2,who:"System",action:"NSE scraper auto-deploys next scheduler run"},{n:3,who:"Governance",action:"Validates over 5 sessions before integrating"}]},
-];
-
-const AGENT_PERF = [
-  {name:"Technical",accuracy:74,trend:"+2%",hallucRate:"0.3%",status:"healthy"},
-  {name:"Fundamental",accuracy:81,trend:"+1%",hallucRate:"0.8%",status:"healthy"},
-  {name:"Sentiment",accuracy:63,trend:"-4%",hallucRate:"2.1%",status:"warning"},
-  {name:"Institutional",accuracy:88,trend:"+3%",hallucRate:"0.1%",status:"healthy"},
-  {name:"Macro",accuracy:77,trend:"0%",hallucRate:"0.5%",status:"healthy"},
-  {name:"Historical RAG",accuracy:69,trend:"-2%",hallucRate:"1.2%",status:"monitor"},
-  {name:"Discovery Screener",accuracy:71,trend:"+5%",hallucRate:"0.9%",status:"healthy"},
-];
+// AGENT_DEBATE_LOG, ENHANCEMENT_PROPOSALS, AGENT_PERF removed.
+// All three were static mock constants with no API backing.
+// They are replaced by empty-state placeholders that show when the
+// governance agent has been running and generating real data.
 
 // ─── COMPUTE PORTFOLIO ALERTS ─────────────────────────────────────────────────
 const computePortfolioAlerts = (portfolio) => {
@@ -419,6 +393,14 @@ const Bar=({pct,color=C.accent,h=5})=>(
 );
 const Dot=({color=C.green,pulse=false})=>(
   <span style={{display:"inline-block",width:7,height:7,borderRadius:"50%",background:color,animation:pulse?"pulse 2s infinite":undefined,flexShrink:0}}/>
+);
+/** Empty-state placeholder shown instead of mock data when API is live but has no rows yet. */
+const EmptyState=({icon="📡",title,sub,mono=false})=>(
+  <div style={{textAlign:"center",padding:"52px 24px",color:C.muted}}>
+    <div style={{fontSize:34,marginBottom:10}}>{icon}</div>
+    <div style={{fontSize:12,fontWeight:600,color:C.textDim,marginBottom:6}}>{title}</div>
+    {sub&&<div style={{fontSize:10,color:C.muted,maxWidth:380,margin:"0 auto",lineHeight:1.7,fontFamily:mono?"JetBrains Mono":undefined}}>{sub}</div>}
+  </div>
 );
 const GovShield=({size=18})=>(
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
@@ -771,10 +753,9 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
 }
 
 // ─── RESEARCH DISCOVERY TAB ───────────────────────────────────────────────────
-function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discoveryUniverse: _du}){
-  // Use live API data when available; fall back to built-in mock for local dev
-  const _universe = (_du && _du.length > 0) ? _du : DISCOVERY_UNIVERSE;
-  const [selectedId, setSelectedId] = useState(_universe[0]?.id || "d1");
+function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discoveryUniverse: _du, apiLoaded}){
+  const _universe = Array.isArray(_du) ? _du : [];
+  const [selectedId, setSelectedId] = useState(_universe[0]?.id || null);
   const [filter, setFilter] = useState("All");
   const selected = _universe.find(s=>s.id===selectedId);
   const sectors = ["All",...new Set(_universe.map(s=>s.sector))];
@@ -843,8 +824,17 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discover
         ))}
       </div>
 
-      {/* Two-column layout */}
-      <div style={{display:"grid",gridTemplateColumns:"360px 1fr",gap:16}}>
+      {/* Empty state — shown when API is live but no discoveries yet */}
+      {IS_LIVE && apiLoaded && _universe.length===0 && (
+        <EmptyState
+          icon="🔍"
+          title="No discovery ideas yet"
+          sub={`The discovery screener scans 200+ NSE stocks every morning at 06:00 IST and needs 2–3 runs to warm up.\n\nTo run it now: python -m agents.discovery_screener`}
+        />
+      )}
+
+      {/* Two-column layout — only shown when there is data */}
+      {_universe.length>0&&<div style={{display:"grid",gridTemplateColumns:"360px 1fr",gap:16}}>
         {/* Left: cards */}
         <div>
           {filtered.map(s=>(
@@ -922,16 +912,17 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discover
             </div>
           </div>
         )}
-      </div>
+      </div>}{/* closes _universe.length>0 wrapper */}
     </div>
   );
 }
 
 // ─── GOVERNANCE RESEARCH AGENT TAB ───────────────────────────────────────────
-function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, agentDebateLog: _dl}){
-  // Use live data when available; fall back to built-in mock for local dev
-  const _feed   = (_rf && _rf.length  > 0) ? _rf  : AI_RESEARCH_FEED;
-  const _debate = (_dl && _dl.length  > 0) ? _dl  : AGENT_DEBATE_LOG;
+function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded}){
+  const _feed   = Array.isArray(_rf) ? _rf : [];
+  // Agent debate log entries live inside each research proposal's debate_log JSONB field.
+  // We extract and flatten them from the live feed — no separate mock array needed.
+  const _debate = _feed.flatMap(r=>(r.debateLog||r.debate_log||[]));
   const [sec,setSec]=useState("research");
   const [selectedPaper,setSelectedPaper]=useState(_feed[0]?.id || "r1");
   const paper = _feed.find(r=>r.id===selectedPaper);
@@ -948,7 +939,7 @@ function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, agentDebateLog: _
           <div style={{fontSize:9,color:C.muted}}>Continuously monitors AI research, whitepapers, and market analysis literature to propose system upgrades · Agent debate before user review</div>
         </div>
         <div style={{marginLeft:"auto",background:C.purple+"12",border:`1px solid ${C.purple}33`,borderRadius:5,padding:"3px 9px",display:"flex",alignItems:"center",gap:4}}>
-          <Dot color={C.purple} pulse/><span style={{fontSize:9,color:C.purple,fontWeight:600}}>Scanning · Last run 04:00 IST</span>
+          <Dot color={C.purple} pulse/><span style={{fontSize:9,color:C.purple,fontWeight:600}}>Runs daily · 04:00 IST</span>
         </div>
       </div>
 
@@ -960,7 +951,10 @@ function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, agentDebateLog: _
 
       {/* RESEARCH FEED */}
       {sec==="research"&&(
-        <div style={{display:"grid",gridTemplateColumns:"340px 1fr",gap:16}}>
+        IS_LIVE && apiLoaded && _feed.length===0
+          ? <EmptyState icon="🧬" title="No research proposals yet"
+              sub="The governance research agent scans arXiv, SSRN, and finance journals daily at 04:00 IST. Proposals appear here after the first successful scheduler run." />
+          : <div style={{display:"grid",gridTemplateColumns:"340px 1fr",gap:16}}>
           <div>
             <div style={{fontSize:10,color:C.muted,marginBottom:8}}>Sources monitored: arXiv, SSRN, Google Scholar, Anthropic blog, Morgan Stanley Research, SEBI circulars, RBI papers, DeepMind, OpenAI, academic finance journals</div>
             {_feed.map(r=>{
@@ -1063,46 +1057,36 @@ function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, agentDebateLog: _
       {sec==="debate"&&(
         <div>
           <div style={{fontSize:11,color:C.textDim,lineHeight:1.7,marginBottom:12}}>
-            When a research proposal is contentious (votes split), agents formally debate before it reaches you. Each agent provides a structured argument based on its domain expertise. You are the final decision-maker.
+            When a research proposal receives split votes, agents formally debate before it reaches you. Each agent provides a structured argument based on its domain expertise. You are the final decision-maker.
           </div>
-          <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:12}}>
-            <div style={{fontSize:11,fontWeight:700,color:C.accent,marginBottom:2}}>Active Debate: DeepMind Debate Paper (r3)</div>
-            <div style={{fontSize:9,color:C.muted,marginBottom:8}}>Topic: Should Governance fact-checker use multi-agent debate loops? · Current: 2 FOR · 2 AGAINST · 2 ABSTAIN</div>
+          {_debate.length>0 ? (
             <div style={{display:"flex",flexDirection:"column",gap:7}}>
               {_debate.map((entry,i)=>(
-                <div key={i} style={{background:C.bg,border:`1px solid ${debateColors[entry.stance]}33`,borderRadius:7,padding:10,borderLeft:`3px solid ${debateColors[entry.stance]}`}}>
+                <div key={i} style={{background:C.bg,border:`1px solid ${debateColors[entry.stance]||C.muted}33`,borderRadius:7,padding:10,borderLeft:`3px solid ${debateColors[entry.stance]||C.muted}`}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                    <span style={{fontSize:11,fontWeight:700,color:"white"}}>{entry.agent}</span>
-                    <Tag color={debateColors[entry.stance]} small>{entry.stance.toUpperCase()}</Tag>
+                    <span style={{fontSize:11,fontWeight:700,color:"white"}}>{entry.agent||entry.agent_name}</span>
+                    <Tag color={debateColors[entry.stance]||C.muted} small>{(entry.stance||"").toUpperCase()}</Tag>
                   </div>
                   <div style={{fontSize:10,color:C.textDim,lineHeight:1.6}}>{entry.argument}</div>
                 </div>
               ))}
+              {_feed.some(r=>r.debateStatus==="debating")&&(
+                <button onClick={()=>onOpenARIA("research_debate",_feed.find(r=>r.debateStatus==="debating"))} style={{background:`linear-gradient(135deg,${C.accent},${C.accentDim})`,border:"none",borderRadius:6,padding:"8px 14px",color:C.bg,fontSize:11,fontWeight:700,cursor:"pointer",width:"100%",marginTop:6}}>
+                  ⚡ You are the Tiebreaker — Discuss with ARIA to Decide
+                </button>
+              )}
             </div>
-            <div style={{marginTop:12}}>
-              <button onClick={()=>onOpenARIA("research_debate",_feed.find(r=>r.debateStatus==="debating")||_feed[0])} style={{background:`linear-gradient(135deg,${C.accent},${C.accentDim})`,border:"none",borderRadius:6,padding:"8px 14px",color:C.bg,fontSize:11,fontWeight:700,cursor:"pointer",width:"100%"}}>
-                ⚡ You are the Tiebreaker — Discuss with ARIA to Decide
-              </button>
-            </div>
-          </div>
+          ) : (
+            <EmptyState icon="⚖️" title="No active debates"
+              sub="Agent debates are triggered when a research proposal receives split votes (tie between FOR and AGAINST). They appear here in real-time once the governance agent has been running for several days." />
+          )}
         </div>
       )}
 
       {/* AGENT HEALTH */}
       {sec==="health"&&(
-        <div style={{display:"flex",flexDirection:"column",gap:7}}>
-          {AGENT_PERF.map(a=>{
-            const sc={healthy:C.green,warning:C.accent,monitor:C.blue}[a.status]||C.muted;
-            return(
-              <div key={a.name} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:12,display:"flex",alignItems:"center",gap:12}}>
-                <div style={{width:130,flexShrink:0}}><div style={{fontSize:11,fontWeight:600,color:"white"}}>{a.name}</div><Tag color={sc} small>{a.status.toUpperCase()}</Tag></div>
-                <div style={{flex:1}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:9,color:C.muted}}>90-day accuracy</span><span style={{fontSize:10,fontWeight:700,color:"white",fontFamily:"JetBrains Mono"}}>{a.accuracy}%</span></div><Bar pct={a.accuracy} color={sc}/></div>
-                <div style={{width:60,textAlign:"center",flexShrink:0}}><div style={{fontSize:9,color:C.muted}}>Trend</div><div style={{fontSize:11,fontWeight:700,color:a.trend.startsWith("+")?C.green:a.trend==="0%"?C.muted:C.red}}>{a.trend}</div></div>
-                <div style={{width:80,textAlign:"center",flexShrink:0}}><div style={{fontSize:9,color:C.muted}}>Halluc. rate</div><div style={{fontSize:11,fontWeight:700,color:parseFloat(a.hallucRate)>1.5?C.red:parseFloat(a.hallucRate)>0.8?C.accent:C.green,fontFamily:"JetBrains Mono"}}>{a.hallucRate}</div></div>
-              </div>
-            );
-          })}
-        </div>
+        <EmptyState icon="📊" title="Agent performance data not yet available"
+          sub={"Accuracy and hallucination metrics are logged to the agent_performance table after each daily scheduler run.\n\nData will appear here after the first complete scheduler cycle (runs at 06:00 IST).\n\nTo run manually: python -m scheduler.orchestrator"} />
       )}
     </div>
   );
@@ -1182,6 +1166,11 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA}){
             <div style={{display:"grid",gridTemplateColumns:"1.4fr 50px 65px 65px 75px 80px 55px",background:C.panel,padding:"6px 11px",gap:4}}>
               {["Symbol","Qty","Avg Buy","Current","P&L%","Status / Risk","Action"].map(h=><div key={h} style={{fontSize:8,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</div>)}
             </div>
+            {sortedPortfolio.length===0&&(
+              <div style={{padding:"28px 11px",textAlign:"center",color:C.muted,fontSize:10}}>
+                No holdings yet — click <b style={{color:C.teal}}>+ Add Holding</b> or tell ARIA: "I bought RELIANCE 50 shares at ₹2,800"
+              </div>
+            )}
             {sortedPortfolio.map((h,i)=>{
               const pnlPct=((h.currentPrice-h.avgBuy)/h.avgBuy)*100;
               const toTarget=((h.targetPrice-h.currentPrice)/h.currentPrice)*100;
@@ -1233,7 +1222,10 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA}){
 }
 
 // ─── ARIA PANEL ───────────────────────────────────────────────────────────────
-function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolioUpdate,discoveryStock,discoveryUniverse:_ariaDu}){
+function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolioUpdate,discoveryStock,discoveryUniverse:_ariaDu,marketPulse:_mktPulse}){
+  const _mktStr = (_mktPulse&&_mktPulse.length>0)
+    ? _mktPulse.map(m=>`${m.key} ${m.value} (${m.change})`).join(", ")
+    : "Market data unavailable — do not cite specific index or price values.";
   const [messages,setMessages]=useState([{role:"assistant",text:"Hello — I'm **ARIA**, your Adaptive Research Intelligence Assistant.\n\nI'm the bridge between you and every module of Bharat Intelligence:\n\n• **Explain** any recommendation or discovery idea\n• **Update your portfolio** — just tell me what you traded\n• **Vote or decide** on Governance research proposals\n• **Deep dive** on any stock, sector, or macro theme\n• **Fact-check** any claim in real time\n\nWhat would you like to explore?"}]);
   const [input,setInput]=useState("");
   const [loading,setLoading]=useState(false);
@@ -1254,7 +1246,10 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
       intro=`The Governance Research Agent has flagged a new paper for your review:\n\n**${p.title}** (${p.source})\n\nRelevance score: **${p.relevance}%**\n\nProposed change: ${p.proposedChange}\n\nCost impact: **${p.costImpact}**\n\nAgent votes so far: ${p.votes.for} FOR · ${p.votes.against} AGAINST · ${p.votes.abstain} ABSTAIN\n\nWould you like me to summarise the paper's key finding, explain the proposed change in plain terms, or walk you through the agent debate?`;
     } else if(ariaContext.type==="research_debate"&&ariaContext.paper){
       const p=ariaContext.paper;
-      intro=`This proposal is currently **tied in agent debate** — your vote is the tiebreaker.\n\n**${p.title}**\n\nThe core disagreement:\n• **FOR camp**: ${AGENT_DEBATE_LOG.filter(d=>d.stance==="for"&&d.paper===p.id).map(d=>d.agent).join(", ")} argue it reduces errors significantly\n• **AGAINST camp**: ${AGENT_DEBATE_LOG.filter(d=>d.stance==="against"&&d.paper===p.id).map(d=>d.agent).join(", ")} argue latency impact outweighs benefit\n\nTell me "approve", "reject", or ask me to walk through each side's argument before you decide.`;
+      const dl=p.debateLog||p.debate_log||[];
+      const forAgents=dl.filter(d=>d.stance==="for"||d.stance==="FOR").map(d=>d.agent||d.agent_name).filter(Boolean);
+      const againstAgents=dl.filter(d=>d.stance==="against"||d.stance==="AGAINST").map(d=>d.agent||d.agent_name).filter(Boolean);
+      intro=`This proposal is currently **tied in agent debate** — your vote is the tiebreaker.\n\n**${p.title}**\n\nThe core disagreement:\n• **FOR camp**: ${forAgents.length?forAgents.join(", "):"agents voting for this change"} argue it improves system accuracy\n• **AGAINST camp**: ${againstAgents.length?againstAgents.join(", "):"agents voting against"} raise concerns about latency or complexity\n\nTell me "approve", "reject", or ask me to walk through each side's argument before you decide.`;
     } else if(ariaContext.type==="research_approved"&&ariaContext.paper){
       intro=`This enhancement has been **approved by the agents**: **${ariaContext.paper.title}**\n\nReady to walk through the implementation steps. Cost: **${ariaContext.paper.costImpact}**\n\nShall I begin with Step 1?`;
     } else if(ariaContext.type==="portfolio"){
@@ -1267,8 +1262,8 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
     if(intro)setMessages(p=>[...p,{role:"assistant",text:intro}]);
   },[ariaContext,discoveryStock,portfolio]);
 
-  const portfolioSummary=portfolio.map(h=>`${h.symbol}:${h.qty}@₹${h.avgBuy}(now ₹${h.currentPrice},${((h.currentPrice-h.avgBuy)/h.avgBuy*100).toFixed(1)}%),tgt₹${h.targetPrice},stop₹${h.stoplossPrice}`).join("|");
-  const discoverySummary=(_ariaDu||DISCOVERY_UNIVERSE).map(s=>`${s.symbol}:${s.action} conf${s.confidence}% tgt${s.target} risk${s.riskScore}`).join("|");
+  const portfolioSummary=(portfolio||[]).map(h=>`${h.symbol}:${h.qty}@₹${h.avgBuy}(now ₹${h.currentPrice},${((h.currentPrice-h.avgBuy)/h.avgBuy*100).toFixed(1)}%),tgt₹${h.targetPrice},stop₹${h.stoplossPrice}`).join("|");
+  const discoverySummary=(_ariaDu||[]).map(s=>`${s.symbol}:${s.action} conf${s.confidence}% tgt${s.target} risk${s.riskScore}`).join("|")||"No discovery ideas loaded yet.";
 
   const SYSTEM=`You are ARIA (Adaptive Research Intelligence Assistant) for Bharat Intelligence — Indian stock and commodity market multi-agent system.
 
@@ -1319,7 +1314,7 @@ When the user asks to "analyse [stock] like Buffett", "what would Jhunjhunwala t
 CURRENT PORTFOLIO: ${portfolioSummary||"None"}
 DISCOVERY IDEAS TODAY: ${discoverySummary}
 ACTIVE CONTEXT: ${ariaContext?JSON.stringify({type:ariaContext.type,paper:ariaContext.paper?.title,holding:ariaContext.holding?.symbol,discovery:discoveryStock?.symbol}):"none"}
-Market: Nifty 22,147 (+0.6%), FII net buy ₹1,840 Cr, Gold ₹72,840, INR/USD 83.47, VIX 14.2.
+Market snapshot: ${_mktStr}.
 
 FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_action> JSON only when certain of trade intent.`;
 
@@ -1456,21 +1451,27 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App(){
   const [tab,setTab]=useState("discovery");
-  const [selDiscoveryId,setSelDiscoveryId]=useState("d1");
-  const [selRecId,setSelRecId]=useState(1);
+  const [selDiscoveryId,setSelDiscoveryId]=useState(null);
+  const [selRecId,setSelRecId]=useState(null);
   const [ariaOpen,setAriaOpen]=useState(false);
   const [ariaContext,setAriaContext]=useState(null);
-  const [portfolio,setPortfolio]=useState(DEFAULT_PORTFOLIO);
+  // When IS_LIVE, start with empty arrays so users see proper empty-state placeholders
+  // rather than convincing-looking fabricated data.
+  // When NOT IS_LIVE (local dev, no backend), seed from mock constants so the UI
+  // is functional out-of-the-box without a running API server.
+  const [portfolio,         setPortfolio]         = useState(IS_LIVE ? [] : DEFAULT_PORTFOLIO);
   const [govBanner,setGovBanner]=useState(true);
   const [now,setNow]=useState(new Date());
 
-  // ── Live data state — initialised from mock, replaced by API on mount ────────
-  const [discoveryUniverse, setDiscoveryUniverse] = useState(DISCOVERY_UNIVERSE);
-  const [portfolioRecs,     setPortfolioRecs]     = useState(PORTFOLIO_RECOMMENDATIONS);
-  const [marketPulse,       setMarketPulse]       = useState(MARKET_PULSE);
-  const [govAlerts,         setGovAlerts]         = useState(GOV_ALERTS);
-  const [researchFeed,      setResearchFeed]      = useState(AI_RESEARCH_FEED);
-  const [agentDebateLog]                          = useState(AGENT_DEBATE_LOG);
+  // ── Live data state ──────────────────────────────────────────────────────────
+  const [discoveryUniverse, setDiscoveryUniverse] = useState(IS_LIVE ? [] : DISCOVERY_UNIVERSE);
+  const [portfolioRecs,     setPortfolioRecs]     = useState(IS_LIVE ? [] : PORTFOLIO_RECOMMENDATIONS);
+  const [marketPulse,       setMarketPulse]       = useState(IS_LIVE ? [] : MARKET_PULSE);
+  const [govAlerts,         setGovAlerts]         = useState(IS_LIVE ? [] : GOV_ALERTS);
+  const [researchFeed,      setResearchFeed]      = useState(IS_LIVE ? [] : AI_RESEARCH_FEED);
+  // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
+  // Used to distinguish "loading" from "loaded + empty".
+  const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
   const wsRef = useRef(null);
 
   useEffect(()=>{const t=setInterval(()=>setNow(new Date()),30000);return()=>clearInterval(t);},[]);
@@ -1479,27 +1480,30 @@ export default function App(){
   useEffect(()=>{
     if(!API_URL) return; // no backend set — keep mock data for local dev
 
-    // Initial parallel load
+    // Initial parallel load.
+    // NOTE: always set state regardless of whether the API returned rows.
+    //       The old `if(d&&d.length)` guard kept mock data visible when the API
+    //       was configured but had no rows yet — replaced with proper empty states.
     Promise.allSettled([
       apiFetch("/api/discovery")
-        .then(d=>{ if(d&&d.length){ setDiscoveryUniverse(d); setSelDiscoveryId(d[0].id); } })
+        .then(d=>{ const arr=Array.isArray(d)?d:[]; setDiscoveryUniverse(arr); if(arr[0]?.id) setSelDiscoveryId(arr[0].id); })
         .catch(()=>{}),
       apiFetch("/api/recommendations")
-        .then(d=>{ if(d&&d.length){ setPortfolioRecs(d); setSelRecId(d[0].id); } })
+        .then(d=>{ const arr=Array.isArray(d)?d:[]; setPortfolioRecs(arr); if(arr[0]?.id) setSelRecId(arr[0].id); })
         .catch(()=>{}),
       apiFetch("/api/portfolio")
-        .then(d=>{ if(d&&d.length) setPortfolio(d); })
+        .then(d=>{ if(Array.isArray(d)) setPortfolio(d); })
         .catch(()=>{}),
       apiFetch("/api/market/pulse")
-        .then(d=>{ if(d&&d.length) setMarketPulse(d); })
+        .then(d=>{ if(Array.isArray(d)&&d.length) setMarketPulse(d); })
         .catch(()=>{}),
       apiFetch("/api/governance/alerts")
-        .then(d=>{ if(d&&d.length) setGovAlerts(d); })
+        .then(d=>{ if(Array.isArray(d)) setGovAlerts(d); })
         .catch(()=>{}),
       apiFetch("/api/governance/research")
-        .then(d=>{ const arr=d?.proposals||d; if(arr&&arr.length) setResearchFeed(arr); })
+        .then(d=>{ const arr=d?.proposals||d; if(Array.isArray(arr)) setResearchFeed(arr); })
         .catch(()=>{}),
-    ]);
+    ]).then(()=>setApiLoaded(true));
 
     // Refresh market pulse every 60 s
     const pulseTimer = setInterval(()=>{
@@ -1531,9 +1535,9 @@ export default function App(){
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
-  const openAlerts=govAlerts.filter(a=>!a.resolved).length;
-  const portfolioAlerts=computePortfolioAlerts(portfolio);
-  const discoveryStock=discoveryUniverse.find(s=>s.id===selDiscoveryId);
+  const openAlerts=(govAlerts||[]).filter(a=>!a.resolved).length;
+  const portfolioAlerts=computePortfolioAlerts(portfolio||[]);
+  const discoveryStock=(discoveryUniverse||[]).find(s=>s.id===selDiscoveryId);
 
   const openARIA=useCallback((type,extra=null)=>{
     if(type==="discovery"){setAriaContext({type:"discovery",id:selDiscoveryId});setSelDiscoveryId(selDiscoveryId);}
@@ -1550,7 +1554,7 @@ export default function App(){
         id:tempId, symbol:action.symbol, name:action.name||action.symbol,
         sector:action.sector||"—", qty:Number(action.qty)||1,
         avgBuy:Number(action.avgBuy),
-        currentPrice:LIVE_PRICES[action.symbol]||Number(action.avgBuy),
+        currentPrice:Number(action.avgBuy), // temporary until API returns live price
         buyDate:new Date().toISOString().slice(0,10),
         linkedRecId:action.linkedRecId||null,
         notes:action.notes||"Added via ARIA",
@@ -1598,11 +1602,11 @@ export default function App(){
   },[]);
 
   const TABS=[
-    {id:"discovery",icon:"🔍",label:"Discovery",badge:discoveryUniverse.length,badgeColor:C.cyan},
+    {id:"discovery",icon:"🔍",label:"Discovery",badge:(discoveryUniverse||[]).length,badgeColor:C.cyan},
     {id:"recommendations",icon:"🎯",label:"Portfolio Recs"},
     {id:"portfolio",icon:"💼",label:"Portfolio",badge:portfolioAlerts.length,badgeColor:C.orange},
     {id:"market",icon:"📡",label:"Market"},
-    {id:"governance_research",icon:"🧬",label:"Gov Research",badge:researchFeed.filter(r=>r.debateStatus==="pending").length,badgeColor:C.purple},
+    {id:"governance_research",icon:"🧬",label:"Gov Research",badge:(researchFeed||[]).filter(r=>r.debateStatus==="pending").length,badgeColor:C.purple},
     {id:"governance",icon:"🛡",label:"Governance",badge:openAlerts,badgeColor:C.red},
   ];
 
@@ -1674,6 +1678,7 @@ export default function App(){
               <ResearchDiscoveryTab
                 portfolio={portfolio}
                 discoveryUniverse={discoveryUniverse}
+                apiLoaded={apiLoaded}
                 onAddToPortfolio={(stock)=>{
                   setAriaContext({type:"discovery",id:stock.id});
                   setSelDiscoveryId(stock.id);
@@ -1690,7 +1695,11 @@ export default function App(){
                   <div style={{fontSize:13,fontWeight:700,color:"white"}}>Portfolio Stock Recommendations</div>
                   <div style={{fontSize:9,color:C.muted,marginTop:1}}>Ongoing signals for stocks you already hold · Updated daily by the agent network</div>
                 </div>
-                <div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:14}}>
+                {IS_LIVE && apiLoaded && portfolioRecs.length===0 && (
+                  <EmptyState icon="🎯" title="No recommendations yet"
+                    sub="Add stocks to your portfolio and the agent network will generate buy/hold/sell signals after the next daily run (06:00 IST). You can also ask ARIA about any stock." />
+                )}
+                {portfolioRecs.length>0&&<div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:14}}>
                   <div>
                     {portfolioRecs.map(r=>{
                       const ac=r.action==="BUY"?C.green:r.action==="SELL"?C.red:C.accent;
@@ -1745,7 +1754,7 @@ export default function App(){
                       </>);})()}
                     </div>
                   )}
-                </div>
+                </div>}{/* closes portfolioRecs.length>0 wrapper */}
               </div>
             )}
 
@@ -1764,17 +1773,12 @@ export default function App(){
                   ))}
                 </div>
                 <div style={{fontSize:11,fontWeight:700,color:"white",marginBottom:7}}>📰 Today's News</div>
-                {NEWS_FEED.map((n,i)=>(
-                  <div key={i} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:5,padding:"7px 11px",marginBottom:5,display:"flex",gap:8}}>
-                    <span style={{fontSize:8,color:C.muted,whiteSpace:"nowrap",marginTop:1}}>{n.time}</span>
-                    <div><div style={{fontSize:10,color:"white",lineHeight:1.5,marginBottom:2}}>{n.text}</div>
-                    <div style={{display:"flex",gap:4}}><span style={{fontSize:8,color:C.muted}}>{n.src}</span><Tag color={n.tone==="positive"?C.green:n.tone==="negative"?C.red:C.accent} small>{n.sector}</Tag></div></div>
-                  </div>
-                ))}
+                <EmptyState icon="📰" title="Live news feed not yet connected"
+                  sub="A real-time NSE/BSE news integration is on the roadmap. For now, use ARIA to ask about any stock or sector news." />
               </div>
             )}
 
-            {tab==="governance_research"&&<GovernanceResearchTab onOpenARIA={openARIA} researchFeed={researchFeed} agentDebateLog={agentDebateLog}/>}
+            {tab==="governance_research"&&<GovernanceResearchTab onOpenARIA={openARIA} researchFeed={researchFeed} apiLoaded={apiLoaded}/>}
 
             {tab==="governance"&&(
               <div style={{animation:"fadeUp .3s ease"}}>
@@ -1782,28 +1786,26 @@ export default function App(){
                   <GovShield size={18}/><div style={{fontSize:13,fontWeight:700,color:"white"}}>Governance Engine</div>
                   <div style={{marginLeft:"auto",background:C.green+"12",border:`1px solid ${C.green}33`,borderRadius:5,padding:"3px 8px",display:"flex",alignItems:"center",gap:4}}><Dot color={C.green} pulse/><span style={{fontSize:9,color:C.green,fontWeight:600}}>Running</span></div>
                 </div>
-                <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
-                  {govAlerts.map(a=>{const sc={critical:C.red,warning:C.accent,info:C.blue}[a.severity];return(
-                    <div key={a.id} style={{background:C.surface,border:`1px solid ${sc}33`,borderRadius:7,padding:11}}>
-                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><div style={{display:"flex",gap:5,alignItems:"center"}}><Tag color={sc}>{a.severity.toUpperCase()}</Tag><span style={{fontSize:9,color:C.muted}}>{a.module} · {a.time}</span></div><Tag color={a.resolved?C.green:C.red}>{a.resolved?"RESOLVED":"OPEN"}</Tag></div>
-                      <div style={{fontSize:11,fontWeight:600,color:"white",marginBottom:3}}>{a.title}</div>
-                      <div style={{fontSize:9,color:C.textDim,lineHeight:1.6,marginBottom:4}}>{a.detail}</div>
-                      <div style={{fontSize:8,color:sc,background:sc+"0f",borderRadius:3,padding:"2px 6px"}}>⚡ {a.action}</div>
-                    </div>
-                  );})}
-                </div>
-                <div style={{fontSize:11,fontWeight:700,color:C.accent,marginBottom:8}}>Enhancement Proposals</div>
-                {ENHANCEMENT_PROPOSALS.map(ep=>(
-                  <div key={ep.id} style={{background:C.surface,border:`1px solid ${ep.isPaid?C.accent+"44":C.border}`,borderRadius:8,padding:12,marginBottom:8}}>
-                    <div style={{display:"flex",gap:5,marginBottom:5}}><Tag color={ep.isPaid?C.accent:C.green}>{ep.isPaid?"💰 PAID":"✅ FREE"}</Tag><Tag color={C.accent}>{ep.status.replace("_"," ").toUpperCase()}</Tag></div>
-                    <div style={{fontSize:11,fontWeight:700,color:"white",marginBottom:3}}>{ep.title}</div>
-                    <div style={{fontSize:9,color:C.textDim,lineHeight:1.6,marginBottom:6}}>{ep.rationale}</div>
-                    {ep.isPaid&&<div style={{fontSize:9,color:C.accent,background:C.accent+"0a",borderRadius:4,padding:"3px 7px",marginBottom:6}}>Cost: {ep.costImpact.monthly} · {ep.costImpact.annual}</div>}
-                    <button onClick={()=>openARIA("enhancement",ep)} style={{background:`linear-gradient(135deg,${C.blue},#4338ca)`,border:"none",borderRadius:5,padding:"6px 12px",color:"white",fontSize:10,fontWeight:700,cursor:"pointer",width:"100%"}}>
-                      {ep.isPaid?"🔍 Review with ARIA":"⚡ Deploy with ARIA"}
-                    </button>
+                {govAlerts.length>0 ? (
+                  <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
+                    {govAlerts.map(a=>{const sc={critical:C.red,warning:C.accent,info:C.blue}[a.severity]||C.muted;return(
+                      <div key={a.id} style={{background:C.surface,border:`1px solid ${sc}33`,borderRadius:7,padding:11}}>
+                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><div style={{display:"flex",gap:5,alignItems:"center"}}><Tag color={sc}>{(a.severity||"info").toUpperCase()}</Tag><span style={{fontSize:9,color:C.muted}}>{a.module} · {a.time}</span></div><Tag color={a.resolved?C.green:C.red}>{a.resolved?"RESOLVED":"OPEN"}</Tag></div>
+                        <div style={{fontSize:11,fontWeight:600,color:"white",marginBottom:3}}>{a.title}</div>
+                        <div style={{fontSize:9,color:C.textDim,lineHeight:1.6,marginBottom:4}}>{a.detail}</div>
+                        {a.action&&<div style={{fontSize:8,color:sc,background:sc+"0f",borderRadius:3,padding:"2px 6px"}}>⚡ {a.action}</div>}
+                      </div>
+                    );})}
                   </div>
-                ))}
+                ) : (
+                  <div style={{background:C.green+"0a",border:`1px solid ${C.green}22`,borderRadius:7,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:8}}>
+                    <Dot color={C.green}/>
+                    <span style={{fontSize:10,color:C.green}}>✅ All systems nominal — no governance alerts</span>
+                  </div>
+                )}
+                <div style={{fontSize:11,fontWeight:700,color:C.accent,marginBottom:8}}>Enhancement Proposals</div>
+                <EmptyState icon="💡" title="No enhancement proposals yet"
+                  sub="Enhancement proposals are surfaced by the governance layer after reviewing agent performance trends. They will appear here once the scheduler has run for several days." />
               </div>
             )}
           </div>
@@ -1812,13 +1814,14 @@ export default function App(){
         {ariaOpen&&(
           <div style={{width:340,borderLeft:`1px solid ${C.border}`,flexShrink:0,display:"flex",flexDirection:"column",animation:"slideIn .2s ease"}}>
             <ARIAPanel
-              selectedRec={portfolioRecs.find(r=>r.id===selRecId)}
+              selectedRec={(portfolioRecs||[]).find(r=>r.id===selRecId)}
               ariaContext={ariaContext}
               onClearContext={()=>setAriaContext(null)}
-              portfolio={portfolio}
+              portfolio={portfolio||[]}
               onPortfolioUpdate={handlePortfolioUpdate}
-              discoveryUniverse={discoveryUniverse}
-              discoveryStock={ariaContext?.type==="discovery"?discoveryUniverse.find(s=>s.id===(ariaContext.id||selDiscoveryId)):null}
+              discoveryUniverse={discoveryUniverse||[]}
+              marketPulse={marketPulse}
+              discoveryStock={ariaContext?.type==="discovery"?discoveryStock:null}
             />
           </div>
         )}
