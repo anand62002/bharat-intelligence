@@ -729,6 +729,18 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             },
             "is_discovery":     True,
             "valid_till":       _valid_till(result.upside_horizon),
+            # metadata persists price snapshot + discovery context so
+            # GET /api/discovery can serve a baseline price even when the
+            # live yfinance refresh fails (weekend / holiday / network issue).
+            # The API overwrites metadata.price with a fresh quote on every request.
+            "metadata": {
+                "price":           result.current_price,          # snapshot at discovery time
+                "sector":          result.sector,
+                "discovery_score": result.composite_score,
+                "screen_triggers": result.screen_triggers,
+                "upside_basis":    result.upside_basis,
+                "upside_horizon":  result.upside_horizon,
+            },
         }
 
         resp = (

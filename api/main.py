@@ -661,7 +661,9 @@ async def get_discovery(
 ):
     """
     Returns is_discovery=true recommendations created today.
-    Falls back to last 7 days when today has no rows.
+    Falls back to last 7 days when today has no rows (expired recs filtered via valid_till).
+    Live current_price is refreshed from yfinance for every returned symbol (same pattern
+    as GET /api/portfolio) so the UI never shows stale entry prices.
     """
     db    = _db()
     today = date.today().isoformat()
@@ -680,10 +682,31 @@ async def get_discovery(
                   .select("*")
                   .eq("is_discovery", True)
                   .gte("created_at", week_ago)
+                  .gte("valid_till", today)          # exclude expired recommendations
                   .order("created_at", desc=True)
                   .limit(10)
                   .execute()
                   .data or [])
+
+    # ── Refresh live prices (mirrors GET /api/portfolio pattern) ─────────────────
+    # Discovery rows have metadata.price set at write-time by _save_discovery().
+    # We overwrite it here with a fresh yfinance quote so the UI always shows the
+    # current market price regardless of when the recommendation was created.
+    if rows:
+        def _refresh_discovery_prices(rows_: list[dict]) -> list[dict]:
+            updated: list[dict] = []
+            for row in rows_:
+                yf_sym = _resolve_yf_symbol(row["symbol"])
+                price  = _fetch_current_price(yf_sym)
+                if price:
+                    meta = dict(row.get("metadata") or {})
+                    meta["price"] = round(price, 2)
+                    row = {**row, "metadata": meta}
+                updated.append(row)
+            return updated
+
+        loop = asyncio.get_event_loop()
+        rows = await loop.run_in_executor(None, _refresh_discovery_prices, rows)
 
     recs = [_transform_recommendation(r) for r in rows]
     recs.sort(key=lambda r: 0 if (r["upsidePct"] >= 100 and r["upsideConfidence"] >= 70) else 1)
