@@ -1274,7 +1274,7 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
 
 Personality: Senior analyst + trusted advisor. Precise, data-driven, warm, never sensational.
 
-YOUR 6 ROLES:
+YOUR 7 ROLES:
 
 1. DISCOVERY EXPLAINER: Explain stocks not in the user's portfolio that the research engine has surfaced. Highlight WHY the system found them interesting, the specific screen triggers, full risk/reward. Compare to existing portfolio for overlap or diversification. Help user decide whether to add to watchlist or portfolio.
 
@@ -1295,6 +1295,27 @@ JSON shape: {"action":"add","symbol":"DIXON","qty":20,"avgBuy":15800,"targetPric
 
 6. FACT CHECKER: Reason carefully, flag uncertainty.
 
+7. WARRENBOT EXPLAINER: When the user asks about WarrenBot scores, explain what they mean in plain English. Key points to always convey:
+— WarrenBot is a long-term quality lens (3–10 year horizon), not a short-term momentum signal
+— A score above 80 means the business has Buffett/Jhunjhunwala quality: strong moat, high ROCE, honest management, consistent earnings, and reasonable price
+— A score below 50 does not mean avoid — it means the opportunity is driven by momentum or sentiment, not underlying business quality. This is fine for shorter time horizons.
+— promoter_quality DISQUALIFIED is the single most important red flag — Jhunjhunwala rule: never invest with a promoter who has pledged more than 30% of shares
+— Margin of Safety is the gap between intrinsic value and market price. Positive = buying at a discount. Negative = paying a premium.
+— The india_consumption_play flag means this business benefits from India's rising income story — a multi-decade tailwind
+— The jhunjhunwala_cyclical_flag means the business is in a cyclical sector trading near its historical trough valuation — high risk but Jhunjhunwala made his biggest returns here
+— When comparing a high WarrenBot score stock to a low one, always ask the user: what is your time horizon? If 6–12 months, WarrenBot matters less. If 3–5 years, it matters a lot.
+
+WARREN BOT ON-DEMAND ANALYSIS:
+When the user asks to "analyse [stock] like Buffett", "what would Jhunjhunwala think of [stock]", "Buffett analysis of [stock]", or similar:
+1. Output <fetch_warren_bot>SYMBOL</fetch_warren_bot> on its own line (use plain NSE code, no .NS suffix, e.g. DIXON not DIXON.NS)
+2. The system will fetch the Warren Bot data and provide it to you automatically
+3. When you receive the data, present a structured plain-English response covering:
+   — Conviction rating and overall score (what it means for this specific stock)
+   — The single strongest reason to like it (from why_buffett_would_like)
+   — The single strongest reason to pass (from why_buffett_would_pass)
+   — Whether it suits long-term (3–5yr) vs short-term (6–12m) based on the score
+   — If promoter_quality is DISQUALIFIED, make this the headline warning
+
 CURRENT PORTFOLIO: ${portfolioSummary||"None"}
 DISCOVERY IDEAS TODAY: ${discoverySummary}
 ACTIVE CONTEXT: ${ariaContext?JSON.stringify({type:ariaContext.type,paper:ariaContext.paper?.title,holding:ariaContext.holding?.symbol,discovery:discoveryStock?.symbol}):"none"}
@@ -1308,12 +1329,61 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
     setMessages(p=>[...p,{role:"user",text:txt}]);setLoading(true);
     try{
       const history=messages.slice(-14).map(m=>({role:m.role,content:m.text}));
-      const res=await fetch("/api/aria",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:SYSTEM,messages:[...history,{role:"user",content:txt}]})});
+      const ariaCall=(msgs)=>fetch("/api/aria",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:SYSTEM,messages:msgs})});
+
+      // ── First pass ────────────────────────────────────────────────────────
+      const res=await ariaCall([...history,{role:"user",content:txt}]);
       const data=await res.json();
-      const raw=data.content?.[0]?.text||"Error.";
+      let raw=data.content?.[0]?.text||"Error.";
+
+      // ── Warren Bot on-demand fetch ────────────────────────────────────────
+      // ARIA outputs <fetch_warren_bot>SYMBOL</fetch_warren_bot> when it wants
+      // live Warren Bot data. We fetch it and do a second-pass so ARIA can
+      // present structured results without the user needing to do anything.
+      const wbTagMatch=raw.match(/<fetch_warren_bot>([^<]+)<\/fetch_warren_bot>/i);
+      if(wbTagMatch&&API_URL){
+        const wbSymbol=wbTagMatch[1].trim().toUpperCase();
+        let wbPayload="Warren Bot data unavailable — continue without it.";
+        try{
+          const wbRes=await apiFetch(`/api/warren_bot/${encodeURIComponent(wbSymbol)}`);
+          if(wbRes?.analysis){
+            const a=wbRes.analysis;
+            // Summarise the most relevant fields into a compact context string
+            // to avoid bloating the Anthropic context window with the full JSON.
+            wbPayload=`Warren Bot data for ${wbSymbol} (score ${a.score}/100, ${a.conviction_rating}):
+- Moat: ${a.moat_type} (strength ${a.moat_strength_score}/20)
+- ROCE avg 10yr: ${a.roce_avg_10yr??'N/A'}%   Valuation score: ${a.valuation_score}/20
+- Intrinsic value: ₹${a.intrinsic_value_per_share??'N/A'}   Margin of safety: ${a.margin_of_safety_pct??'N/A'}%
+- 10yr EPS CAGR: ${a.ten_year_eps_cagr??'N/A'}%
+- Promoter quality: ${a.promoter_quality}
+- India consumption play: ${a.india_consumption_play}   Cyclical trough flag: ${a.jhunjhunwala_cyclical_flag}
+- Why like: ${a.why_buffett_would_like||'—'}
+- Why pass: ${a.why_buffett_would_pass||'—'}
+- Key risks: ${(a.key_risks||[]).join('; ')}
+- Data gaps: ${(a.data_gaps||[]).join(', ')||'none'}`;
+          }
+        }catch(e){/* silent — wbPayload stays as unavailable message */}
+
+        // Strip the fetch tag from ARIA's first reply, then do a second pass
+        // with the data injected so ARIA delivers the final structured response.
+        const strippedFirst=(raw.replace(/<fetch_warren_bot>[^<]+<\/fetch_warren_bot>/gi,"").trim())||"Analysing…";
+        const res2=await ariaCall([
+          ...history,
+          {role:"user",content:txt},
+          {role:"assistant",content:strippedFirst},
+          {role:"user",content:`${wbPayload}\n\nNow give me the full structured plain-English analysis as per Role 7.`},
+        ]);
+        const data2=await res2.json();
+        raw=data2.content?.[0]?.text||raw;
+      }
+
+      // ── Portfolio action tag ──────────────────────────────────────────────
       const actionMatch=raw.match(/<portfolio_action>([\s\S]*?)<\/portfolio_action>/);
-      const displayText=raw.replace(/<portfolio_action>[\s\S]*?<\/portfolio_action>/g,"").trim();
+      const displayText=raw
+        .replace(/<portfolio_action>[\s\S]*?<\/portfolio_action>/g,"")
+        .replace(/<fetch_warren_bot>[^<]+<\/fetch_warren_bot>/gi,"")
+        .trim();
       if(actionMatch){try{onPortfolioUpdate(JSON.parse(actionMatch[1].trim()));}catch(e){}}
       setMessages(p=>[...p,{role:"assistant",text:displayText,hasAction:!!actionMatch}]);
     }catch(e){setMessages(p=>[...p,{role:"assistant",text:"Connection error — check API configuration."}]);}
@@ -1321,11 +1391,11 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
   };
 
   const QUICK=ariaContext?.type==="discovery"
-    ?["Explain why it screened","Compare to my portfolio","What's the main risk?","Add to my portfolio"]
+    ?["Explain why it screened","Compare to my portfolio","What's the main risk?","Add to my portfolio","Explain the WarrenBot score","Would Buffett buy this?","What does the moat score mean?"]
     :ariaContext?.type?.includes("research")
     ?["Summarise the paper","Walk me through the debate","Approve this change","What's the implementation cost?"]
     :ariaContext?.type==="holding"
-    ?["Should I hold or sell?","How close is my stop-loss?","I sold this today","Add more at current price?"]
+    ?["Should I hold or sell?","How close is my stop-loss?","I sold this today","Add more at current price?","Explain the WarrenBot score","Would Buffett buy this?","What does the moat score mean?"]
     :["Show me today's discovery ideas","Analyse my portfolio","What's the best new opportunity?","Explain a governance proposal"];
 
   const renderMsg=txt=>txt.split('\n').map((line,i)=>{
