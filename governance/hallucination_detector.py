@@ -39,8 +39,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import statistics
 import sys
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -68,6 +72,12 @@ DEFAULT_ACCURACY_BASELINE = 70.0  # neutral accuracy → trust = 1.0 (matches or
 TRUST_MIN                 = 0.5   # floor: severely under-performing agent
 TRUST_MAX                 = 1.5   # ceiling: highly accurate agent
 TRUST_HIGH_THRESHOLD      = 1.2   # trust ≥ this → hallucination is CRITICAL, not WARNING
+
+# ── Multi-stage pipeline constants ────────────────────────────────────────────
+CONSISTENCY_RERUNS              = 3      # times to re-run an agent in Stage 1
+CONSISTENCY_MIN_AGREEMENT       = 0.67   # flag if < 67% of runs share the majority signal
+CONSISTENCY_SCORE_CV_THRESHOLD  = 0.30   # flag if score coefficient of variation > 30%
+GROUNDING_TOLERANCE_PCT         = 5.0    # max % deviation before a claim is flagged ungrounded
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -499,6 +509,769 @@ def get_agent_trust_scores(client=None) -> dict[str, float]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ── MULTI-STAGE HALLUCINATION PIPELINE ────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Dataclasses ───────────────────────────────────────────────────────────────
+
+@dataclass
+class ConsistencyResult:
+    """Outcome of the Stage-1 self-consistency check for one agent."""
+    agent_name:      str
+    symbol:          str
+    signals:         list   # list[str] — signal returned on each re-run
+    scores:          list   # list[float] — score returned on each re-run (may be shorter)
+    agreement:       float  # 0.0–1.0  (fraction of runs matching the majority signal)
+    score_cv:        float  # coefficient of variation of scores (std / mean)
+    is_inconsistent: bool
+    flag_reason:     str = ""
+
+
+@dataclass
+class ContradictionResult:
+    """Outcome of the Stage-2 cross-agent contradiction check for one pair."""
+    agent_a:              str
+    agent_b:              str
+    signal_a:             str
+    signal_b:             str
+    severity:             str   # "CRITICAL" | "MODERATE" | "LOW"
+    is_hard_contradiction: bool
+    reconciled:           bool = False
+    reconciliation_note:  str  = ""
+
+
+@dataclass
+class ClaimVerification:
+    """Outcome of the Stage-3 claim-grounding check for one numerical claim."""
+    agent_name:    str
+    claim_name:    str    # "rsi", "pe", "current_price", etc.
+    claimed_value: float
+    actual_value:  float
+    deviation_pct: float
+    is_grounded:   bool   # True if deviation_pct <= GROUNDING_TOLERANCE_PCT
+
+
+@dataclass
+class PipelineResult:
+    """Aggregated result from all three hallucination-detection stages."""
+    symbol:                str
+    consistency_results:   list = field(default_factory=list)   # list[ConsistencyResult]
+    contradiction_results: list = field(default_factory=list)   # list[ContradictionResult]
+    claim_verifications:   list = field(default_factory=list)   # list[ClaimVerification]
+    confidence_adjustment: int  = 0      # net negative pts to apply to recommendation confidence
+    summary_flags:         list = field(default_factory=list)   # list[str]
+    duration_seconds:      float = 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1: Self-consistency check
+# ─────────────────────────────────────────────────────────────────────────────
+
+_AGENT_MODULE_MAP: dict[str, str] = {
+    "technical":          "agents.technical",
+    "fundamental":        "agents.fundamental",
+    "sentiment":          "agents.sentiment",
+    "macro":              "agents.macro",
+    "institutional":      "agents.institutional",
+    "sector_valuation":   "agents.sector_valuation",
+    "commodities":        "agents.commodities",
+    "historical_rag":     "agents.historical_rag",
+    "discovery_screener": "agents.discovery_screener",
+    "warren_bot":         "agents.warren_bot",
+}
+
+
+def _import_agent_fn(agent_name: str):
+    """
+    Import and return the analyse(symbol) callable for *agent_name*.
+    Returns None if the module cannot be imported or has no analyse() function.
+    """
+    module_path = _AGENT_MODULE_MAP.get(agent_name)
+    if not module_path:
+        return None
+    try:
+        import importlib
+        mod = importlib.import_module(module_path)
+        return getattr(mod, "analyse", None)
+    except Exception as exc:
+        log.debug("Could not import agent '%s' (%s): %s", agent_name, module_path, exc)
+        return None
+
+
+def _run_agent_once(agent_fn, symbol: str) -> tuple:
+    """
+    Call agent_fn(symbol) once.  Returns (signal: str, score: float|None).
+    Falls back to ("ERROR", None) on any exception.
+    """
+    try:
+        result = agent_fn(symbol)
+        if isinstance(result, dict):
+            signal = str(result.get("signal", "NO_DATA")).upper()
+            raw_score = result.get("score")
+            score  = float(raw_score) if raw_score is not None else None
+            return signal, score
+        return "NO_DATA", None
+    except Exception as exc:
+        log.debug("Agent run error in consistency check: %s", exc)
+        return "ERROR", None
+
+
+def check_self_consistency(
+    symbol:     str,
+    agent_name: str,
+    *,
+    reruns: int = CONSISTENCY_RERUNS,
+) -> Optional["ConsistencyResult"]:
+    """
+    Re-run *agent_name* up to *reruns* times in parallel threads and compare the
+    resulting signals and scores.
+
+    Flags as inconsistent when EITHER:
+      • Signal agreement < CONSISTENCY_MIN_AGREEMENT (< 67% match majority signal)
+      • Score coefficient of variation > CONSISTENCY_SCORE_CV_THRESHOLD (> 30%)
+
+    Deterministic agents (technical, fundamental) always agree — the check is a
+    no-op for them but correctly passes through.  Stochastic / LLM-backed agents
+    (sentiment, warren_bot commentary) may genuinely diverge.
+
+    Returns None if the agent cannot be imported or all runs return ERROR/NO_DATA.
+    """
+    agent_fn = _import_agent_fn(agent_name)
+    if agent_fn is None:
+        log.debug("Skipping consistency check — agent not importable: %s", agent_name)
+        return None
+
+    signals: list[str]  = []
+    scores:  list[float] = []
+
+    with ThreadPoolExecutor(max_workers=reruns, thread_name_prefix=f"consist_{agent_name}") as pool:
+        futures = [pool.submit(_run_agent_once, agent_fn, symbol) for _ in range(reruns)]
+        for fut in as_completed(futures):
+            try:
+                sig, score = fut.result(timeout=90)
+                if sig not in ("ERROR", "NO_DATA"):
+                    signals.append(sig)
+                if score is not None:
+                    scores.append(score)
+            except Exception as exc:
+                log.debug("Consistency future error [%s/%s]: %s", agent_name, symbol, exc)
+
+    if not signals:
+        return None
+
+    # Agreement = fraction of runs matching the plurality signal
+    majority_signal, majority_count = Counter(signals).most_common(1)[0]
+    agreement = majority_count / len(signals)
+
+    # Coefficient of variation of scores
+    score_cv = 0.0
+    if len(scores) >= 2:
+        mean_s = statistics.mean(scores)
+        std_s  = statistics.stdev(scores)
+        score_cv = std_s / mean_s if mean_s != 0 else 0.0
+
+    flags: list[str] = []
+    if agreement < CONSISTENCY_MIN_AGREEMENT:
+        flags.append(
+            f"signal agreement {agreement:.0%} < {CONSISTENCY_MIN_AGREEMENT:.0%}  "
+            f"(runs: {signals})"
+        )
+    if score_cv > CONSISTENCY_SCORE_CV_THRESHOLD:
+        flags.append(
+            f"score CV {score_cv:.2f} > {CONSISTENCY_SCORE_CV_THRESHOLD:.2f}  "
+            f"(scores: {[round(s, 1) for s in scores]})"
+        )
+
+    return ConsistencyResult(
+        agent_name      = agent_name,
+        symbol          = symbol,
+        signals         = signals,
+        scores          = scores,
+        agreement       = round(agreement, 4),
+        score_cv        = round(score_cv, 4),
+        is_inconsistent = len(flags) > 0,
+        flag_reason     = "; ".join(flags),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: Cross-agent contradiction detector
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Severity of a contradiction between a known agent pair
+_AGENT_PAIR_SEVERITY: dict[frozenset, str] = {
+    frozenset({"technical",   "fundamental"}):  "CRITICAL",
+    frozenset({"technical",   "macro"}):         "MODERATE",
+    frozenset({"sentiment",   "institutional"}): "MODERATE",
+    frozenset({"fundamental", "historical_rag"}):"MODERATE",
+}
+
+# Signal sets that constitute a "hard" contradiction (directly opposing views)
+_HARD_CONTRADICTION_PAIRS: list[frozenset] = [
+    frozenset({"BUY",        "AVOID"}),
+    frozenset({"BUY",        "SELL"}),
+    frozenset({"STRONG_BUY", "AVOID"}),
+    frozenset({"STRONG_BUY", "SELL"}),
+]
+
+
+def _llm_reconcile_contradiction(
+    symbol:   str,
+    agent_a:  str, signal_a: str, detail_a: dict,
+    agent_b:  str, signal_b: str, detail_b: dict,
+) -> tuple[bool, str]:
+    """
+    Ask Claude Haiku whether the contradiction between agent_a and agent_b is
+    reconcilable (i.e., explainable by different time horizons / evidence scope).
+
+    Returns (reconciled: bool, explanation: str).
+    Falls back to (False, reason_str) when the API is unavailable.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return False, "ANTHROPIC_API_KEY not set — LLM reconciliation skipped"
+
+    prompt = (
+        f"Stock: {symbol}\n"
+        f"Agent '{agent_a}' (signal: {signal_a}) context:\n"
+        f"{str(detail_a)[:400]}\n\n"
+        f"Agent '{agent_b}' (signal: {signal_b}) context:\n"
+        f"{str(detail_b)[:400]}\n\n"
+        "These two agents have opposing signals. "
+        "Is this contradiction RECONCILABLE — i.e. can both views be correct "
+        "if they are analysing different time horizons, risk dimensions, or "
+        "non-overlapping evidence? "
+        "Reply RECONCILABLE or UNRECONCILABLE on the first line, "
+        "then one sentence of explanation."
+    )
+
+    try:
+        import anthropic
+        client_llm = anthropic.Anthropic(api_key=api_key)
+        resp = client_llm.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = (resp.content[0].text or "").strip() if resp.content else ""
+        reconciled = text.upper().startswith("RECONCILABLE")
+        note_line  = text.split("\n", 1)[-1].strip() if "\n" in text else text
+        return reconciled, note_line
+    except Exception as exc:
+        log.debug("LLM reconciliation error: %s", exc)
+        return False, f"LLM unavailable: {exc}"
+
+
+def detect_cross_agent_contradictions(
+    symbol:        str,
+    agent_signals: dict,
+    *,
+    use_llm_reconcile: bool = True,
+) -> list[ContradictionResult]:
+    """
+    Inspect all agent pairs defined in _AGENT_PAIR_SEVERITY and flag those
+    where the signals are in direct opposition (BUY vs SELL/AVOID).
+
+    For CRITICAL hard contradictions, optionally calls Claude Haiku to determine
+    whether the contradiction is reconcilable.
+
+    Args:
+        symbol:            NSE display symbol
+        agent_signals:     dict mapping agent_name → signal_data
+        use_llm_reconcile: whether to call Haiku for CRITICAL hard contradictions
+
+    Returns:
+        List of ContradictionResult — one per flagged pair.
+    """
+    results: list[ContradictionResult] = []
+
+    _BUY_SIGNALS  = {"BUY", "STRONG_BUY"}
+    _SELL_SIGNALS = {"SELL", "AVOID"}
+
+    def _sig(agent_data) -> str:
+        if isinstance(agent_data, dict):
+            return str(agent_data.get("signal", "NO_DATA")).upper()
+        return str(agent_data or "NO_DATA").upper()
+
+    def _detail(agent_data) -> dict:
+        return agent_data if isinstance(agent_data, dict) else {}
+
+    for pair_set, severity in _AGENT_PAIR_SEVERITY.items():
+        pair_list = list(pair_set)
+        if len(pair_list) != 2:
+            continue
+        agent_a, agent_b = pair_list[0], pair_list[1]
+
+        if agent_a not in agent_signals or agent_b not in agent_signals:
+            continue
+
+        signal_a = _sig(agent_signals[agent_a])
+        signal_b = _sig(agent_signals[agent_b])
+
+        if signal_a in ("NO_DATA", "ERROR") or signal_b in ("NO_DATA", "ERROR"):
+            continue
+
+        # Determine if signals are in direct opposition
+        sig_pair = frozenset({signal_a, signal_b})
+        is_hard  = sig_pair in _HARD_CONTRADICTION_PAIRS
+
+        # For softer pairs, flag only when one is clearly BUY and the other SELL/AVOID
+        is_opposing = (
+            (signal_a in _BUY_SIGNALS and signal_b in _SELL_SIGNALS) or
+            (signal_b in _BUY_SIGNALS and signal_a in _SELL_SIGNALS)
+        )
+
+        if not is_hard and not is_opposing:
+            continue   # not a meaningful contradiction (e.g. BUY vs HOLD)
+
+        reconciled = False
+        note       = ""
+
+        if is_hard and severity == "CRITICAL" and use_llm_reconcile:
+            detail_a = _detail(agent_signals[agent_a])
+            detail_b = _detail(agent_signals[agent_b])
+            reconciled, note = _llm_reconcile_contradiction(
+                symbol,
+                agent_a, signal_a, detail_a,
+                agent_b, signal_b, detail_b,
+            )
+            log.debug(
+                "[%s] %s↔%s contradiction reconciled=%s  note=%s",
+                symbol, agent_a, agent_b, reconciled, note,
+            )
+
+        results.append(ContradictionResult(
+            agent_a               = agent_a,
+            agent_b               = agent_b,
+            signal_a              = signal_a,
+            signal_b              = signal_b,
+            severity              = severity,
+            is_hard_contradiction = is_hard,
+            reconciled            = reconciled,
+            reconciliation_note   = note,
+        ))
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3: Claim-grounding verifier
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_claims_technical(detail: dict) -> dict[str, float]:
+    """
+    Pull verifiable numerical claims from a technical agent detail dict.
+    Returns {claim_name: claimed_value}; missing / non-numeric fields are skipped.
+
+    Known paths (from agents/technical.py):
+        detail["indicators"]["rsi"]
+        detail["momentum"]["rsi"]           (fallback)
+        detail["indicators"]["current_price"]
+        detail["indicators"]["ema20"]
+        detail["volume_confirmation"]["volume_vs_avg"]
+    """
+    claims: dict[str, float] = {}
+    indicators  = detail.get("indicators")  or {}
+    momentum    = detail.get("momentum")    or {}
+    volume_conf = detail.get("volume_confirmation") or {}
+
+    for dest, sources in {
+        "rsi":          [indicators.get("rsi"),          momentum.get("rsi")],
+        "current_price":[indicators.get("current_price")],
+        "ema20":        [indicators.get("ema20")],
+        "volume_ratio": [volume_conf.get("volume_vs_avg")],
+    }.items():
+        for src in sources:
+            if src is not None:
+                try:
+                    claims[dest] = float(src)
+                    break
+                except (TypeError, ValueError):
+                    continue
+
+    return claims
+
+
+def _extract_claims_fundamental(detail: dict) -> dict[str, float]:
+    """
+    Pull verifiable numerical claims from a fundamental agent detail dict.
+    Returns {claim_name: claimed_value}.
+
+    Known paths (from agents/fundamental.py):
+        detail["raw_metrics"]["pe"]          (also detail["profitability"]["pe"])
+        detail["raw_metrics"]["current_price"]
+        detail["raw_metrics"]["revenue_growth"]
+        detail["raw_metrics"]["debt_equity"]
+        detail["raw_metrics"]["roce"]
+    """
+    claims: dict[str, float] = {}
+    raw    = detail.get("raw_metrics")   or {}
+    profit = detail.get("profitability") or {}
+
+    for dest, sources in {
+        "pe":             [raw.get("pe"),             profit.get("pe")],
+        "current_price":  [raw.get("current_price")],
+        "revenue_growth": [raw.get("revenue_growth")],
+        "debt_equity":    [raw.get("debt_equity")],
+        "roce":           [raw.get("roce")],
+    }.items():
+        for src in sources:
+            if src is not None:
+                try:
+                    claims[dest] = float(src)
+                    break
+                except (TypeError, ValueError):
+                    continue
+
+    return claims
+
+
+def _fetch_technical_actuals(yf_symbol: str) -> dict[str, float]:
+    """
+    Fetch fresh technical values from yfinance (1-month daily history).
+    Returns {claim_name: actual_value}; missing values are omitted.
+
+    Computed here:
+        current_price  — most recent daily close
+        rsi            — 14-period Wilder's RSI (EWM with com=13)
+        ema20          — 20-period EMA of closes
+        volume_ratio   — last session volume ÷ 20-day average volume
+    """
+    actuals: dict[str, float] = {}
+    try:
+        import yfinance as yf
+        df = yf.Ticker(yf_symbol).history(period="1mo", interval="1d", auto_adjust=True)
+        if df.empty:
+            return actuals
+
+        closes = df["Close"].astype(float)
+
+        # Current price
+        actuals["current_price"] = float(closes.iloc[-1])
+
+        # RSI — 14-period Wilder's using exponential moving average
+        if len(closes) >= 15:
+            delta    = closes.diff()
+            gain     = delta.where(delta > 0, 0.0)
+            loss     = (-delta).where(delta < 0, 0.0)
+            avg_gain = gain.ewm(com=13, adjust=False).mean()
+            avg_loss = loss.ewm(com=13, adjust=False).mean()
+            rs       = avg_gain / avg_loss.replace(0, float("nan"))
+            rsi_s    = 100.0 - (100.0 / (1.0 + rs))
+            actuals["rsi"] = round(float(rsi_s.iloc[-1]), 2)
+
+        # EMA20
+        if len(closes) >= 20:
+            actuals["ema20"] = round(
+                float(closes.ewm(span=20, adjust=False).mean().iloc[-1]), 4
+            )
+
+        # Volume ratio
+        if "Volume" in df.columns and len(df) >= 2:
+            last_vol = float(df["Volume"].iloc[-1])
+            avg_vol  = float(df["Volume"].tail(20).mean())
+            if avg_vol > 0:
+                actuals["volume_ratio"] = round(last_vol / avg_vol, 4)
+
+    except Exception as exc:
+        log.debug("_fetch_technical_actuals failed for %s: %s", yf_symbol, exc)
+
+    return actuals
+
+
+def _fetch_fundamental_actuals(yf_symbol: str) -> dict[str, float]:
+    """
+    Fetch fresh fundamental values from yfinance .info for *yf_symbol*.
+    Returns {claim_name: actual_value}; missing fields are omitted.
+
+    Notes:
+        • revenue_growth from yf is a decimal (0.18 = 18%); converted to % here.
+        • ROCE is not directly exposed by yfinance — claim is skipped if absent.
+    """
+    actuals: dict[str, float] = {}
+    try:
+        import yfinance as yf
+        info = yf.Ticker(yf_symbol).info or {}
+
+        # PE (trailing preferred, forward as fallback)
+        pe = info.get("trailingPE") or info.get("forwardPE")
+        if pe is not None:
+            actuals["pe"] = float(pe)
+
+        # Current price
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if price is not None:
+            actuals["current_price"] = float(price)
+
+        # Revenue growth — yf decimal → convert to %
+        rev_g = info.get("revenueGrowth")
+        if rev_g is not None:
+            actuals["revenue_growth"] = round(float(rev_g) * 100.0, 2)
+
+        # Debt / equity
+        de = info.get("debtToEquity")
+        if de is not None:
+            actuals["debt_equity"] = float(de)
+
+        # ROCE — not in yfinance .info; skip (will be absent from actuals)
+
+    except Exception as exc:
+        log.debug("_fetch_fundamental_actuals failed for %s: %s", yf_symbol, exc)
+
+    return actuals
+
+
+def verify_claim_grounding(
+    symbol:       str,
+    agent_name:   str,
+    agent_detail: dict,
+    yf_symbol:    Optional[str] = None,
+    *,
+    tolerance_pct: float = GROUNDING_TOLERANCE_PCT,
+) -> list[ClaimVerification]:
+    """
+    Compare numerical claims in *agent_detail* against fresh data fetched from
+    yfinance.  Flags claims where the absolute % deviation exceeds *tolerance_pct*.
+
+    Currently supports agents: "technical", "fundamental".
+    Returns an empty list for any other agent (silently skipped).
+
+    Args:
+        symbol:       NSE display symbol (e.g. "RELIANCE")
+        agent_name:   "technical" or "fundamental"
+        agent_detail: The detail sub-dict from agent_signals[agent_name]
+        yf_symbol:    yfinance ticker — defaults to symbol + ".NS"
+        tolerance_pct:Max % deviation before flagging (default 5%)
+
+    Returns:
+        List of ClaimVerification (one per verified claim; unverifiable claims omitted).
+    """
+    verifications: list[ClaimVerification] = []
+
+    if not isinstance(agent_detail, dict):
+        return verifications
+
+    _yf = yf_symbol or f"{symbol.upper()}.NS"
+
+    if agent_name == "technical":
+        claimed = _extract_claims_technical(agent_detail)
+        actuals = _fetch_technical_actuals(_yf)
+    elif agent_name == "fundamental":
+        claimed = _extract_claims_fundamental(agent_detail)
+        actuals = _fetch_fundamental_actuals(_yf)
+    else:
+        return verifications   # unsupported agent — skip silently
+
+    for claim_name, claimed_val in claimed.items():
+        actual_val = actuals.get(claim_name)
+        if actual_val is None:
+            continue   # no fresh data available for this claim
+
+        # Trivial case: both zero
+        if claimed_val == 0 and actual_val == 0:
+            verifications.append(ClaimVerification(
+                agent_name    = agent_name,
+                claim_name    = claim_name,
+                claimed_value = 0.0,
+                actual_value  = 0.0,
+                deviation_pct = 0.0,
+                is_grounded   = True,
+            ))
+            continue
+
+        denom = abs(actual_val) if actual_val != 0 else abs(claimed_val)
+        if denom == 0:
+            deviation_pct = 0.0
+        else:
+            deviation_pct = abs(claimed_val - actual_val) / denom * 100.0
+
+        is_grounded = deviation_pct <= tolerance_pct
+
+        verifications.append(ClaimVerification(
+            agent_name    = agent_name,
+            claim_name    = claim_name,
+            claimed_value = round(claimed_val, 4),
+            actual_value  = round(actual_val, 4),
+            deviation_pct = round(deviation_pct, 2),
+            is_grounded   = is_grounded,
+        ))
+
+        if not is_grounded:
+            log.info(
+                "[%s] CLAIM MISMATCH  agent=%-14s  %-16s  "
+                "claimed=%.4f  actual=%.4f  dev=%.1f%%",
+                symbol, agent_name, claim_name,
+                claimed_val, actual_val, deviation_pct,
+            )
+
+    return verifications
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pipeline entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_multi_stage_pipeline(
+    symbol:        str,
+    agent_signals: dict,
+    *,
+    run_consistency:    bool = True,
+    run_contradictions: bool = True,
+    run_grounding:      bool = True,
+    use_llm_reconcile:  bool = True,
+    dry_run:            bool = False,
+) -> PipelineResult:
+    """
+    Execute all three hallucination-detection stages against a single set of
+    agent_signals (as produced by the orchestrator).
+
+    Confidence adjustments applied to PipelineResult.confidence_adjustment:
+        Stage 1: -5  per inconsistent agent
+        Stage 2: -15 per CRITICAL   unreconciled contradiction
+                 -5  per MODERATE   unreconciled contradiction
+        Stage 3: -3  per ungrounded claim
+
+    Args:
+        symbol:             NSE display symbol (e.g. "RELIANCE")
+        agent_signals:      dict from recommendation["agent_signals"] (warren_bot excluded)
+        run_consistency:    enable Stage 1
+        run_contradictions: enable Stage 2
+        run_grounding:      enable Stage 3
+        use_llm_reconcile:  call Haiku for CRITICAL hard contradictions in Stage 2
+        dry_run:            pretty-print the summary table to stdout
+
+    Returns:
+        PipelineResult dataclass with all results and net confidence_adjustment.
+    """
+    import time as _time
+    t0 = _time.time()
+
+    result = PipelineResult(symbol=symbol)
+
+    # ── Stage 1: Self-consistency ─────────────────────────────────────────────
+    if run_consistency:
+        # warren_bot has its own consistency model; skip it here
+        agent_names = [k for k in agent_signals if k != "warren_bot"]
+        for aname in agent_names:
+            cr = check_self_consistency(symbol, aname)
+            if cr is None:
+                continue
+            result.consistency_results.append(cr)
+            if cr.is_inconsistent:
+                result.confidence_adjustment -= 5
+                result.summary_flags.append(
+                    f"Stage1/{aname}: inconsistent — {cr.flag_reason}"
+                )
+
+    # ── Stage 2: Cross-agent contradictions ──────────────────────────────────
+    if run_contradictions:
+        contradictions = detect_cross_agent_contradictions(
+            symbol, agent_signals, use_llm_reconcile=use_llm_reconcile
+        )
+        result.contradiction_results.extend(contradictions)
+        for c in contradictions:
+            if not c.reconciled:
+                adj = -15 if c.severity == "CRITICAL" else -5
+                result.confidence_adjustment += adj
+                result.summary_flags.append(
+                    f"Stage2/{c.agent_a}↔{c.agent_b}: {c.severity} contradiction "
+                    f"({c.signal_a} vs {c.signal_b}) — unreconciled"
+                )
+
+    # ── Stage 3: Claim grounding ──────────────────────────────────────────────
+    if run_grounding:
+        for aname in ("technical", "fundamental"):
+            agent_data = agent_signals.get(aname)
+            if not isinstance(agent_data, dict):
+                continue
+            # The detail payload may be nested under a "detail" key or be the dict itself
+            detail = agent_data.get("detail") or agent_data
+            verifications = verify_claim_grounding(symbol, aname, detail)
+            result.claim_verifications.extend(verifications)
+            for v in verifications:
+                if not v.is_grounded:
+                    result.confidence_adjustment -= 3
+                    result.summary_flags.append(
+                        f"Stage3/{aname}/{v.claim_name}: "
+                        f"claimed {v.claimed_value} vs actual {v.actual_value} "
+                        f"(dev {v.deviation_pct:.1f}%)"
+                    )
+
+    result.duration_seconds = round(_time.time() - t0, 2)
+
+    if dry_run:
+        _print_pipeline_summary(result)
+
+    return result
+
+
+def _print_pipeline_summary(result: PipelineResult) -> None:
+    """Pretty-print a PipelineResult to stdout."""
+    W = 70
+    print()
+    print("=" * W)
+    print(f"  Multi-Stage Hallucination Pipeline — {result.symbol}")
+    print("=" * W)
+
+    # Stage 1
+    n1 = len(result.consistency_results)
+    bad1 = sum(1 for c in result.consistency_results if c.is_inconsistent)
+    print(f"\n  Stage 1 — Self-Consistency  ({n1} agents, {bad1} inconsistent)")
+    if n1:
+        for cr in result.consistency_results:
+            mark = "⚠  INCONSISTENT" if cr.is_inconsistent else "✓  ok"
+            print(
+                f"    {cr.agent_name:<22}  agree={cr.agreement:.0%}  "
+                f"score_cv={cr.score_cv:.2f}  {mark}"
+            )
+            if cr.flag_reason:
+                print(f"         ↳ {cr.flag_reason}")
+    else:
+        print("    (no agents checked)")
+
+    # Stage 2
+    n2 = len(result.contradiction_results)
+    bad2 = sum(1 for c in result.contradiction_results if not c.reconciled)
+    print(f"\n  Stage 2 — Cross-Agent Contradictions  ({n2} pairs, {bad2} unreconciled)")
+    if n2:
+        for c in result.contradiction_results:
+            rec = "reconciled" if c.reconciled else "UNRECONCILED"
+            print(
+                f"    {c.agent_a} ({c.signal_a}) ↔ {c.agent_b} ({c.signal_b})"
+                f"  [{c.severity}]  {rec}"
+            )
+            if c.reconciliation_note:
+                print(f"         ↳ {c.reconciliation_note}")
+    else:
+        print("    (no contradictions found)")
+
+    # Stage 3
+    n3 = len(result.claim_verifications)
+    bad3 = sum(1 for v in result.claim_verifications if not v.is_grounded)
+    print(f"\n  Stage 3 — Claim Grounding  ({n3} claims, {bad3} ungrounded)")
+    if n3:
+        for v in result.claim_verifications:
+            mark = "✓" if v.is_grounded else "⚠ MISMATCH"
+            print(
+                f"    {mark:<12}  {v.agent_name}/{v.claim_name:<18}  "
+                f"claimed={v.claimed_value}  actual={v.actual_value}  "
+                f"dev={v.deviation_pct:.1f}%"
+            )
+    else:
+        print("    (no claims verified)")
+
+    # Summary
+    print(f"\n  Net confidence adjustment : {result.confidence_adjustment:+d} pts")
+    if result.summary_flags:
+        print(f"  Flags ({len(result.summary_flags)}) :")
+        for flag in result.summary_flags:
+            print(f"    • {flag}")
+    print(f"\n  Pipeline completed in {result.duration_seconds:.1f}s")
+    print("=" * W)
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main run logic
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -700,11 +1473,24 @@ Examples:
     )
     parser.add_argument(
         "--run-now", action="store_true",
-        help="Execute the audit immediately instead of waiting for the schedule",
+        help="Execute the weekly accuracy audit immediately instead of waiting for the schedule",
     )
     parser.add_argument(
         "--dry", action="store_true",
         help="Dry run: perform analysis but skip all Supabase writes",
+    )
+    parser.add_argument(
+        "--pipeline", metavar="SYMBOL",
+        help=(
+            "Run the multi-stage hallucination pipeline for SYMBOL "
+            "(e.g. --pipeline RELIANCE).  "
+            "Requires REACT_APP_API_URL / agent imports to be available.  "
+            "Add --dry to print results only."
+        ),
+    )
+    parser.add_argument(
+        "--no-llm", action="store_true",
+        help="Disable Claude Haiku LLM reconciliation in Stage 2 (faster, no API cost)",
     )
     args = parser.parse_args()
 
@@ -713,6 +1499,41 @@ Examples:
         format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     )
 
+    # ── --pipeline SYMBOL ────────────────────────────────────────────────────
+    if args.pipeline:
+        symbol = args.pipeline.strip().upper()
+        log.info("Running multi-stage hallucination pipeline for %s …", symbol)
+
+        # Build a minimal agent_signals dict by running the two grounding agents live
+        # (Stage 1 & 2 also run agents internally; Stage 3 needs actual detail dicts)
+        agent_signals: dict = {}
+
+        for aname in ("technical", "fundamental"):
+            fn = _import_agent_fn(aname)
+            if fn is None:
+                log.warning("Agent '%s' not importable — skipping", aname)
+                continue
+            try:
+                res = fn(symbol)
+                if isinstance(res, dict):
+                    agent_signals[aname] = res
+            except Exception as exc:
+                log.warning("Agent '%s' failed: %s", aname, exc)
+
+        if not agent_signals:
+            log.error("No agents produced results for %s — pipeline aborted", symbol)
+            sys.exit(1)
+
+        pipeline_result = run_multi_stage_pipeline(
+            symbol,
+            agent_signals,
+            use_llm_reconcile = not args.no_llm,
+            dry_run            = True,    # always print for CLI invocation
+        )
+
+        sys.exit(0 if not pipeline_result.summary_flags else 1)
+
+    # ── --run-now ─────────────────────────────────────────────────────────────
     if args.run_now:
         result = run(dry_run=args.dry)
         log.info("Audit result: %s", result)
