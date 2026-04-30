@@ -98,6 +98,12 @@ MARKET_CACHE_TTL           = 60   # seconds
 _warren_bot_mem_cache: dict[str, tuple[dict, float]] = {}   # symbol → (result, unix_ts)
 WARREN_BOT_CACHE_TTL = 86_400   # 24 hours in seconds
 
+# ── Symbol resolutions DB cache ────────────────────────────────────────────────
+# Loaded at startup from symbol_resolutions Supabase table.
+# Also populated at runtime as new symbols are probed / searched.
+# key = UPPERCASE input symbol (no .NS/.BO), value = validated yfinance ticker
+_symbol_resolutions_cache: dict[str, str] = {}
+
 # =============================================================================
 # NSE / BSE symbol resolver
 # =============================================================================
@@ -169,24 +175,130 @@ _NSE_OVERRIDES: dict[str, str] = {
 _symbol_cache: dict[str, str] = {}
 
 
+def _load_symbol_resolutions() -> None:
+    """
+    Preload all rows from the symbol_resolutions Supabase table into
+    _symbol_resolutions_cache and _symbol_cache at API startup.
+
+    This means every manually-confirmed or auto-discovered resolution is
+    available immediately, without any live probe, from the very first request.
+    Silently skipped if the table doesn't exist yet (pre-migration).
+    """
+    if _supabase is None:
+        return
+    try:
+        rows = (
+            _supabase
+            .table("symbol_resolutions")
+            .select("input_symbol,yf_symbol")
+            .execute()
+            .data or []
+        )
+        for row in rows:
+            k = (row.get("input_symbol") or "").upper().strip()
+            v = (row.get("yf_symbol")    or "").strip()
+            if k and v:
+                _symbol_resolutions_cache[k] = v
+                _symbol_cache[k] = v          # also prime the main request cache
+        log.info("Loaded %d symbol resolutions from DB", len(rows))
+    except Exception as exc:
+        log.debug(
+            "Could not load symbol_resolutions (table may not exist yet): %s", exc
+        )
+
+
+def _persist_resolution(input_sym: str, yf_sym: str, source: str = "auto") -> None:
+    """
+    Persist a successful resolution to the symbol_resolutions table.
+    Best-effort — errors are logged at DEBUG, never raised.
+    Also updates the in-process caches so subsequent requests skip the probe.
+    """
+    if _supabase is None:
+        return
+    key = input_sym.upper().strip()
+    try:
+        _supabase.table("symbol_resolutions").upsert(
+            {
+                "input_symbol": key,
+                "yf_symbol":    yf_sym,
+                "source":       source,
+                "resolved_at":  datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="input_symbol",
+        ).execute()
+        _symbol_resolutions_cache[key] = yf_sym
+        _symbol_cache[key]             = yf_sym
+        log.info(
+            "Symbol resolution persisted: %s → %s  (source=%s)", key, yf_sym, source
+        )
+    except Exception as exc:
+        log.debug("Symbol resolution persist skipped: %s", exc)
+
+
+def _search_yf_symbol(query: str) -> str | None:
+    """
+    Use yf.Search to find a valid NSE/BSE ticker for a company name or alias.
+
+    yf.Search works well with company names ("Bharat Seats", "Indian Hotels")
+    but NOT with raw NSE symbols ("BHARATSEAT") — those fail the standard
+    .NS/.BO probes already and end up here only when both probes return no data.
+
+    Returns the first validated ticker (NSE preferred over BSE), or None.
+    """
+    try:
+        results = yf.Search(query, news_count=0, max_results=10)
+        quotes  = getattr(results, "quotes", []) or []
+
+        # Prefer NSE listings (exchange code = NSI)
+        for exch_codes, suffix in (
+            ({"NSI", "NSE"},     ".NS"),
+            ({"BSE", "BOM", "BOM"},  ".BO"),
+        ):
+            for q in quotes:
+                if (q.get("exchange") in exch_codes
+                        and q.get("quoteType") == "EQUITY"):
+                    ticker = q.get("symbol", "")
+                    if ticker.endswith(suffix):
+                        # Quick validation — must return a price
+                        try:
+                            hist = yf.Ticker(ticker).history(
+                                period="1d", progress=False
+                            )
+                            if not hist.empty and float(hist["Close"].iloc[-1]) > 0:
+                                return ticker
+                        except Exception:
+                            pass
+    except Exception as exc:
+        log.debug("yf.Search('%s') failed: %s", query, exc)
+    return None
+
+
 def _resolve_yf_symbol(raw: str) -> str:
     """
     Maps any user-provided input to the correct yfinance ticker symbol.
 
     Resolution order:
       1. Exact match in _NSE_OVERRIDES (indices, ETFs, known aliases)
-      2. Already has a recognised suffix (.NS / .BO / =X / =F) or starts with ^
-      3. Live probe: try {SYMBOL}.NS — validate with a 1-day history call
-      4. Live probe: try {SYMBOL}.BO as BSE fallback
-      5. Default to {SYMBOL}.NS (most NSE stocks work without probing)
+      2. DB-loaded symbol resolutions (startup-preloaded; updated at runtime)
+      3. Already has a recognised suffix (.NS / .BO / =X / =F) or starts with ^
+      4. Live probe: try {SYMBOL}.NS — validate with a 1-day history call
+         → on success: persist resolution to DB
+      5. Live probe: try {SYMBOL}.BO as BSE fallback
+         → on success: persist resolution to DB
+      6. yf.Search company-name lookup — handles brand names / display names
+         that differ from the NSE ticker (e.g. "IHCL" → "INDHOTEL.NS")
+         → on success: persist resolution to DB
+      7. Default to {SYMBOL}.NS with a warning (last resort)
 
     Results are cached in _symbol_cache for the lifetime of the process.
+    Steps 4–6 also persist to the symbol_resolutions Supabase table so the
+    same lookup is instant on the next API restart.
     """
     key = raw.upper().strip()
     if key in _symbol_cache:
         return _symbol_cache[key]
 
-    # 1. Known override
+    # 1. Known override (indices, ETFs, known brand-name aliases)
     if key in _NSE_OVERRIDES:
         result = _NSE_OVERRIDES[key]
         _symbol_cache[key] = result
@@ -195,27 +307,56 @@ def _resolve_yf_symbol(raw: str) -> str:
     # Remove spaces for the remaining checks
     sym = key.replace(" ", "")
 
-    # 2. Already has a suffix or is an index / forex symbol
+    # 1b. Space-stripped version may also be in overrides
+    if sym != key and sym in _NSE_OVERRIDES:
+        result = _NSE_OVERRIDES[sym]
+        _symbol_cache[key] = result
+        return result
+
+    # 2. DB-loaded resolutions (persisted from previous successful lookups)
+    for lookup_key in (key, sym):
+        if lookup_key in _symbol_resolutions_cache:
+            result = _symbol_resolutions_cache[lookup_key]
+            _symbol_cache[key] = result
+            return result
+
+    # 3. Already has a suffix or is an index / forex symbol
     if (sym.endswith(".NS") or sym.endswith(".BO")
             or sym.endswith("=X") or sym.endswith("=F")
             or sym.startswith("^")):
         _symbol_cache[key] = sym
         return sym
 
-    # 3 & 4. Live probe — try NSE first, then BSE
+    # 4 & 5. Live probe — try NSE first, then BSE
     for candidate in (f"{sym}.NS", f"{sym}.BO"):
         try:
             hist = yf.Ticker(candidate).history(period="1d", progress=False)
             if not hist.empty and float(hist["Close"].iloc[-1]) > 0:
-                log.info("Symbol resolved: %s → %s", raw, candidate)
+                log.info("Symbol resolved via probe: %s → %s", raw, candidate)
                 _symbol_cache[key] = candidate
+                # Persist so next restart skips the probe
+                _persist_resolution(sym, candidate, "probe")
                 return candidate
         except Exception:
             pass
 
-    # 5. Default: assume NSE
+    # 6. yf.Search fallback — works for company names and brand aliases that
+    #    don't match any NSE symbol directly (e.g. "IHCL", "Bharat Seats")
+    search_result = _search_yf_symbol(raw)
+    if search_result:
+        log.info("Symbol resolved via yf.Search: %s → %s", raw, search_result)
+        _symbol_cache[key] = search_result
+        _symbol_resolutions_cache[sym] = search_result
+        _persist_resolution(sym, search_result, "search")
+        return search_result
+
+    # 7. Last resort: assume NSE, but log a warning so broken symbols are visible
     fallback = f"{sym}.NS"
-    log.info("Symbol resolution defaulted: %s → %s", raw, fallback)
+    log.warning(
+        "Symbol resolution defaulted (no data found): %s → %s  "
+        "(add a manual override via POST /api/symbol/override if this is wrong)",
+        raw, fallback,
+    )
     _symbol_cache[key] = fallback
     return fallback
 
@@ -304,6 +445,11 @@ async def _alert_broadcaster() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):          # noqa: RUF029
+    # Preload symbol resolutions from DB so brand-name aliases work immediately
+    # without any per-request Yahoo Finance probe
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _load_symbol_resolutions)
+
     task = asyncio.create_task(_alert_broadcaster())
     yield
     task.cancel()
@@ -950,6 +1096,159 @@ async def resolve_symbol(
         "price_str":  f"₹{price:,.2f}" if price and exchange in ("NSE", "BSE", "INDEX") else (f"{price:.4f}" if price else None),
         "resolved":   True,
     }
+
+
+# ── 4c. Symbol override (manual fix) ─────────────────────────────────────────
+
+@app.post("/api/symbol/override", tags=["portfolio"])
+async def override_symbol(
+    payload: dict[str, Any],
+    _:       None = Depends(require_api_key),
+):
+    """
+    Manually fix the yfinance ticker for a symbol that can't be auto-resolved.
+
+    Body: {"symbol": "IHCL", "yf_symbol": "INDHOTEL.NS"}
+
+    Validates the supplied ticker has live price data, then:
+      • Persists to symbol_resolutions table (survives restarts)
+      • Updates the in-process caches immediately (takes effect without restart)
+      • Patches all OPEN portfolio holdings that use this symbol with the correct
+        yf_symbol and the latest price
+
+    Use GET /api/portfolio/broken to discover which symbols need fixing.
+    """
+    raw    = (payload.get("symbol")    or "").strip().upper()
+    yf_sym = (payload.get("yf_symbol") or "").strip()
+    if not raw or not yf_sym:
+        raise HTTPException(
+            status_code=400,
+            detail="Both 'symbol' (NSE name) and 'yf_symbol' (Yahoo ticker) are required",
+        )
+
+    # Validate the supplied ticker actually returns price data
+    loop  = asyncio.get_event_loop()
+    price = await loop.run_in_executor(None, _fetch_current_price, yf_sym)
+    if price is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"No price data found for '{yf_sym}' — please check the ticker is correct "
+                f"(e.g. INDHOTEL.NS, not IHCL.NS)"
+            ),
+        )
+
+    # Persist to DB and update in-process caches
+    await loop.run_in_executor(None, _persist_resolution, raw, yf_sym, "manual")
+    # Also update _symbol_cache directly (persist_resolution only updates if DB write succeeds)
+    _symbol_cache[raw] = yf_sym
+    _symbol_resolutions_cache[raw] = yf_sym
+
+    # Patch all OPEN holdings that use this symbol
+    updated_holdings = 0
+    if _supabase:
+        try:
+            res = (
+                _supabase
+                .table("portfolio_holdings")
+                .update({"yf_symbol": yf_sym, "current_price": price})
+                .eq("symbol", raw)
+                .eq("status", "OPEN")
+                .execute()
+            )
+            updated_holdings = len(res.data or [])
+        except Exception as exc:
+            log.warning("override_symbol: portfolio update failed for %s: %s", raw, exc)
+
+    log.info(
+        "Symbol override applied: %s → %s  price=%.2f  holdings_updated=%d",
+        raw, yf_sym, price, updated_holdings,
+    )
+    return {
+        "symbol":           raw,
+        "yf_symbol":        yf_sym,
+        "price":            price,
+        "source":           "manual",
+        "updated_holdings": updated_holdings,
+    }
+
+
+# ── 4d. Broken portfolio symbols ──────────────────────────────────────────────
+
+@app.get("/api/portfolio/broken", tags=["portfolio"])
+async def get_broken_portfolio_symbols(
+    _: None = Depends(require_api_key),
+):
+    """
+    Returns OPEN portfolio holdings where current_price is null or zero.
+
+    These holdings have a yfinance ticker that doesn't return price data —
+    usually because the user added the stock by its NSE display name or brand
+    name rather than the exact Yahoo Finance ticker.
+
+    For each broken symbol, we attempt a yf.Search() suggestion so the
+    dashboard can show a one-click fix (calls POST /api/symbol/override).
+
+    Response:
+      {
+        "broken": [
+          {
+            "id":           "<uuid>",
+            "symbol":       "IHCL",
+            "yf_symbol":    "IHCL.NS",       ← what's stored (wrong)
+            "name":         "Indian Hotels",
+            "avg_buy":      250.0,
+            "suggested_yf": "INDHOTEL.NS"    ← what yf.Search found (may be null)
+          }, ...
+        ],
+        "count": 1
+      }
+    """
+    rows = (
+        _db()
+        .table("portfolio_holdings")
+        .select("id, symbol, yf_symbol, name, avg_buy, current_price")
+        .eq("status", "OPEN")
+        .execute()
+        .data or []
+    )
+
+    broken = [
+        r for r in rows
+        if not r.get("current_price") or float(r.get("current_price") or 0) <= 0
+    ]
+    if not broken:
+        return {"broken": [], "count": 0}
+
+    # Try to suggest a fix for each broken symbol via yf.Search
+    loop = asyncio.get_event_loop()
+
+    def _suggest_fixes(broken_rows: list[dict]) -> list[dict]:
+        suggestions: list[dict] = []
+        for row in broken_rows:
+            sym  = row.get("symbol", "")
+            name = row.get("name")  or sym
+
+            # Use company name for search (more reliable than the NSE symbol)
+            query = name if name != sym else sym
+            suggested = _search_yf_symbol(query)
+
+            # If name search found nothing, try the raw symbol string
+            if not suggested and query != sym:
+                suggested = _search_yf_symbol(sym)
+
+            suggestions.append({
+                "id":           row["id"],
+                "symbol":       sym,
+                "yf_symbol":    row.get("yf_symbol"),
+                "name":         name,
+                "avg_buy":      row.get("avg_buy"),
+                "suggested_yf": suggested,
+            })
+        return suggestions
+
+    result = await loop.run_in_executor(None, _suggest_fixes, broken)
+    return {"broken": result, "count": len(result)}
 
 
 # ── 5. Portfolio alerts ────────────────────────────────────────────────────────

@@ -1230,7 +1230,115 @@ function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded}){
 }
 
 // ─── PORTFOLIO TAB ────────────────────────────────────────────────────────────
-function PortfolioTab({portfolio,setPortfolio,onOpenARIA}){
+// ─── BROKEN SYMBOLS BANNER ────────────────────────────────────────────────────
+function BrokenSymbolsBanner({broken, onFixed}){
+  const [fixing, setFixing] = useState({});    // symbol → loading|done|error
+  const [edits,  setEdits]  = useState({});    // symbol → custom yf_symbol input
+
+  if(!IS_LIVE || !broken || broken.length===0) return null;
+
+  const applyFix = async (item) => {
+    const yf = (edits[item.symbol] || item.suggested_yf || "").trim();
+    if(!yf){ alert("Enter a valid Yahoo Finance ticker (e.g. INDHOTEL.NS)"); return; }
+    setFixing(f=>({...f,[item.symbol]:"loading"}));
+    try {
+      await apiFetch("/api/symbol/override", {
+        method:"POST",
+        body: JSON.stringify({symbol: item.symbol, yf_symbol: yf}),
+      });
+      setFixing(f=>({...f,[item.symbol]:"done"}));
+      // Notify parent to re-fetch portfolio prices
+      if(onFixed) onFixed();
+    } catch(e) {
+      setFixing(f=>({...f,[item.symbol]:"error"}));
+    }
+  };
+
+  return(
+    <div style={{
+      background:`${C.accent}0d`,border:`1px solid ${C.accent}55`,
+      borderRadius:8,padding:"10px 13px",marginBottom:14,
+      borderLeft:`3px solid ${C.accent}`,
+    }}>
+      <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8}}>
+        <span style={{fontSize:13}}>⚠️</span>
+        <div>
+          <div style={{fontSize:11,fontWeight:700,color:C.accent}}>
+            {broken.length} holding{broken.length>1?"s":""} not updating prices
+          </div>
+          <div style={{fontSize:9,color:C.textDim}}>
+            The symbol name doesn't match Yahoo Finance. Apply the suggested fix below or enter the correct ticker.
+          </div>
+        </div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:7}}>
+        {broken.map(item=>{
+          const st = fixing[item.symbol];
+          const suggested = item.suggested_yf;
+          const editVal = edits[item.symbol] ?? (suggested || "");
+          return(
+            <div key={item.symbol} style={{
+              background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,
+              padding:"7px 10px",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",
+            }}>
+              <div style={{flex:1,minWidth:120}}>
+                <div style={{display:"flex",alignItems:"center",gap:5}}>
+                  <span style={{fontSize:10,fontWeight:700,color:"white",fontFamily:"JetBrains Mono"}}>{item.symbol}</span>
+                  <span style={{fontSize:9,color:C.muted}}>({item.name})</span>
+                  {item.yf_symbol && (
+                    <span style={{fontSize:8,color:C.red,background:C.red+"15",borderRadius:3,padding:"1px 5px"}}>
+                      ❌ {item.yf_symbol} (broken)
+                    </span>
+                  )}
+                </div>
+                {item.avg_buy && <div style={{fontSize:8,color:C.muted}}>Avg buy: ₹{item.avg_buy.toLocaleString()}</div>}
+              </div>
+              {st==="done" ? (
+                <span style={{fontSize:9,color:C.green,fontWeight:700}}>✓ Fixed!</span>
+              ) : (
+                <>
+                  <input
+                    value={editVal}
+                    onChange={e=>setEdits(ed=>({...ed,[item.symbol]:e.target.value}))}
+                    placeholder={suggested || "e.g. INDHOTEL.NS"}
+                    style={{
+                      background:C.surface,border:`1px solid ${suggested?C.green+"55":C.border}`,
+                      borderRadius:4,padding:"3px 8px",color:"white",fontSize:10,
+                      fontFamily:"JetBrains Mono",width:140,outline:"none",
+                    }}
+                  />
+                  {suggested && editVal===suggested && (
+                    <span style={{fontSize:8,color:C.green}}>💡 auto-suggested</span>
+                  )}
+                  <button
+                    onClick={()=>applyFix(item)}
+                    disabled={st==="loading"}
+                    style={{
+                      background:`linear-gradient(135deg,${C.teal},#0d9488)`,border:"none",
+                      borderRadius:4,padding:"4px 10px",color:"white",fontSize:9,
+                      fontWeight:700,cursor:st==="loading"?"wait":"pointer",whiteSpace:"nowrap",
+                    }}
+                  >
+                    {st==="loading"?"Fixing...":"Apply Fix"}
+                  </button>
+                  {st==="error" && (
+                    <span style={{fontSize:8,color:C.red}}>✗ Ticker not found — check it's correct</span>
+                  )}
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{fontSize:8,color:C.muted,marginTop:7}}>
+        Tip: Fixes are saved permanently — you won't need to do this again for the same symbol.
+        To find the correct ticker, search <a href="https://finance.yahoo.com" target="_blank" rel="noreferrer" style={{color:C.accent}}>finance.yahoo.com</a>.
+      </div>
+    </div>
+  );
+}
+
+function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBroken}){
   const alerts=computePortfolioAlerts(portfolio);
   const dangerHoldings=portfolio.filter(isCriticalDanger);
   // Sort portfolio: danger holdings first
@@ -1249,6 +1357,8 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA}){
     <div style={{animation:"fadeUp .3s ease"}}>
       {/* Critical danger banner — always first */}
       <CriticalDangerBanner holdings={dangerHoldings} onOpenARIA={onOpenARIA}/>
+      {/* Broken symbol fix banner — shown when prices can't be fetched */}
+      <BrokenSymbolsBanner broken={brokenSymbols} onFixed={onFixBroken}/>
 
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
         <div>
@@ -1603,6 +1713,7 @@ export default function App(){
   // ── Live data state ──────────────────────────────────────────────────────────
   const [discoveryUniverse, setDiscoveryUniverse] = useState(IS_LIVE ? [] : DISCOVERY_UNIVERSE);
   const [discoveryRuns,     setDiscoveryRuns]     = useState([]);
+  const [brokenSymbols,     setBrokenSymbols]     = useState([]);
   const [portfolioRecs,     setPortfolioRecs]     = useState(IS_LIVE ? [] : PORTFOLIO_RECOMMENDATIONS);
   const [marketPulse,       setMarketPulse]       = useState(IS_LIVE ? [] : MARKET_PULSE);
   const [govAlerts,         setGovAlerts]         = useState(IS_LIVE ? [] : GOV_ALERTS);
@@ -1643,6 +1754,9 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/governance/research")
         .then(d=>{ const arr=d?.proposals||d; if(Array.isArray(arr)) setResearchFeed(arr); })
+        .catch(()=>{}),
+      apiFetch("/api/portfolio/broken")
+        .then(d=>{ if(d?.broken && Array.isArray(d.broken)) setBrokenSymbols(d.broken); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -1900,7 +2014,17 @@ export default function App(){
               </div>
             )}
 
-            {tab==="portfolio"&&<PortfolioTab portfolio={portfolio} setPortfolio={setPortfolio} onOpenARIA={openARIA}/>}
+            {tab==="portfolio"&&<PortfolioTab
+              portfolio={portfolio}
+              setPortfolio={setPortfolio}
+              onOpenARIA={openARIA}
+              brokenSymbols={brokenSymbols}
+              onFixBroken={()=>{
+                // Re-fetch portfolio prices and broken-symbols list after a fix
+                apiFetch("/api/portfolio").then(d=>{ if(Array.isArray(d)) setPortfolio(d); }).catch(()=>{});
+                apiFetch("/api/portfolio/broken").then(d=>{ if(d?.broken) setBrokenSymbols(d.broken); }).catch(()=>{});
+              }}
+            />}
 
             {tab==="market"&&(
               <div style={{animation:"fadeUp .3s ease"}}>
