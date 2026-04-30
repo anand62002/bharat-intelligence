@@ -134,13 +134,23 @@ def _composite_score(
 ) -> float:
     """
     Weighted average of all 7 agent scores (0–100).
-    Agents with None or missing scores are excluded from the average.
+    Agents with None, missing, or INSUFFICIENT_DATA scores are excluded from
+    the average so a data-starved agent doesn't drag down a valid composite.
     """
-    total_w = 0.0
-    total   = 0.0
+    total_w   = 0.0
+    total     = 0.0
     default_w = 1.0 / len(AGENT_NAMES)
     for name in AGENT_NAMES:
-        score = agent_results.get(name, {}).get("score")
+        res    = agent_results.get(name, {})
+        signal = res.get("signal", "")
+        # Exclude agents that explicitly reported no usable data
+        if signal in ("NO_DATA", "INSUFFICIENT_DATA"):
+            log.debug(
+                "_composite_score: excluding %s (signal=%s, completeness=%s%%)",
+                name, signal, res.get("completeness_score", "?"),
+            )
+            continue
+        score = res.get("score")
         w     = weights.get(name, default_w)
         if score is not None:
             total   += float(score) * w
@@ -175,24 +185,40 @@ def _format_agent_outputs(
     """
     Format all 7 agent outputs as structured text for the Claude synthesis prompt.
     Keeps output concise — max 4 detail sub-fields per agent.
+    INSUFFICIENT_DATA agents are rendered as explicit data-gap warnings so
+    Claude does not attempt to reason about absent signals.
     """
     lines: list[str] = []
     for name in AGENT_NAMES:
         res    = results.get(name, {})
         signal = res.get("signal", "NO_DATA")
-        score  = res.get("score", "N/A")
         w      = weights.get(name, 0.0)
-        detail = res.get("detail") or {}
         lines.append(f"### {name.upper()} AGENT  (accuracy-weight={w:.4f})")
-        lines.append(f"  Signal : {signal}")
-        lines.append(f"  Score  : {score}/100")
-        if isinstance(detail, dict):
-            for k, v in list(detail.items())[:4]:
-                lines.append(f"  {k}: {v}")
-        # Key numeric fields that inform the synthesis
-        for k in ("upside_pct", "danger_drop_pct", "fii_net_5d", "critical_gold_upside"):
-            if k in res and res[k] is not None:
-                lines.append(f"  {k}: {res[k]}")
+
+        if signal == "INSUFFICIENT_DATA":
+            score_pct = res.get("completeness_score", 0)
+            missing   = res.get("missing_fields") or []
+            below     = res.get("below_threshold_fields") or []
+            lines.append(f"  Signal : INSUFFICIENT_DATA  (completeness={score_pct}%)")
+            lines.append(f"  Score  : EXCLUDED from composite")
+            if missing:
+                lines.append(f"  Missing fields    : {', '.join(missing)}")
+            if below:
+                lines.append(f"  Below threshold   : {', '.join(below)}")
+            lines.append(f"  NOTE   : Do NOT infer a signal for this agent — treat as data gap.")
+        else:
+            score  = res.get("score", "N/A")
+            detail = res.get("detail") or {}
+            lines.append(f"  Signal : {signal}")
+            lines.append(f"  Score  : {score}/100")
+            if isinstance(detail, dict):
+                for k, v in list(detail.items())[:4]:
+                    lines.append(f"  {k}: {v}")
+            # Key numeric fields that inform the synthesis
+            for k in ("upside_pct", "danger_drop_pct", "fii_net_5d", "critical_gold_upside"):
+                if k in res and res[k] is not None:
+                    lines.append(f"  {k}: {res[k]}")
+
         lines.append("")
     return "\n".join(lines)
 

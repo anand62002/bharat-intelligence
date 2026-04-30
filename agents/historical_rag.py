@@ -31,6 +31,10 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from agents.base import DataCompletenessValidator, insufficient_data_result  # noqa: E402
+
+_dcv = DataCompletenessValidator()
+
 log = logging.getLogger(__name__)
 AGENT_NAME = "historical_rag"
 _EMBED_DIM  = 1536     # OpenAI text-embedding-3-small
@@ -304,6 +308,19 @@ def analyse(market_description: str) -> dict:
             "similarity_scores": [],
             "agent_name": AGENT_NAME,
         }
+
+    # ── Data completeness check ───────────────────────────────────────────────
+    _db_ok = bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_KEY"))
+    _snapshot = {
+        "market_description_len": len(market_description.strip()),
+        "db_available":           _db_ok,
+    }
+    _chk = _dcv.validate(_snapshot, "historical_rag")
+    if not _chk.is_sufficient:
+        return insufficient_data_result("historical_rag", _chk,
+                                        data_sources=[],
+                                        matched_events=[],
+                                        similarity_scores=[])
 
     embed_method = "none"
     matched_events: list[dict] = []

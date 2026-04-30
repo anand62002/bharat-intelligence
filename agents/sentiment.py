@@ -29,6 +29,9 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from data.fetchers import get_rss_headlines, get_nse_fii_dii  # noqa: E402
+from agents.base import DataCompletenessValidator, insufficient_data_result
+
+_dcv = DataCompletenessValidator()
 
 log = logging.getLogger(__name__)
 AGENT_NAME = "sentiment"
@@ -505,6 +508,18 @@ def analyse(symbol: str) -> dict:
             data_sources.append("nse_fii_dii")
     except Exception:
         pass
+
+    # ── 7b. Data completeness check ──────────────────────────────────────────
+    _snapshot = {
+        "headline_count": len(unique_headlines),
+        "fii_net":        fii_net,
+        "min_headlines":  len(unique_headlines),
+    }
+    _chk = _dcv.validate(_snapshot, "sentiment")
+    if not _chk.is_sufficient:
+        return insufficient_data_result("sentiment", _chk,
+                                        data_sources=data_sources,
+                                        danger_signals=[])
 
     # ── 8. Danger signals ─────────────────────────────────────────────────────
     danger_signals = _detect_danger_signals(unique_headlines, scored, fii_net)

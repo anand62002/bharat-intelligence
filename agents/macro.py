@@ -26,6 +26,9 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from data.fetchers import get_inr_usd, get_india_vix  # noqa: E402
+from agents.base import DataCompletenessValidator, insufficient_data_result
+
+_dcv = DataCompletenessValidator()
 
 log = logging.getLogger(__name__)
 AGENT_NAME = "macro"
@@ -374,6 +377,19 @@ def analyse() -> dict:
     india_vix = get_india_vix()
     if india_vix is not None:
         data_sources.append("yfinance_indiavix")
+
+    # ── 1b. Data completeness check ──────────────────────────────────────────
+    _available = sum(1 for v in [us10y, dxy, vix, india_vix, inr_usd, repo] if v is not None)
+    _snapshot = {
+        "indicators_available": _available,
+        "inr_usd":              inr_usd,
+        "india_vix":            india_vix,
+    }
+    _chk = _dcv.validate(_snapshot, "macro")
+    if not _chk.is_sufficient:
+        return insufficient_data_result("macro", _chk,
+                                        data_sources=data_sources,
+                                        sector_impacts={})
 
     # ── 2. Score each component ───────────────────────────────────────────────
     # Max possible: 25 + 25 + 15 + 10 + 15 + 10 = 100

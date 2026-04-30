@@ -24,6 +24,9 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from data.fetchers import get_nse_fii_dii  # noqa: E402
+from agents.base import DataCompletenessValidator, insufficient_data_result
+
+_dcv = DataCompletenessValidator()
 
 log = logging.getLogger(__name__)
 AGENT_NAME = "institutional"
@@ -601,6 +604,25 @@ def analyse(
             "data_sources":   [],
             "agent_name":     AGENT_NAME,
         }
+
+    # ── 2a. Data completeness check ──────────────────────────────────────────
+    _fii_net_latest = live.get("fii_net") if live else (rows_5d[-1].get("fii_net") if rows_5d else None)
+    _dii_net_latest = live.get("dii_net") if live else (rows_5d[-1].get("dii_net") if rows_5d else None)
+    _snapshot = {
+        "fii_net":      _fii_net_latest,
+        "dii_net":      _dii_net_latest,
+        "data_quality": "FULL" if live else ("PARTIAL" if rows_5d else "NO_DATA"),
+    }
+    _chk = _dcv.validate(_snapshot, "institutional")
+    if not _chk.is_sufficient:
+        return insufficient_data_result("institutional", _chk,
+                                        data_sources=data_sources,
+                                        fii_net_5d=None,
+                                        dii_net_5d=None,
+                                        bulk_deals=[],
+                                        danger_signals=[],
+                                        data_quality="NO_DATA",
+                                        data_unavailable_note=_chk.summary())
 
     fii_net_5d, dii_net_5d   = _net_totals(rows_5d)
     fii_net_10d, dii_net_10d = _net_totals(rows_10d)

@@ -42,9 +42,11 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from data.fetchers import get_ohlcv, get_nse_fii_dii, get_screener_data  # noqa: E402
+from agents.base import DataCompletenessValidator  # noqa: E402
 
 log = logging.getLogger(__name__)
 AGENT_NAME = "discovery_screener"
+_dcv = DataCompletenessValidator()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Thresholds
@@ -342,6 +344,21 @@ def prescreen(
     # ── Fetch OHLCV ───────────────────────────────────────────────────────────
     df = get_ohlcv(symbol, period="1y")
     if df is None or len(df) < 30:
+        return False, []
+
+    # ── Data completeness check (skip symbol cleanly, no hallucinated screen) ─
+    _close_val  = float(df["Close"].iloc[-1]) if "Close" in df.columns and not df.empty else None
+    _vol_avg    = float(df["Volume"].mean())  if "Volume" in df.columns and not df.empty else None
+    _chk = _dcv.validate({
+        "symbol":     symbol,
+        "ohlcv_rows": len(df),
+        "close":      _close_val,
+        "volume_avg": _vol_avg,
+    }, "discovery_screener")
+    if not _chk.is_sufficient:
+        log.debug(
+            "prescreen(%s): INSUFFICIENT_DATA — %s", symbol, _chk.summary()
+        )
         return False, []
 
     close = df["Close"]

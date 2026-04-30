@@ -27,6 +27,10 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from agents.base import DataCompletenessValidator, insufficient_data_result
+
+_dcv = DataCompletenessValidator()
+
 load_dotenv()
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -453,6 +457,21 @@ def analyse() -> dict:
 
     if any(df is not None for df in [gold_df, brent_df, wti_df, silver_df]):
         data_sources.append("yfinance_commodities")
+
+    # ── 1b. Data completeness check ──────────────────────────────────────────
+    _n_fetched = sum(1 for df in [gold_df, goldbees_df, brent_df, wti_df, silver_df] if df is not None)
+    _inr_latest = _latest_price(inr_df)
+    _snapshot = {
+        "commodities_fetched": _n_fetched,
+        "inr_usd":             _inr_latest,
+    }
+    _chk = _dcv.validate(_snapshot, "commodities")
+    if not _chk.is_sufficient:
+        return insufficient_data_result("commodities", _chk,
+                                        data_sources=data_sources,
+                                        commodities={},
+                                        critical_gold_upside=False,
+                                        gold_upside_conditions=[])
     if inr_df is not None:
         data_sources.append("yfinance_usdinr")
     if goldbees_df is not None:

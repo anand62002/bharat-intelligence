@@ -14,6 +14,10 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from agents.base import DataCompletenessValidator, insufficient_data_result
+
+_dcv = DataCompletenessValidator()
+
 load_dotenv()
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1247,6 +1251,24 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
             "agent_name": AGENT_NAME,
         }
     data_sources.append("screener_in")
+
+    # ── 1a. Data completeness check ──────────────────────────────────────────
+    _snapshot = {
+        "pe":               raw.get("pe"),
+        "revenue_growth":   raw.get("revenue_growth"),
+        "roce":             raw.get("roce"),
+        "debt_equity":      raw.get("debt_equity"),
+        "ebitda_margin":    raw.get("ebitda_margin"),
+        "promoter_holding": raw.get("promoter_holding"),
+        "eps_cagr_3y":      raw.get("eps_cagr_3y"),
+    }
+    _chk = _dcv.validate(_snapshot, "fundamental")
+    if not _chk.is_sufficient:
+        return insufficient_data_result("fundamental", _chk,
+                                        data_sources=data_sources,
+                                        upside_pct=None,
+                                        danger_drop_pct=None,
+                                        danger_confidence=0.0)
 
     pe               = raw.get("pe")
     revenue_growth   = raw.get("revenue_growth")

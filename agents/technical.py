@@ -15,6 +15,10 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
+from agents.base import DataCompletenessValidator, insufficient_data_result
+
+_dcv = DataCompletenessValidator()
+
 load_dotenv()
 
 # Ensure project root on path so sibling packages resolve regardless of cwd
@@ -460,6 +464,21 @@ def analyse(symbol: str) -> dict:
 
     # ── 1. Fetch OHLCV ───────────────────────────────────────────────────────
     df = get_ohlcv(symbol, period="1y")
+
+    # ── 1a. Data completeness check ──────────────────────────────────────────
+    _snapshot = {
+        "ohlcv_rows":  len(df) if df is not None and not df.empty else 0,
+        "close":       float(df["Close"].iloc[-1]) if df is not None and not df.empty and "Close" in df.columns else None,
+        "volume_avg":  float(df["Volume"].mean())  if df is not None and not df.empty and "Volume" in df.columns else None,
+        "has_volume":  df is not None and "Volume" in df.columns,
+        "ema200_rows": len(df) if df is not None and not df.empty else 0,
+    }
+    _chk = _dcv.validate(_snapshot, "technical")
+    if not _chk.is_sufficient:
+        return insufficient_data_result("technical", _chk,
+                                        data_sources=[],
+                                        upside_pct=None)
+
     if df is None or len(df) < 60:
         return {
             "signal": "NO_DATA",

@@ -27,6 +27,10 @@ if _ROOT not in sys.path:
 from data.fetchers import get_ohlcv, get_screener_data, get_screener_history
 import yfinance as yf
 
+from agents.base import DataCompletenessValidator, insufficient_data_result
+
+_dcv = DataCompletenessValidator()
+
 log = logging.getLogger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -787,6 +791,24 @@ def analyse(symbol: str) -> dict:
             log.warning("warren_bot: yfinance fetch failed for %s: %s", yf_symbol, yf_exc)
             data_gaps.append("yfinance_info_unavailable")
             confidence -= 8
+
+        # ── Step 5b: Data completeness check ─────────────────────────────────
+        _pe_val = snap.get("pe") or pe_yf
+        _years  = hist.get("years_available", 0) or 0
+        _snapshot = {
+            "pe":              _pe_val,
+            "years_available": _years,
+            "revenue_history": len(_valid_floats(hist.get("revenue_history", []))),
+            "roce_history":    len(_valid_floats(hist.get("roce_history", []))),
+            "current_price":   current_price,
+            "market_cap":      market_cap_cr,
+        }
+        _chk = _dcv.validate(_snapshot, "warren_bot")
+        if not _chk.is_sufficient:
+            return insufficient_data_result("warren_bot", _chk,
+                                            data_sources=data_sources,
+                                            symbol=symbol,
+                                            data_gaps=data_gaps + _chk.all_missing)
 
         # ── Step 6: Extract key values ────────────────────────────────────────
         pe = snap.get("pe") or pe_yf
