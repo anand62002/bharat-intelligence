@@ -21,6 +21,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 from pathlib import Path

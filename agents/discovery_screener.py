@@ -1154,11 +1154,18 @@ def run_discovery(
     )
 
     # ── 8. Log daily run ──────────────────────────────────────────────────────
+    passed_syms    = [s for s, _ in screened]          # all pre-screen passers
+    discovery_syms = [d.symbol for d in discoveries]   # only those that became recs
+
     _log_daily_run(
-        symbols_processed = len(candidates),
-        discoveries       = len(discoveries),
-        duration          = elapsed,
-        coverage_stats    = cov,
+        symbols_processed  = len(candidates),
+        discoveries        = len(discoveries),
+        duration           = elapsed,
+        coverage_stats     = cov,
+        slice_symbols      = slice_symbols,
+        passed_symbols     = passed_syms,
+        discovery_symbols  = discovery_syms,
+        run_date           = today,
     )
 
     return discoveries
@@ -1168,31 +1175,72 @@ def _log_daily_run(
     symbols_processed: int,
     discoveries:       int,
     duration:          float,
-    coverage_stats:    Optional[dict] = None,
+    coverage_stats:    Optional[dict]  = None,
+    slice_symbols:     Optional[list]  = None,
+    passed_symbols:    Optional[list]  = None,
+    discovery_symbols: Optional[list]  = None,
+    run_date:          Optional[date]  = None,
 ) -> None:
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_KEY")
     if not url or not key:
         return
+
+    today_str = (run_date or date.today()).isoformat()
+
     try:
         from supabase import create_client
+        client = create_client(url, key)
+
+        # ── daily_runs: aggregate pipeline log ───────────────────────────────
         row: dict = {
-            "run_date":          date.today().isoformat(),
+            "run_date":          today_str,
             "symbols_processed": symbols_processed,
             "errors":            0,
             "duration_seconds":  duration,
         }
-        # Store coverage metadata in the agents_run JSON column if available.
-        # This lets the dashboard / governance layer show rotation progress.
         if coverage_stats:
             row["agents_run"] = {
-                "agent":         AGENT_NAME,
-                "coverage":      coverage_stats,
-                "discoveries":   discoveries,
+                "agent":       AGENT_NAME,
+                "coverage":    coverage_stats,
+                "discoveries": discoveries,
             }
-        create_client(url, key).table("daily_runs").insert(row).execute()
+        client.table("daily_runs").insert(row).execute()
     except Exception as exc:
         log.warning("daily_runs log failed: %s", exc)
+
+    # ── discovery_runs: detailed screened-symbols log ─────────────────────────
+    # This is the table the dashboard queries to show "what was screened today".
+    # Upsert on run_date so re-runs on the same day update the row rather than
+    # duplicating it.
+    try:
+        from supabase import create_client
+        client = create_client(url, key)
+
+        slice_list  = list(slice_symbols or [])
+        passed_list = list(passed_symbols or [])
+        disc_list   = list(discovery_symbols or [])
+
+        dr_row = {
+            "run_date":           today_str,
+            "slice_symbols":      slice_list,
+            "passed_symbols":     passed_list,
+            "discovery_symbols":  disc_list,
+            "coverage_stats":     coverage_stats or {},
+            "total_screened":     len(slice_list),
+            "total_passed":       len(passed_list),
+            "total_discoveries":  len(disc_list),
+        }
+        # Upsert: on conflict on run_date, update the row
+        client.table("discovery_runs").upsert(
+            dr_row, on_conflict="run_date"
+        ).execute()
+        log.info(
+            "discovery_runs logged: screened=%d  passed=%d  discoveries=%d",
+            len(slice_list), len(passed_list), len(disc_list),
+        )
+    except Exception as exc:
+        log.warning("discovery_runs log failed: %s", exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -753,8 +753,9 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
 }
 
 // ─── RESEARCH DISCOVERY TAB ───────────────────────────────────────────────────
-function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discoveryUniverse: _du, apiLoaded}){
+function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discoveryUniverse: _du, discoveryRuns: _dr, apiLoaded}){
   const _universe = Array.isArray(_du) ? _du : [];
+  const _runs     = Array.isArray(_dr) ? _dr : [];
   const [selectedId, setSelectedId] = useState(_universe[0]?.id || null);
   const [filter, setFilter] = useState("All");
   const selected = _universe.find(s=>s.id===selectedId);
@@ -913,6 +914,142 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discover
           </div>
         )}
       </div>}{/* closes _universe.length>0 wrapper */}
+
+      {/* ── Daily Screened Stocks panel ─────────────────────────────────────── */}
+      <DiscoveryRunsPanel runs={_runs} apiLoaded={apiLoaded}/>
+    </div>
+  );
+}
+
+/* Collapsible panel showing the list of symbols pre-screened by the discovery
+   screener each day. Opens to show: all slice symbols, which passed filters,
+   which became discovery recommendations. One accordion item per run day. */
+function DiscoveryRunsPanel({runs,apiLoaded}){
+  const [open,setOpen]=useState(false);
+  const [expandedDay,setExpandedDay]=useState(null);
+  const hasRuns=runs&&runs.length>0;
+
+  const panelStyle={
+    background:C.surface,
+    border:`1px solid ${C.border}`,
+    borderRadius:10,
+    marginTop:16,
+    overflow:"hidden",
+  };
+  const headerStyle={
+    display:"flex",alignItems:"center",justifyContent:"space-between",
+    padding:"10px 14px",cursor:"pointer",userSelect:"none",
+    background:C.panel,
+    borderBottom:open?`1px solid ${C.border}`:"none",
+  };
+
+  const latestCov=hasRuns?(runs[0].coverageStats||{}):{};
+
+  return(
+    <div style={panelStyle}>
+      {/* Header — always visible, click to expand */}
+      <div style={headerStyle} onClick={()=>setOpen(o=>!o)}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:13}}>🔭</span>
+          <span style={{fontSize:11,fontWeight:700,color:"white"}}>Daily Screened Stocks</span>
+          {hasRuns&&(
+            <span style={{fontSize:9,color:C.muted,fontFamily:"JetBrains Mono",marginLeft:4}}>
+              {runs[0].runDate} — {runs[0].totalScreened} screened / {runs[0].totalPassed} passed / {runs[0].totalDiscoveries} promoted
+            </span>
+          )}
+          {!hasRuns&&IS_LIVE&&apiLoaded&&(
+            <span style={{fontSize:9,color:C.muted}}>no runs yet — runs at 06:00 IST</span>
+          )}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          {hasRuns&&latestCov.cycle_pct_complete!=null&&(
+            <span style={{fontSize:9,color:C.cyan,fontFamily:"JetBrains Mono"}}>
+              cycle {latestCov.cycle_pct_complete}% · est. full coverage {latestCov.est_full_coverage}
+            </span>
+          )}
+          <span style={{fontSize:14,color:C.muted,transform:open?"rotate(180deg)":"none",transition:"transform .2s"}}>▾</span>
+        </div>
+      </div>
+
+      {/* Body — only when open */}
+      {open&&(
+        <div style={{padding:"10px 14px",maxHeight:480,overflowY:"auto"}}>
+          {!hasRuns&&(
+            <EmptyState icon="🔭" title="No screener runs recorded yet"
+              sub={"The discovery screener logs daily run details here after each 06:00 IST run.\n\nIf you just deployed, run: python -m agents.discovery_screener --no-save"}/>
+          )}
+          {hasRuns&&runs.map(run=>{
+            const isExp=expandedDay===run.runDate;
+            const discSet=new Set(run.discoverySymbols||[]);
+            const passSet=new Set(run.passedSymbols||[]);
+            return(
+              <div key={run.runDate} style={{marginBottom:8,border:`1px solid ${C.border}`,borderRadius:7,overflow:"hidden"}}>
+                {/* Day header */}
+                <div
+                  style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                    padding:"7px 10px",cursor:"pointer",background:C.panel,
+                    borderBottom:isExp?`1px solid ${C.border}`:"none"}}
+                  onClick={()=>setExpandedDay(isExp?null:run.runDate)}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <span style={{fontSize:10,fontWeight:700,color:C.cyan,fontFamily:"JetBrains Mono"}}>{run.runDate}</span>
+                    <span style={{fontSize:9,color:C.muted}}>{run.totalScreened} screened</span>
+                    <span style={{fontSize:9,color:C.green}}>{run.totalPassed} passed filters</span>
+                    {run.totalDiscoveries>0&&(
+                      <span style={{fontSize:9,color:C.accent,fontWeight:700}}>⚡ {run.totalDiscoveries} promoted</span>
+                    )}
+                  </div>
+                  <span style={{fontSize:12,color:C.muted,transform:isExp?"rotate(180deg)":"none",transition:"transform .2s"}}>▾</span>
+                </div>
+                {/* Symbol grid — only when day is expanded */}
+                {isExp&&(
+                  <div style={{padding:"8px 10px"}}>
+                    {/* Coverage stats mini-bar */}
+                    {run.coverageStats&&run.coverageStats.universe_size&&(
+                      <div style={{display:"flex",gap:12,marginBottom:8,flexWrap:"wrap"}}>
+                        {[
+                          ["Universe",run.coverageStats.universe_size],
+                          ["Slice",run.coverageStats.slice_size],
+                          ["Cycle day",`${run.coverageStats.today_position}/${run.coverageStats.cycle_length_days}`],
+                          ["Coverage",`${run.coverageStats.cycle_pct_complete}%`],
+                          ["~passes/mo",run.coverageStats.monthly_passes],
+                        ].map(([l,v])=>(
+                          <div key={l} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:5,padding:"3px 8px",minWidth:70}}>
+                            <div style={{fontSize:8,color:C.muted}}>{l}</div>
+                            <div style={{fontSize:10,fontWeight:700,color:C.cyan,fontFamily:"JetBrains Mono"}}>{v}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* Legend */}
+                    <div style={{display:"flex",gap:12,marginBottom:6}}>
+                      {[["⚡",C.accent,"promoted to rec"],["✓",C.green,"passed filters"],["·",C.textDim,"screened"]].map(([ic,col,lbl])=>(
+                        <span key={lbl} style={{fontSize:9,color:col}}>{ic} {lbl}</span>
+                      ))}
+                    </div>
+                    {/* Symbol pills */}
+                    <div style={{display:"flex",flexWrap:"wrap",gap:4,maxHeight:200,overflowY:"auto"}}>
+                      {(run.sliceSymbols||[]).map(sym=>{
+                        const base=sym.replace(".NS","").replace(".BO","");
+                        const isDisc=discSet.has(sym)||discSet.has(base);
+                        const isPass=passSet.has(sym)||passSet.has(base);
+                        return(
+                          <span key={sym} style={{
+                            fontSize:8,fontFamily:"JetBrains Mono",padding:"2px 6px",borderRadius:3,
+                            background: isDisc?C.accent+"22": isPass?C.green+"18":C.bg,
+                            color:      isDisc?C.accent:        isPass?C.green:   C.muted,
+                            border:`1px solid ${isDisc?C.accent+"55":isPass?C.green+"33":C.border}`,
+                            fontWeight: isDisc?700:400,
+                          }}>{isDisc?"⚡ ":isPass?"✓ ":""}{base}</span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1465,6 +1602,7 @@ export default function App(){
 
   // ── Live data state ──────────────────────────────────────────────────────────
   const [discoveryUniverse, setDiscoveryUniverse] = useState(IS_LIVE ? [] : DISCOVERY_UNIVERSE);
+  const [discoveryRuns,     setDiscoveryRuns]     = useState([]);
   const [portfolioRecs,     setPortfolioRecs]     = useState(IS_LIVE ? [] : PORTFOLIO_RECOMMENDATIONS);
   const [marketPulse,       setMarketPulse]       = useState(IS_LIVE ? [] : MARKET_PULSE);
   const [govAlerts,         setGovAlerts]         = useState(IS_LIVE ? [] : GOV_ALERTS);
@@ -1487,6 +1625,9 @@ export default function App(){
     Promise.allSettled([
       apiFetch("/api/discovery")
         .then(d=>{ const arr=Array.isArray(d)?d:[]; setDiscoveryUniverse(arr); if(arr[0]?.id) setSelDiscoveryId(arr[0].id); })
+        .catch(()=>{}),
+      apiFetch("/api/discovery/runs")
+        .then(d=>{ if(Array.isArray(d)) setDiscoveryRuns(d); })
         .catch(()=>{}),
       apiFetch("/api/recommendations")
         .then(d=>{ const arr=Array.isArray(d)?d:[]; setPortfolioRecs(arr); if(arr[0]?.id) setSelRecId(arr[0].id); })
@@ -1678,6 +1819,7 @@ export default function App(){
               <ResearchDiscoveryTab
                 portfolio={portfolio}
                 discoveryUniverse={discoveryUniverse}
+                discoveryRuns={discoveryRuns}
                 apiLoaded={apiLoaded}
                 onAddToPortfolio={(stock)=>{
                   setAriaContext({type:"discovery",id:stock.id});

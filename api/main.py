@@ -713,6 +713,53 @@ async def get_discovery(
     return recs
 
 
+# ── 2b. Discovery runs log ────────────────────────────────────────────────────
+
+@app.get("/api/discovery/runs", tags=["recommendations"])
+async def get_discovery_runs(
+    days: int  = Query(7, ge=1, le=30, description="How many past days to return"),
+    _: None    = Depends(require_api_key),
+):
+    """
+    Returns the last N days of discovery screener run logs from discovery_runs table.
+    Each row contains which symbols were pre-screened, which passed filters, and which
+    were promoted to full recommendations — powers the dashboard 'Daily Screened Stocks'
+    collapsible panel.
+
+    Returns [] when the table doesn't exist yet (pre-migration) so the UI degrades
+    gracefully.
+    """
+    try:
+        db        = _db()
+        cutoff    = (date.today() - timedelta(days=days)).isoformat()
+        rows      = (db.table("discovery_runs")
+                      .select("run_date,slice_symbols,passed_symbols,discovery_symbols,"
+                              "coverage_stats,total_screened,total_passed,total_discoveries,"
+                              "created_at")
+                      .gte("run_date", cutoff)
+                      .order("run_date", desc=True)
+                      .limit(days)
+                      .execute()
+                      .data or [])
+        return [
+            {
+                "runDate":          r.get("run_date"),
+                "totalScreened":    r.get("total_screened", 0),
+                "totalPassed":      r.get("total_passed", 0),
+                "totalDiscoveries": r.get("total_discoveries", 0),
+                "sliceSymbols":     r.get("slice_symbols") or [],
+                "passedSymbols":    r.get("passed_symbols") or [],
+                "discoverySymbols": r.get("discovery_symbols") or [],
+                "coverageStats":    r.get("coverage_stats") or {},
+                "createdAt":        r.get("created_at"),
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        log.warning("GET /api/discovery/runs failed: %s", exc)
+        return []
+
+
 # ── 3 & 4. Portfolio ───────────────────────────────────────────────────────────
 
 @app.get("/api/portfolio", tags=["portfolio"])
