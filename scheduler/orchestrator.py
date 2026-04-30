@@ -329,6 +329,57 @@ def _fallback_synthesis(
     }
 
 
+def _log_suppressed_synthesis(
+    symbol:     str,
+    synthesis_data: dict,
+    outcome,            # ValidationOutcome (avoid circular import — duck-typed)
+    dry_run:    bool,
+) -> None:
+    """
+    Persist a SUPPRESSED recommendation to the database for human review.
+
+    The record is written with action='SUPPRESSED' and confidence=0 so it
+    is trivially filterable; the full validation breakdown lives in gov_check.
+    Does nothing in dry_run mode or when Supabase is unavailable.
+    """
+    if dry_run:
+        log.info("[%s] [DRY RUN] Suppressed rec not written to DB", symbol)
+        return
+
+    client = _supabase()
+    if not client:
+        return
+
+    try:
+        row = {
+            "symbol":      symbol,
+            "action":      "SUPPRESSED",
+            "confidence":  0.0,
+            "risk_score":  100.0,
+            "horizon_days": 0,
+            "upside_pct":  0.0,
+            "upside_confidence": 0.0,
+            "danger_drop_pct":   0.0,
+            "danger_confidence": 0.0,
+            "headline":    (
+                f"SUPPRESSED: {symbol} — validation gate blocked publication "
+                f"(aggregate κ={outcome.aggregate_kappa:.3f})"
+            ),
+            "summary": synthesis_data.get("synthesis", ""),
+            "is_discovery": False,
+            "valid_till":   str(date.today()),     # expires today (human-review only)
+            "gov_check": {
+                "validation": outcome.to_dict(),
+                "suppression_reason": outcome.suppression_reason,
+            },
+            "agent_signals": {},
+        }
+        client.table("recommendations").insert(row).execute()
+        log.info("[%s] Suppressed rec logged to DB for human review", symbol)
+    except Exception as exc:
+        log.warning("[%s] Failed to log suppressed rec: %s", symbol, exc)
+
+
 def _build_recommendation(
     symbol:         str,
     synthesis_data: dict,
@@ -747,9 +798,68 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             else:
                 synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
 
+            # ── Pre-publication validation gate ───────────────────────────────
+            # Three independent LLM judges score the synthesis across 5 rubrics.
+            # Skipped when: no Anthropic client, dry_run=True, or fallback path.
+            # SUPPRESSED → skip this symbol; log for human review.
+            # QUALIFIED  → append caveats to synthesis text; mark rec.
+            # PASS       → attach validation metadata; proceed normally.
+            validation_outcome = None
+            _used_claude_synthesis = ant_client and prompt_template
+            if _used_claude_synthesis and not state["dry_run"]:
+                try:
+                    from scheduler.synthesis_validator import validate_synthesis
+                    validation_outcome = await validate_synthesis(
+                        symbol         = symbol,
+                        synthesis_data = synthesis_data,
+                        agent_results  = agent_results,
+                        ant_client     = ant_client,
+                    )
+                except Exception as _val_exc:
+                    log.warning(
+                        "[%s] Validation pipeline error (non-fatal, proceeding): %s",
+                        symbol, _val_exc,
+                    )
+
+            # Apply validation outcome
+            if validation_outcome and validation_outcome.status == "SUPPRESSED":
+                log.warning(
+                    "[%s] Publication SUPPRESSED — aggregate_κ=%.3f  reason: %s",
+                    symbol,
+                    validation_outcome.aggregate_kappa,
+                    validation_outcome.suppression_reason,
+                )
+                errors.append(
+                    f"{symbol}: SUPPRESSED (κ={validation_outcome.aggregate_kappa:.3f})"
+                )
+                _log_suppressed_synthesis(
+                    symbol, synthesis_data, validation_outcome, state["dry_run"]
+                )
+                continue   # ← skip _build_recommendation; next symbol
+
+            if validation_outcome and validation_outcome.status == "QUALIFIED":
+                if validation_outcome.caveats:
+                    existing = synthesis_data.get("synthesis") or ""
+                    synthesis_data["synthesis"] = (
+                        existing + "  " + "  ".join(validation_outcome.caveats)
+                    ).strip()
+                log.info(
+                    "[%s] Synthesis QUALIFIED — failed dims: %s",
+                    symbol, validation_outcome.failed_dimensions,
+                )
+
             rec = _build_recommendation(
                 symbol, synthesis_data, agent_results, weights, composite
             )
+
+            # Attach validation metadata into gov_check for audit/dashboard
+            if validation_outcome:
+                gov = rec.get("gov_check") or {}
+                if isinstance(gov, dict):
+                    gov["validation"] = validation_outcome.to_dict()
+                else:
+                    gov = {"validation": validation_outcome.to_dict()}
+                rec["gov_check"] = gov
 
             # ── Warren bot — NON-BLOCKING, stored independently ──────────────
             # warren_bot score does NOT feed into composite / confidence.
