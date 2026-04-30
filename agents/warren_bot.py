@@ -620,10 +620,6 @@ def _log_to_supabase(
         client.table("agent_performance").insert({
             "agent_name": "warren_bot",
             "audit_date": str(date.today()),
-            "notes": (
-                f"warren_bot: {data_points_fetched}/{total_points} "
-                f"data points fetched for {symbol}"
-            ),
         }).execute()
     except Exception as exc:
         log.warning("_log_to_supabase: write failed for %s: %s", symbol, exc)
