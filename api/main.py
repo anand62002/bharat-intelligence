@@ -145,6 +145,24 @@ _NSE_OVERRIDES: dict[str, str] = {
     "SBICARDS":     "SBICARD.NS",
     "PAYTM":        "PAYTM.NS",
     "ZOMATO":       "ZOMATO.NS",
+    # Brand-name / popular aliases where NSE ticker differs from brand name.
+    # Without these the live-probe falls through to SYMBOL.NS which 404s on
+    # Yahoo Finance, causing GET /api/portfolio to return price=None for those
+    # holdings and the dashboard shows stale or zero prices.
+    "IHCL":                  "INDHOTEL.NS",   # Indian Hotels Company (brand = IHCL, NSE = INDHOTEL)
+    "TAJHOTELS":             "INDHOTEL.NS",
+    "BHARATSEAT":            "BHARATSE.NS",   # Bharat Seats Ltd (NSE = BHARATSE, not BHARATSEAT)
+    "BHARATSEATS":           "BHARATSE.NS",
+    "HITACHIENERGYINDIA":    "POWERINDIA.NS", # Hitachi Energy India (NSE = POWERINDIA)
+    "HITACHIENERGY":         "POWERINDIA.NS",
+    "POWERINDIA":            "POWERINDIA.NS",
+    "MUTHOOT":               "MUTHOOTFIN.NS", # Muthoot Finance (popular short alias)
+    "BAJAJ FINANCE":         "BAJFINANCE.NS",
+    "BAJAJFINANCE":          "BAJFINANCE.NS",
+    "L&T":                   "LT.NS",
+    "LNT":                   "LT.NS",
+    "M&M":                   "M&M.NS",
+    "MAHINDRA":              "M&M.NS",
 }
 
 # Cache for resolved symbols so we don't hit yfinance on every request

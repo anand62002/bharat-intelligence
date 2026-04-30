@@ -71,6 +71,29 @@ YF_SYMBOL_MAP: dict[str, Optional[str]] = {
     "CSB":              "CSBBANK.NS",         # CSB Bank NSE symbol = CSBBANK
     "DALMIA":           "DALBHARAT.NS",       # Dalmia Bharat NSE symbol = DALBHARAT
 
+    # ── Brand-name / popular aliases (NSE ticker differs from brand) ──────────
+    # Users often type the brand/display name rather than the exchange ticker.
+    "IHCL":             "INDHOTEL.NS",        # Indian Hotels Co. (IHCL brand) → NSE: INDHOTEL
+    "TAJHOTELS":        "INDHOTEL.NS",        # Taj Hotels brand alias
+    "BHARATSEAT":       "BHARATSE.NS",        # Bharat Seats Ltd → NSE: BHARATSE
+    "BHARATSEATS":      "BHARATSE.NS",        # plural alias
+    "HITACHIENERGYINDIA": "POWERINDIA.NS",    # Hitachi Energy India → NSE: POWERINDIA
+    "HITACHIENERGY":    "POWERINDIA.NS",      # short alias
+    "POWERINDIA":       "POWERINDIA.NS",      # direct NSE symbol
+    "MUTHOOT":          "MUTHOOTFIN.NS",      # Muthoot Finance (common short alias)
+    "BAJAJ FINANCE":    "BAJFINANCE.NS",      # space alias
+    "BAJAJFINANCE":     "BAJFINANCE.NS",      # no-space alias
+    "HDFCFIN":          "HDFCBANK.NS",        # HDFC Bank (post-merger)
+    "L&T":              "LT.NS",              # Larsen & Toubro
+    "LNT":              "LT.NS",              # another L&T alias
+    "M&M":              "M&M.NS",             # Mahindra (handles ampersand)
+    "MAHINDRA":         "M&M.NS",
+    "TATAMOTORS":       "TATAMOTORS.NS",      # explicit pass-through (correct)
+    "PREMEXPLN":        "PREMEXPLN.NS",       # Premier Explosives
+    "TATAPOWER":        "TATAPOWER.NS",       # explicit pass-through
+    "CIPLA":            "CIPLA.NS",           # explicit pass-through
+    "DRREDDY":          "DRREDDY.NS",         # explicit pass-through
+
     # ── Yahoo Finance uses longer/different form ───────────────────────────────
     "DEEPAKNITRITE":    "DEEPAKNITR.NS",       # NSE list sometimes uses full name; YF uses DEEPAKNITR
     "AARTI":            "AARTIIND.NS",        # Aarti Industries
