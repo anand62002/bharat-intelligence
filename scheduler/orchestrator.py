@@ -60,6 +60,7 @@ from agents.macro          import analyse as macro_analyse     # noqa: E402
 from agents.historical_rag import analyse as rag_analyse       # noqa: E402
 from agents.commodities    import analyse as comm_analyse      # noqa: E402
 from agents.warren_bot     import analyse as warren_analyse    # noqa: E402
+from agents.discovery_screener import run_discovery             # noqa: E402
 
 # ── LangGraph ─────────────────────────────────────────────────────────────────
 from langgraph.graph import StateGraph, END                    # noqa: E402
@@ -993,6 +994,53 @@ async def sector_pe_snapshot_node(state: OrchestratorState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Discovery Screener node
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def run_discovery_node(state: OrchestratorState) -> dict:
+    """
+    Run the proactive discovery screener as the final step in the daily pipeline.
+
+    Processes today's rotation slice of the full NSE EQ universe (~1 700 stocks,
+    200-symbol slice → 9-day full cycle, ~3× monthly coverage).  The screener
+    runs independently of the portfolio-symbol pipeline above — it always scans
+    the broader market for new opportunities not already in the user's portfolio.
+
+    In --dry mode the screener still runs but save_to_db is forced False so no
+    Supabase writes occur.
+
+    Failures are fully non-fatal: an exception here is logged and the pipeline
+    returns normally.
+    """
+    dry_run = state.get("dry_run", False)
+    if dry_run:
+        log.info("[DRY RUN] Running discovery screener (save_to_db=False)...")
+    else:
+        log.info("Running discovery screener (full NSE EQ universe, 200-symbol slice)...")
+
+    try:
+        results = await asyncio.to_thread(
+            run_discovery,
+            save_to_db=not dry_run,
+        )
+        label = " [DRY RUN]" if dry_run else ""
+        log.info(
+            "Discovery screener%s complete: %d opportunities found",
+            label, len(results),
+        )
+        for dr in results:
+            log.info(
+                "  [%s] %s — upside=%.1f%%  conf=%.1f  score=%.1f",
+                dr.opportunity_tier, dr.symbol,
+                dr.upside_pct, dr.upside_confidence, dr.composite_score,
+            )
+    except Exception as exc:
+        log.warning("run_discovery_node failed (non-fatal): %s", exc, exc_info=True)
+
+    return {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Graph construction
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1009,6 +1057,7 @@ def _build_graph():
     builder.add_node("save_recs",          save_recs_node)
     builder.add_node("monitor",            monitor_node)
     builder.add_node("log_run",            log_run_node)
+    builder.add_node("run_discovery",      run_discovery_node)
 
     builder.set_entry_point("sector_pe_snapshot")
     builder.add_edge("sector_pe_snapshot", "load_symbols")
@@ -1019,7 +1068,8 @@ def _build_graph():
     builder.add_edge("fact_check",         "save_recs")
     builder.add_edge("save_recs",          "monitor")
     builder.add_edge("monitor",            "log_run")
-    builder.add_edge("log_run",            END)
+    builder.add_edge("log_run",            "run_discovery")
+    builder.add_edge("run_discovery",      END)
 
     return builder.compile()
 

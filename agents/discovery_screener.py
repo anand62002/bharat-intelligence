@@ -20,12 +20,15 @@ Opportunity tiers:
     STANDARD  — upside_pct >=  20 AND confidence >= 65
 """
 
+import hashlib
 import logging
+import math
 import os
+import random
 import sys
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import numpy as np
@@ -60,6 +63,23 @@ _STANDARD_UPSIDE    =  20.0
 _STANDARD_CONF      =  65.0
 
 _INTER_STOCK_DELAY  = 0.5    # seconds between yfinance calls to avoid rate-limiting
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Universe rotation constants
+# ──────────────────────────────────────────────────────────────────────────────
+# Each daily run processes a deterministic slice of the full NSE universe so
+# every stock is visited at least once per month.
+#
+# Coverage maths (full NSE EQ universe ≈ 1 700 symbols):
+#   1 700 ÷ 200 per day = 9-day full cycle  →  ~3× coverage per month
+#   Max-prescreen of 200 is the number of symbols passed through the fast
+#   pre-screen filters; up to max_candidates (default 25) that pass are then
+#   given the expensive 7-agent deep analysis.
+
+_EPOCH                  = date(2025, 1, 1)        # day-number epoch for slice rotation
+_UNIVERSE_SHUFFLE_SEED  = 0x6272617274            # "bhrat" — stable per-corpus shuffle
+_MAX_CANDIDATES_DEFAULT = 25                      # symbols given full 7-agent analysis
+_MAX_PRESCREEN_DEFAULT  = 200                     # symbols pre-screened per daily run
 
 # ──────────────────────────────────────────────────────────────────────────────
 # NIFTY 500 Universe
@@ -165,6 +185,61 @@ def fetch_nifty500_symbols() -> list[str]:
     except Exception as exc:
         log.warning("NSE NIFTY500 fetch failed, using hardcoded list: %s", exc)
     return list(NIFTY500_SYMBOLS)
+
+
+def fetch_all_nse_equity_symbols() -> list[str]:
+    """
+    Download the full NSE main-board equity master file (EQUITY_L.csv) and
+    return all EQ-series tickers as 'SYMBOL.NS' strings (~1 700 symbols).
+
+    NSE publishes this file publicly at:
+        https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv
+
+    CSV columns (no quoting): SYMBOL, NAME OF COMPANY, SERIES, DATE OF LISTING,
+        PAID UP VALUE, MARKET LOT, ISIN NUMBER, FACE VALUE
+
+    Falls back to ``fetch_nifty500_symbols()`` on any network / parse error so
+    the pipeline never halts due to an unreachable NSE endpoint.
+    """
+    try:
+        import urllib.request
+        url = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (BharatIntelligence/1.0)",
+                "Accept": "text/csv,*/*",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+
+        symbols: list[str] = []
+        for line in raw.splitlines()[1:]:       # skip header row
+            parts = line.split(",")
+            if len(parts) < 3:
+                continue
+            sym    = parts[0].strip()
+            series = parts[2].strip().upper()
+            if sym and series == "EQ":          # main-board equity only
+                symbols.append(sym + ".NS")
+
+        if len(symbols) >= 500:                 # sanity: expect 1000+
+            log.info(
+                "fetch_all_nse_equity_symbols: %d EQ symbols from EQUITY_L.csv",
+                len(symbols),
+            )
+            return clean_symbol_list(symbols)
+
+        log.warning(
+            "fetch_all_nse_equity_symbols: only %d symbols parsed — too few, "
+            "falling back to NIFTY 500",
+            len(symbols),
+        )
+    except Exception as exc:
+        log.warning("fetch_all_nse_equity_symbols failed: %s — falling back to NIFTY 500", exc)
+
+    return fetch_nifty500_symbols()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -654,6 +729,106 @@ def _upside_horizon(agent_results: dict) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Daily slice rotation helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _daily_slice(
+    universe:   list[str],
+    slice_size: int,
+    run_date:   Optional[date] = None,
+) -> list[str]:
+    """
+    Return today's deterministic slice of *universe* of length *slice_size*.
+
+    Algorithm
+    ---------
+    1. Shuffle the full universe once with a fixed seed so the order is stable
+       across runs but different from the original list order.
+    2. Compute today's day-number relative to _EPOCH and use it to pick the
+       starting index with wraparound, guaranteeing every symbol is visited
+       in a predictable, repeating cycle.
+
+    The slice wraps cleanly — when the window crosses the end of the list it
+    continues from the beginning — so every symbol appears in exactly one
+    slice per cycle.
+
+    Args:
+        universe:   Full symbol list (any order; will be shuffled internally).
+        slice_size: Number of symbols to return (i.e. ``_MAX_PRESCREEN_DEFAULT``).
+        run_date:   Date to use for rotation (defaults to today).  Pass an
+                    explicit date in tests to get deterministic output.
+
+    Returns:
+        A list of exactly ``min(slice_size, len(universe))`` symbols.
+    """
+    if not universe:
+        return []
+
+    n          = len(universe)
+    slice_size = min(slice_size, n)
+
+    # Stable shuffle — same seed → same order every time regardless of input order
+    rng = random.Random(_UNIVERSE_SHUFFLE_SEED)
+    shuffled = list(universe)
+    rng.shuffle(shuffled)
+
+    # Day number since epoch drives the window start
+    today    = run_date or date.today()
+    day_num  = (today - _EPOCH).days
+    start    = (day_num * slice_size) % n
+
+    # Wrap-around slice
+    end = start + slice_size
+    if end <= n:
+        return shuffled[start:end]
+    # Wraparound: take tail + head
+    return shuffled[start:] + shuffled[: end - n]
+
+
+def _coverage_stats(
+    universe:     list[str],
+    max_prescreen: int,
+    run_date:     Optional[date] = None,
+) -> dict:
+    """
+    Return a dict describing how far through the full universe today's run is.
+
+    Keys
+    ----
+    universe_size       : total symbols in universe
+    slice_size          : symbols pre-screened today
+    cycle_length_days   : days to cover the entire universe once
+    today_position      : 1-based day within the current cycle
+    cycle_pct_complete  : % of universe covered so far in this cycle
+    est_full_coverage   : ISO date when the current cycle completes
+    monthly_passes      : estimated full-universe passes per 30 days
+    """
+    today      = run_date or date.today()
+    n          = len(universe)
+    slice_size = min(max_prescreen, n)
+    if slice_size == 0:
+        return {}
+
+    cycle_days    = math.ceil(n / slice_size)                 # e.g. 9 for 1700÷200
+    day_num       = (today - _EPOCH).days
+    pos_in_cycle  = (day_num % cycle_days) + 1               # 1-based
+    pct_complete  = round(pos_in_cycle / cycle_days * 100, 1)
+    days_left     = cycle_days - pos_in_cycle
+    est_complete  = (today + timedelta(days=days_left)).isoformat()
+    monthly_passes = round(30 / cycle_days, 1)
+
+    return {
+        "universe_size":      n,
+        "slice_size":         slice_size,
+        "cycle_length_days":  cycle_days,
+        "today_position":     pos_in_cycle,
+        "cycle_pct_complete": pct_complete,
+        "est_full_coverage":  est_complete,
+        "monthly_passes":     monthly_passes,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Portfolio exclusion
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -795,55 +970,87 @@ def _sector_from_fundamental(agent_results: dict) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_discovery(
-    max_candidates:     int  = 15,
-    use_live_universe:  bool = False,
-    save_to_db:         bool = True,
+    max_candidates:     int   = _MAX_CANDIDATES_DEFAULT,
+    max_prescreen:      int   = _MAX_PRESCREEN_DEFAULT,
+    use_extended_universe: bool = True,
+    save_to_db:         bool  = True,
     inter_delay:        float = _INTER_STOCK_DELAY,
+    _run_date:          Optional[date] = None,    # test hook — leave None in production
 ) -> list[DiscoveryResult]:
     """
-    Full discovery pipeline:
-        1. Load universe (NIFTY 500 hardcoded or live from NSE)
+    Full discovery pipeline with daily slice rotation:
+
+        1. Load universe
+           - use_extended_universe=True  → fetch_all_nse_equity_symbols() (~1 700 EQ tickers)
+           - use_extended_universe=False → fetch_nifty500_symbols() (NIFTY 500 subset)
         2. Exclude portfolio holdings
-        3. Pre-screen each symbol (fast filters, 4-of-5)
-        4. Run all 7 agents on pre-screened candidates (up to max_candidates)
-        5. Classify CRITICAL / STANDARD opportunities
-        6. Save to Supabase recommendations table
-        7. Return sorted list — critical first, then by upside_pct desc
+        3. Select today's deterministic slice of max_prescreen symbols
+        4. Pre-screen all slice symbols (fast 4-of-5 filters) — no early exit
+        5. Run all 7 agents on up to max_candidates symbols that passed pre-screen
+        6. Classify CRITICAL / STANDARD opportunities
+        7. Save to Supabase recommendations table
+        8. Return sorted list — CRITICAL first, then by upside_pct desc
+
+    Rotation guarantee
+    ------------------
+    With the default max_prescreen=200 and ~1 700 EQ symbols the full universe
+    is covered in a 9-day cycle, giving ~3 full passes per month.
 
     Args:
-        max_candidates:    Max stocks to run full analysis on (default 15)
-        use_live_universe: If True, fetch live NIFTY 500 from NSE; else use hardcoded list
-        save_to_db:        If True, persist discoveries to Supabase
-        inter_delay:       Seconds to sleep between stocks (rate-limit friendly)
+        max_candidates:        Max stocks for full 7-agent analysis per run (default 25).
+        max_prescreen:         Symbols in today's rotation slice (default 200).
+        use_extended_universe: True → full NSE EQ universe; False → NIFTY 500 only.
+        save_to_db:            If True, persist discoveries to Supabase.
+        inter_delay:           Seconds between yfinance calls (rate-limit protection).
+        _run_date:             Override today's date (unit-test hook only).
 
     Returns:
-        list[DiscoveryResult]
+        list[DiscoveryResult] — sorted CRITICAL first, then upside_pct descending.
     """
-    start_ts = time.time()
-    log.info("=== Discovery Screener starting ===")
+    start_ts  = time.time()
+    today     = _run_date or date.today()
+    log.info("=== Discovery Screener starting (date=%s) ===", today.isoformat())
 
     # ── 1. Universe ────────────────────────────────────────────────────────────
-    universe = fetch_nifty500_symbols() if use_live_universe else list(NIFTY500_SYMBOLS)
-    log.info("Universe: %d symbols", len(universe))
+    if use_extended_universe:
+        full_universe = fetch_all_nse_equity_symbols()
+        log.info("Extended NSE EQ universe: %d symbols", len(full_universe))
+    else:
+        full_universe = fetch_nifty500_symbols()
+        log.info("NIFTY 500 universe: %d symbols", len(full_universe))
 
     # ── 2. Exclude portfolio ───────────────────────────────────────────────────
     portfolio_syms = _load_portfolio_symbols()
     if portfolio_syms:
-        log.info("Excluding %d portfolio holdings: %s", len(portfolio_syms), portfolio_syms)
-    universe = [
-        s for s in universe
+        log.info("Excluding %d portfolio holdings", len(portfolio_syms))
+    full_universe = [
+        s for s in full_universe
         if _normalise_symbol(s) not in portfolio_syms
     ]
-    log.info("After portfolio exclusion: %d symbols", len(universe))
+    log.info("After portfolio exclusion: %d symbols", len(full_universe))
 
-    # ── 3. Pre-fetch market-wide data once ────────────────────────────────────
+    # ── 3. Coverage stats + today's rotation slice ───────────────────────────
+    cov = _coverage_stats(full_universe, max_prescreen, run_date=today)
+    log.info(
+        "Coverage: cycle=%d days | today=day %d/%d (%.1f%%) | "
+        "est full coverage %s | ~%.1f passes/month",
+        cov.get("cycle_length_days", 0),
+        cov.get("today_position", 0),
+        cov.get("cycle_length_days", 0),
+        cov.get("cycle_pct_complete", 0.0),
+        cov.get("est_full_coverage", "?"),
+        cov.get("monthly_passes", 0.0),
+    )
+    slice_symbols = _daily_slice(full_universe, max_prescreen, run_date=today)
+    log.info("Today's slice: %d symbols (indices rotated by date)", len(slice_symbols))
+
+    # ── 4. Pre-fetch market-wide data once ────────────────────────────────────
     fii_data = None
     try:
         fii_data = get_nse_fii_dii()
     except Exception as exc:
         log.warning("FII/DII fetch failed: %s", exc)
 
-    # Pre-fetch macro once (shared across all symbols)
     macro_result = None
     try:
         from agents.macro import analyse as macro_analyse
@@ -852,13 +1059,14 @@ def run_discovery(
     except Exception as exc:
         log.warning("Macro pre-fetch failed: %s", exc)
 
-    # ── 4. Pre-screen ─────────────────────────────────────────────────────────
-    log.info("Pre-screening %d symbols …", len(universe))
+    # ── 5. Pre-screen the entire slice (no early exit) ────────────────────────
+    # We deliberately screen every symbol in today's slice so that the rotation
+    # guarantee holds — a break would mean symbols near the end of the slice
+    # are never evaluated.  Only the deep 7-agent analysis is capped.
+    log.info("Pre-screening %d symbols …", len(slice_symbols))
     screened: list[tuple[str, list[str]]] = []
 
-    for symbol in universe:
-        if len(screened) >= max_candidates * 3:  # collect 3x for safety buffer
-            break
+    for symbol in slice_symbols:
         try:
             passes, triggers = prescreen(symbol, fii_data=fii_data)
             if passes:
@@ -868,12 +1076,13 @@ def run_discovery(
             log.warning("  prescreen error for %s: %s", symbol, exc)
         time.sleep(inter_delay)
 
-    log.info("Pre-screen complete: %d candidates", len(screened))
+    log.info("Pre-screen complete: %d/%d passed", len(screened), len(slice_symbols))
 
-    # Trim to max_candidates
+    # Cap deep analysis at max_candidates (most-recently screened first is fine;
+    # the pre-screen itself has no ranking so order = position in rotated slice)
     candidates = screened[:max_candidates]
 
-    # ── 5. Full 7-agent analysis ───────────────────────────────────────────────
+    # ── 6. Full 7-agent analysis ───────────────────────────────────────────────
     discoveries: list[DiscoveryResult] = []
 
     for symbol, triggers in candidates:
@@ -889,7 +1098,7 @@ def run_discovery(
             elif upside_pct >= _STANDARD_UPSIDE and upside_conf >= _STANDARD_CONF:
                 tier = "STANDARD"
             else:
-                log.info("  %s does not meet opportunity thresholds (upside=%.1f%% conf=%.1f)",
+                log.info("  %s below thresholds (upside=%.1f%% conf=%.1f)",
                          symbol, upside_pct, upside_conf)
                 continue
 
@@ -933,22 +1142,23 @@ def run_discovery(
 
         time.sleep(inter_delay)
 
-    # ── 6. Sort: CRITICAL first, then by upside_pct desc ─────────────────────
+    # ── 7. Sort: CRITICAL first, then by upside_pct desc ─────────────────────
     discoveries.sort(
         key=lambda d: (0 if d.opportunity_tier == "CRITICAL" else 1, -d.upside_pct)
     )
 
     elapsed = round(time.time() - start_ts, 1)
     log.info(
-        "=== Discovery complete: %d opportunities found in %.1fs ===",
-        len(discoveries), elapsed,
+        "=== Discovery complete: %d opportunities | %d pre-screened | %.1fs ===",
+        len(discoveries), len(slice_symbols), elapsed,
     )
 
-    # ── 7. Log daily run ──────────────────────────────────────────────────────
+    # ── 8. Log daily run ──────────────────────────────────────────────────────
     _log_daily_run(
-        symbols_processed=len(candidates),
-        discoveries=len(discoveries),
-        duration=elapsed,
+        symbols_processed = len(candidates),
+        discoveries       = len(discoveries),
+        duration          = elapsed,
+        coverage_stats    = cov,
     )
 
     return discoveries
@@ -956,8 +1166,9 @@ def run_discovery(
 
 def _log_daily_run(
     symbols_processed: int,
-    discoveries: int,
-    duration: float,
+    discoveries:       int,
+    duration:          float,
+    coverage_stats:    Optional[dict] = None,
 ) -> None:
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -965,12 +1176,21 @@ def _log_daily_run(
         return
     try:
         from supabase import create_client
-        create_client(url, key).table("daily_runs").insert({
+        row: dict = {
             "run_date":          date.today().isoformat(),
             "symbols_processed": symbols_processed,
             "errors":            0,
             "duration_seconds":  duration,
-        }).execute()
+        }
+        # Store coverage metadata in the agents_run JSON column if available.
+        # This lets the dashboard / governance layer show rotation progress.
+        if coverage_stats:
+            row["agents_run"] = {
+                "agent":         AGENT_NAME,
+                "coverage":      coverage_stats,
+                "discoveries":   discoveries,
+            }
+        create_client(url, key).table("daily_runs").insert(row).execute()
     except Exception as exc:
         log.warning("daily_runs log failed: %s", exc)
 
@@ -988,16 +1208,67 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
-    parser = argparse.ArgumentParser(description="Bharat Intelligence Discovery Screener")
-    parser.add_argument("--max",     type=int, default=15,    help="Max candidates for full analysis")
-    parser.add_argument("--live",    action="store_true",     help="Fetch live NIFTY 500 from NSE")
-    parser.add_argument("--no-save", action="store_true",     help="Skip Supabase persistence")
+    parser = argparse.ArgumentParser(
+        description="Bharat Intelligence Discovery Screener",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples
+--------
+  # Default: full NSE EQ universe, 200-symbol slice, 25 deep analyses
+  python -m agents.discovery_screener
+
+  # Wider pre-screen, more deep analyses
+  python -m agents.discovery_screener --max-prescreen 300 --max 40
+
+  # Restrict to NIFTY 500 (faster, ~9 min vs ~25 min)
+  python -m agents.discovery_screener --nifty500
+
+  # Dry-run (no Supabase writes)
+  python -m agents.discovery_screener --no-save
+
+  # Show coverage stats and exit without running
+  python -m agents.discovery_screener --coverage-only
+        """,
+    )
+    parser.add_argument(
+        "--max",
+        type=int, default=_MAX_CANDIDATES_DEFAULT,
+        help=f"Max candidates for full 7-agent analysis (default {_MAX_CANDIDATES_DEFAULT})",
+    )
+    parser.add_argument(
+        "--max-prescreen",
+        type=int, default=_MAX_PRESCREEN_DEFAULT,
+        help=f"Symbols in today's rotation slice (default {_MAX_PRESCREEN_DEFAULT})",
+    )
+    parser.add_argument(
+        "--nifty500",
+        action="store_true",
+        help="Use NIFTY 500 universe instead of full NSE EQ universe",
+    )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Skip Supabase persistence (dry run)",
+    )
+    parser.add_argument(
+        "--coverage-only",
+        action="store_true",
+        help="Print today's coverage stats and exit without running",
+    )
     args = parser.parse_args()
 
+    if args.coverage_only:
+        use_ext = not args.nifty500
+        univ    = fetch_all_nse_equity_symbols() if use_ext else fetch_nifty500_symbols()
+        cov     = _coverage_stats(univ, args.max_prescreen)
+        print(json.dumps(cov, indent=2))
+        sys.exit(0)
+
     results = run_discovery(
-        max_candidates    = args.max,
-        use_live_universe = args.live,
-        save_to_db        = not args.no_save,
+        max_candidates        = args.max,
+        max_prescreen         = args.max_prescreen,
+        use_extended_universe = not args.nifty500,
+        save_to_db            = not args.no_save,
     )
 
     print(f"\n{'='*60}")
