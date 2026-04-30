@@ -9,9 +9,9 @@
 ## What this project is
 
 A multi-agent Indian stock/commodity market intelligence platform.
-- **9 AI agents** analyse fundamentals, technicals, sentiment, macro, institutional flows, sector PE, commodities, historical patterns, and proactively discover new opportunities.
+- **10 AI agents** analyse fundamentals, technicals, sentiment, macro, institutional flows, sector PE, commodities, historical patterns, long-term quality (warren_bot), and proactively discover new opportunities.
 - **Governance layer** audits agent accuracy, detects hallucinations, scans AI research papers, and proposes improvements via GitHub PRs.
-- **Scheduler** runs everything daily via APScheduler.
+- **Scheduler** (`worker.py`) runs everything daily via APScheduler — two Railway services: web (uvicorn) + worker (python worker.py).
 - **FastAPI backend** (`api/main.py`) serves live data to a React dashboard.
 - **React dashboard** (`dashboard/src/App.jsx`) — single-file SPA with ARIA AI chat, portfolio tracker, discovery engine, governance tab.
 
@@ -30,7 +30,8 @@ Stock analysis/
 │   ├── sector_valuation.py     # Live sector PE regime vs 5-yr average
 │   ├── commodities.py          # Gold, crude, silver MCX
 │   ├── historical_rag.py       # pgvector semantic similarity on past events
-│   ├── discovery_screener.py   # Proactive stock discovery (multi-screen)
+│   ├── discovery_screener.py   # Proactive stock discovery — full NSE EQ universe
+│   │                           # daily slice rotation (200/day → 9-day full cycle)
 │   └── warren_bot.py           # Long-term business quality (Buffett+Jhunjhunwala)
 │
 ├── governance/                 # Agent oversight & self-improvement
@@ -41,22 +42,36 @@ Stock analysis/
 │   └── github_manager.py       # Opens GitHub PRs for approved research proposals
 │
 ├── scheduler/                  # APScheduler daily pipeline
-│   ├── orchestrator.py         # Master scheduler — wires all agents + governance
+│   ├── orchestrator.py         # Master LangGraph pipeline — all agents + governance
+│   │                           # Pipeline: sector_pe_snapshot → load_symbols → load_weights
+│   │                           # → run_agents → synthesise → fact_check → save_recs
+│   │                           # → monitor → log_run → run_discovery → END
 │   ├── portfolio_monitor.py    # Monitors open holdings, fires portfolio_alerts
 │   ├── sector_pe_tracker.py    # Daily sector_pe_snapshots writes
 │   └── performance_tracker.py  # Writes agent_performance rows daily
 │
+├── worker.py                   # Unified background worker (runs on Railway worker dyno)
+│   #  Schedule (IST):
+│   #    06:00 — orchestrator (all agents + discovery)
+│   #    07:00 — performance tracker
+│   #    07:30 — research agent
+│   #    09:15, 11:30, 13:30, 15:15 — portfolio monitor
+│
 ├── data/
 │   ├── fetchers.py             # India market data fetchers (NSE, BSE, RBI, SEBI)
-│   │                           # + get_screener_history() — 10yr annual time series from screener.in
-│   └── symbol_map.py           # NSE symbol normalisation (same logic as api/main.py _resolve_yf_symbol)
+│   │                           # + get_screener_history() — 10yr annual time series
+│   └── symbol_map.py           # NSE → yfinance symbol resolution (YF_SYMBOL_MAP)
+│   #                             Single source of truth for all agents.
+│   #                             Also has SCREENER_SLUG_MAP for screener.in slugs.
 │
 ├── api/
 │   ├── __init__.py
-│   └── main.py                 # FastAPI backend (9 endpoints + WebSocket)
+│   └── main.py                 # FastAPI backend (11 endpoints + WebSocket)
+│   #                             _NSE_OVERRIDES: brand-name → yfinance ticker aliases
+│   #                             _symbol_cache: process-lifetime resolution cache
 │
 ├── dashboard/
-│   ├── src/App.jsx             # Entire React SPA (~1600 lines, single file)
+│   ├── src/App.jsx             # Entire React SPA (~1900 lines, single file)
 │   ├── src/index.js
 │   ├── api/
 │   │   ├── aria.js             # Vercel serverless fn — proxies to Anthropic API
@@ -71,11 +86,13 @@ Stock analysis/
 │       ├── create_research_proposals.sql
 │       ├── enhancement_proposals.sql
 │       ├── fix_rls_permissions.sql
-│       └── sector_pe_snapshots.sql
+│       ├── sector_pe_snapshots.sql
+│       ├── create_warren_bot_cache.sql         # warren_bot 24-hr result cache
+│       └── create_discovery_runs.sql           # ← NEW: daily screened-symbol log
 │
 ├── tests/                      # pytest — one test file per module
 ├── requirements.txt
-├── Procfile                    # Railway start command
+├── Procfile                    # web: uvicorn ...  worker: python worker.py
 ├── railway.toml                # Railway deployment config
 └── vercel.json                 # Root placeholder (actual config in dashboard/vercel.json)
 ```
@@ -92,10 +109,16 @@ Stock analysis/
 | `agent_performance` | Daily agent accuracy log | `agent_name, accuracy_90d, hallucination_rate, trend (IMPROVING/STABLE/DEGRADING), audit_date` |
 | `historical_events` | RAG knowledge base | `event_type, description, embedding (vector), outcome, relevance_score` |
 | `institutional_flows` | FII/DII daily data | `fii_net, dii_net, fii_buy, fii_sell, session_date` |
-| `daily_runs` | Scheduler run log | `run_date, status, agents_run, errors` |
+| `daily_runs` | Scheduler run log | `run_date, status, agents_run (jsonb — includes discovery coverage stats), errors` |
 | `research_proposals` | AI paper proposals | `title, source, url, relevance, status, proposed_change, impacted_agents, debate_log (jsonb), pr_url, metadata (jsonb)` |
 | `sector_pe_snapshots` | Daily sector PE | `sector, pe_ratio, avg_5yr_pe, regime, snapshot_date` |
 | `enhancement_proposals` | User-requested enhancements | `title, description, cost_usd, status, is_paid` |
+| `warren_bot_cache` | 24-hr on-demand cache | `symbol (PK), result (jsonb), cached_at` |
+| `discovery_runs` | Daily screened-symbol log | `run_date (unique), slice_symbols, passed_symbols, discovery_symbols, coverage_stats, total_screened, total_passed, total_discoveries` |
+
+> **Pending migrations (run in Supabase SQL Editor):**
+> - `db/migrations/create_warren_bot_cache.sql` — required for warren_bot caching
+> - ~~`db/migrations/create_discovery_runs.sql`~~ — ✅ already applied
 
 ---
 
@@ -107,7 +130,8 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 |---|---|---|
 | GET | `/health` | Health check — no auth needed. Returns `{"status":"ok","db":true}` |
 | GET | `/api/recommendations` | Latest recs sorted upside_pct desc, critical first |
-| GET | `/api/discovery` | `is_discovery=true` recs from today (7-day fallback) |
+| GET | `/api/discovery` | `is_discovery=true` recs from today (7-day fallback, expired filtered via valid_till). Live price refresh on every call. |
+| GET | `/api/discovery/runs` | Last N days of screener run logs (slice/passed/discovery symbols + coverage stats). Powers dashboard "Daily Screened Stocks" panel. |
 | GET | `/api/portfolio` | Open holdings, refreshes current_price from yfinance |
 | POST | `/api/portfolio` | Add/update holding — auto-resolves yfinance symbol, fetches live price |
 | GET | `/api/portfolio/alerts` | Unresolved portfolio alerts |
@@ -115,13 +139,14 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/api/governance/alerts` | Aggregated from portfolio_alerts + degrading agent_performance |
 | GET | `/api/governance/research` | Research proposals with debate status computed |
 | GET | `/api/market/pulse` | Live yfinance prices (NIFTY, SENSEX, GOLD, CRUDE, VIX, FII) — 60s cache |
+| GET | `/api/warren_bot/{symbol}` | On-demand Buffett/Jhunjhunwala quality score — 24h Supabase cache |
 | WS | `/ws/alerts` | WebSocket — broadcasts DANGER/CRITICAL alerts every 30s |
 
 **Auth:** `x-api-key: <DASHBOARD_API_KEY>` header on all HTTP. `?api_key=<key>` on WebSocket.
 **Open in local dev** when `DASHBOARD_API_KEY` env var is unset.
 
 ### Symbol auto-resolution order (`_resolve_yf_symbol`)
-1. `_NSE_OVERRIDES` dict (indices, ETFs, aliases: NIFTY→^NSEI, GOLD→GC=F, etc.)
+1. `_NSE_OVERRIDES` dict in `api/main.py` — indices, ETFs, brand-name aliases (IHCL→INDHOTEL.NS, BHARATSEAT→BHARATSE.NS, etc.)
 2. Already has suffix (.NS/.BO/=X/=F) or starts with ^
 3. Live probe SYMBOL.NS via yfinance 1-day history
 4. Live probe SYMBOL.BO
@@ -129,36 +154,88 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 
 Results cached in `_symbol_cache` dict for process lifetime.
 
+**Canonical symbol map:** `data/symbol_map.py` → `YF_SYMBOL_MAP` is the source of truth used by all agents. `_NSE_OVERRIDES` in `api/main.py` must mirror the same aliases for the portfolio API layer.
+
+**Known brand→ticker aliases (must exist in both maps):**
+
+| User input | yfinance ticker | Note |
+|---|---|---|
+| `IHCL` | `INDHOTEL.NS` | Indian Hotels Co. (IHCL brand, NSE = INDHOTEL) |
+| `BHARATSEAT` | `BHARATSE.NS` | Bharat Seats Ltd (NSE drops last 3 chars) |
+| `HITACHIENERGYINDIA` | `POWERINDIA.NS` | Hitachi Energy India (NSE legacy = POWERINDIA) |
+| `ZOMATO` | `ETERNAL.NS` | Zomato rebranded → Eternal (2025) |
+| `MUTHOOT` | `MUTHOOTFIN.NS` | Short alias |
+| `L&T` / `LNT` | `LT.NS` | Larsen & Toubro |
+
+---
+
+## Discovery screener (`agents/discovery_screener.py`)
+
+### Universe & rotation
+- **Extended universe:** `fetch_all_nse_equity_symbols()` downloads NSE `EQUITY_L.csv` (~1 700 EQ-series tickers). Falls back to NIFTY 500 on failure.
+- **Daily slice rotation:** `_daily_slice(universe, slice_size=200, run_date)` — stable shuffle (seed `0x6272617274`) + date-window. Every symbol visited once per ~9-day cycle (~3× monthly).
+- **Coverage stats:** `_coverage_stats()` — returns `cycle_length_days`, `today_position`, `cycle_pct_complete`, `est_full_coverage`, `monthly_passes`.
+
+### Pipeline
+1. Load full NSE EQ universe → exclude portfolio holdings → take today's 200-symbol slice
+2. Pre-screen **all 200** (no early break) — fast filters: RSI 40–65, PE<50 or revGrowth>30%, FII buying, revGrowth>15%, price>EMA200
+3. Run full 7-agent analysis on up to 25 symbols that passed pre-screen
+4. Classify CRITICAL (upside≥100%, conf≥70%) or STANDARD (upside≥20%, conf≥65%)
+5. Save to `recommendations` (is_discovery=True) with metadata.price snapshot
+6. Upsert to `discovery_runs` with full symbol lists for dashboard audit trail
+
+### CLI
+```powershell
+python -m agents.discovery_screener                          # default: 200 slice, 25 deep
+python -m agents.discovery_screener --max-prescreen 300 --max 40
+python -m agents.discovery_screener --nifty500               # restrict to NIFTY 500
+python -m agents.discovery_screener --no-save                # dry run
+python -m agents.discovery_screener --coverage-only          # print stats and exit
+```
+
+### Orchestrator integration
+`run_discovery_node` is the **final step** in the LangGraph pipeline (after `log_run`). Fires automatically at 06:00 IST daily via `worker.py`.
+
 ---
 
 ## React dashboard (`dashboard/src/App.jsx`)
 
-**Single file ~1600 lines.** Key sections:
+**Single file ~1900 lines.** Key sections:
 
 | Lines (approx) | Section |
 |---|---|
-| 1–150 | Constants: mock data (PORTFOLIO_RECOMMENDATIONS, DISCOVERY_UNIVERSE, MARKET_PULSE, etc.) — used as defaults / offline fallbacks |
-| 150–200 | API config: `API_URL`, `API_KEY`, `apiFetch()` helper |
-| 200–430 | Small UI components: MarketTicker, AlertBanner, CriticalOpportunityBanner, etc. |
-| 430–670 | ResearchDiscoveryTab component |
-| 670–820 | PortfolioTab component |
-| 820–1000 | GovernanceResearchTab component |
-| 1000–1130 | Charts and sub-components |
-| 1130–1350 | ARIAPanel component (AI chat) |
-| 1350–1640 | App() root component — state, useEffect, routing |
+| 1–150 | Constants: mock data — used as offline fallbacks only when `API_URL` is unset |
+| 150–200 | API config: `IS_LIVE`, `API_URL`, `API_KEY`, `apiFetch()` helper |
+| 200–430 | Small UI components: MarketTicker, AlertBanner, EmptyState, etc. |
+| 430–920 | ResearchDiscoveryTab + DiscoveryRunsPanel (new) |
+| 920–1060 | PortfolioTab component |
+| 1060–1230 | GovernanceResearchTab component |
+| 1230–1350 | Charts and sub-components |
+| 1350–1520 | ARIAPanel component (AI chat) |
+| 1520–1900 | App() root component — state, useEffect, routing |
 
-**Live data loading pattern:**
+**IS_LIVE pattern:**
 ```javascript
-// State initialises from mock constants (immediate render, no flicker)
-const [portfolioRecs, setPortfolioRecs] = useState(PORTFOLIO_RECOMMENDATIONS);
-
-// useEffect replaces with live data after mount
-useEffect(() => {
-  if (!API_URL) return;   // ← skips entirely if REACT_APP_API_URL not set
-  apiFetch("/api/recommendations").then(d => setPortfolioRecs(d));
-  // ...parallel loads for all 6 data sources...
-}, []);
+const IS_LIVE = Boolean(API_URL);
+// When IS_LIVE: states init empty [], live data fills them after mount
+// When not IS_LIVE: states init from mock constants (local dev / no backend)
+const [discoveryUniverse, setDiscoveryUniverse] = useState(IS_LIVE ? [] : DISCOVERY_UNIVERSE);
 ```
+
+**apiLoaded flag:**
+```javascript
+const [apiLoaded, setApiLoaded] = useState(!IS_LIVE);
+// Set to true after Promise.allSettled() completes — distinguishes loading vs loaded+empty
+```
+
+**Mock data removed:** All mock constants (`LIVE_PRICES`, `NEWS_FEED`, `AGENT_DEBATE_LOG`, `ENHANCEMENT_PROPOSALS`, `AGENT_PERF`) deleted. Components show `EmptyState` when data is absent.
+
+**Discovery tab — Daily Screened Stocks panel (`DiscoveryRunsPanel`):**
+- Collapsible panel at bottom of Discovery tab
+- Fetches `GET /api/discovery/runs`
+- Shows per-day accordion: total screened / passed / promoted
+- Expanded day: symbol pills colour-coded (⚡ promoted, ✓ passed, dim = screened only)
+- Coverage stats mini-bar: universe size, cycle day, monthly passes
 
 **ARIA portfolio action flow:**
 1. User says: *"I bought Reliance 15 shares at 2850"*
@@ -173,7 +250,7 @@ Uses `ANTHROPIC_API_KEY` env var server-side (never exposed to browser).
 
 ## Environment variables
 
-### Railway (backend)
+### Railway (backend — two services: web + worker)
 | Variable | Description |
 |---|---|
 | `SUPABASE_URL` | Supabase project URL |
@@ -197,10 +274,15 @@ Same as Railway vars above. `.env` is gitignored.
 
 ## Deployment
 
-### Railway (FastAPI backend)
-- Auto-deploys on push to `main`
-- Start command: `uvicorn api.main:app --host 0.0.0.0 --port $PORT` (in `Procfile` + `railway.toml`)
-- Health check: `GET /health`
+### Railway — two services
+| Service | Start command | Health check |
+|---|---|---|
+| web | `uvicorn api.main:app --host 0.0.0.0 --port $PORT` | `GET /health` |
+| worker | `python worker.py` | none |
+
+- Both auto-deploy on push to `main`
+- `railway.toml` sets `restartPolicyType = "on_failure"` — worker restarts on crash
+- `Procfile` defines both roles; per-service start commands set in Railway dashboard
 
 ### Vercel (React frontend)
 - Auto-deploys on push to `main`
@@ -215,11 +297,13 @@ Same as Railway vars above. `.env` is gitignored.
 pip install -r requirements.txt
 uvicorn api.main:app --reload --port 8000
 
+# Worker (optional — runs scheduled jobs)
+python worker.py --now   # fire all jobs once immediately
+
 # Frontend
 cd dashboard
 npm install
 npm start          # CRA dev server on port 3000
-                   # proxies /api/* to localhost:8000 if proxy set in package.json
 ```
 
 ---
@@ -227,12 +311,15 @@ npm start          # CRA dev server on port 3000
 ## Key design decisions & conventions
 
 - **Snake_case in DB, camelCase in React.** Transformers in `api/main.py` handle the conversion: `_transform_holding()`, `_transform_recommendation()`, `_transform_research()`.
-- **Mock data as fallback.** All React state is initialised with mock constants. Live data replaces it after mount. If `REACT_APP_API_URL` is blank, mock data stays — zero crash risk.
+- **IS_LIVE / mock data as fallback.** `IS_LIVE = Boolean(API_URL)`. When live, states init empty and fill from API. When no backend (local dev), mock constants are used. No mock data shown in production.
 - **yf_symbol stored separately.** `portfolio_holdings` has both `symbol` (display, e.g. `RELIANCE`) and `yf_symbol` (e.g. `RELIANCE.NS`). GET /api/portfolio uses `yf_symbol` to refresh prices.
 - **60s market cache.** `_market_cache` + `_market_cache_ts` globals in `api/main.py` prevent hammering yfinance on every dashboard render.
+- **Discovery price refresh.** `GET /api/discovery` refreshes live prices on every call (same pattern as GET /api/portfolio). `metadata.price` in recommendations is the snapshot at write-time; overwritten on each API response.
+- **Discovery valid_till filter.** 7-day fallback query uses `.gte("valid_till", today)` to exclude expired recs.
 - **Governance alerts have no dedicated table.** Aggregated on the fly from `portfolio_alerts` (CRITICAL/DANGER severity) + `agent_performance` (DEGRADING trend).
 - **debateStatus computed, not stored.** `research_proposals` only has `status`. `debateStatus` (pending/debating/approved) is computed from `debate_log` vote counts in `_transform_research()`.
 - **Service_role BYPASSRLS.** Supabase service_role has built-in RLS bypass but still needs `GRANT ALL` for table privileges. Both are set in `db/migrations/grant_service_role_rls.sql`.
+- **Symbol resolution two-layer.** `data/symbol_map.py::YF_SYMBOL_MAP` is used by all agents. `api/main.py::_NSE_OVERRIDES` covers the API layer. Both must be updated together when adding new aliases.
 
 ---
 
@@ -246,16 +333,15 @@ Edit `api/main.py` → add `@app.get("/api/...")` function → add corresponding
 2. Register it in `scheduler/orchestrator.py`
 3. Add test in `tests/test_new_agent.py`
 
-**Add warren_bot to the daily pipeline:**
-In `scheduler/orchestrator.py`, import and call `warren_bot.analyse(symbol)` alongside other agents.
-Warren bot returns a 28-key dict — key fields used by orchestrator:
-`signal` (STRONG_BUY/BUY/HOLD/SELL/AVOID), `score` (0–100), `margin_of_safety_pct`,
-`intrinsic_value`, `moat_type`, `commentary` (Haiku-generated), `disqualifiers` (list),
-`data_quality` (GOOD/PARTIAL/POOR), `jhunjhunwala_bonus_pts`
+**Add a brand-name alias (symbol doesn't resolve to correct price):**
+Add to BOTH `data/symbol_map.py::YF_SYMBOL_MAP` AND `api/main.py::_NSE_OVERRIDES`.
+Also clear `_symbol_cache` on the running API pod (or redeploy) to pick up the change.
 
 **Run all tests:**
 ```powershell
 python -m pytest tests/ -q --tb=short
+# Skip known-flaky network tests:
+python -m pytest tests/ -q --tb=short --ignore=tests/test_research_agent.py --ignore=tests/test_fetchers_integration.py
 ```
 
 **Run integration tests only:**
@@ -271,11 +357,17 @@ Run the SQL file in Supabase dashboard → SQL Editor.
 python -c "from governance.github_manager import GitHubManager; gm=GitHubManager(); print(gm.list_branches())"
 ```
 
+**Smoke-test the worker (fires all jobs once):**
+```powershell
+python worker.py --now
+```
+
 ---
 
 ## Warren bot — `agents/warren_bot.py`
 
 Entry point: `analyse(symbol: str) -> dict` — never raises, always returns a result dict.
+API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_bot_cache` table).
 
 ### Scoring dimensions (20 pts each, total 100 before bonuses)
 | Dimension | Key inputs |
@@ -310,17 +402,21 @@ Entry point: `analyse(symbol: str) -> dict` — never raises, always returns a r
 `disqualifiers`, `commentary`, `data_quality`, `years_available`,
 `agent_name` ("warren_bot"), `analysed_at`, `error`
 
+> **Known issue:** warren_bot tries to write a `notes` column to `agent_performance` which doesn't exist → recurring WARNING in production logs. Non-blocking (cache write still succeeds). Fix: remove `notes` from the INSERT in `warren_bot._log_to_supabase()`.
+
 ---
 
 ## git history (recent)
 
 | Commit | Change |
 |---|---|
+| `5cb2b76` | Fix portfolio price failures: IHCL→INDHOTEL.NS, BHARATSEAT→BHARATSE.NS, HITACHIENERGYINDIA→POWERINDIA.NS + proactive aliases |
+| `4dcc856` | Fix discovery screener never running (missing `import asyncio` in worker.py) + add daily screened-stocks dashboard panel + discovery_runs table |
+| `313e72e` | Add full NSE universe coverage with daily slice rotation to discovery screener |
+| `a364525` | Remove all mock data from dashboard; IS_LIVE pattern; EmptyState components |
+| `34c1e2d` | Fix discovery price freeze (DIXON stale price); add valid_till filter; persist metadata.price at write-time |
 | `d86bd83` | Add warren_bot: Buffett+Jhunjhunwala long-term quality agent + get_screener_history |
 | `4813119` | Simplify deploy.yml — remove Railway webhooks, keep Telegram notify |
 | `f5952d9` | Add GitHub Actions: CI, deploy, and governance rollback workflows |
 | `452c5e5` | Fix worker logging to stdout so Railway shows [inf] not [err] |
-| `e5910a2` | Remove healthcheckPath from railway.toml — not valid for worker service |
-| `22f0508` | Remove startCommand from railway.toml so each service sets its own |
-| `aa1e5d0` | Fix Vercel deployment — move build config to dashboard/vercel.json |
 | `5b1fb1d` | Symbol auto-resolution, live price refresh, /api/symbol/resolve endpoint |
