@@ -1446,6 +1446,154 @@ async def _get_warren_bot_cached(symbol: str, force_refresh: bool) -> dict:
     return result_clean
 
 
+# =============================================================================
+# Performance / Outcome Tracking endpoints
+# =============================================================================
+
+@app.get("/api/performance/outcomes", tags=["performance"])
+async def get_performance_outcomes(
+    days: int = Query(90, description="Look-back window in days"),
+    _:    None = Depends(require_api_key),
+):
+    """
+    Last `days` days of resolved outcome records, grouped by action.
+    Returns:
+      { outcomes: [...], grouped: { BUY: [...], SELL: [...], ... } }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        cutoff = str(date.today() - timedelta(days=days))
+        rows = (
+            _supabase
+            .table("recommendation_outcomes")
+            .select("id,rec_id,symbol,action,entry_price,rec_date,outcome_t90,alpha_t90,outcome_t180,alpha_t180,outcome_t365,alpha_t365,last_updated")
+            .gte("rec_date", cutoff)
+            .order("rec_date", desc=True)
+            .limit(200)
+            .execute()
+            .data or []
+        )
+
+        # Group by action
+        grouped: dict[str, list] = {}
+        for r in rows:
+            action = r.get("action", "UNKNOWN")
+            grouped.setdefault(action, []).append(r)
+
+        return {"outcomes": rows, "grouped": grouped, "total": len(rows)}
+    except Exception as exc:
+        log.error("performance/outcomes error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/performance/accuracy", tags=["performance"])
+async def get_performance_accuracy(
+    _: None = Depends(require_api_key),
+):
+    """
+    Accuracy scorecard: hit rate by action, average alpha by horizon.
+    Returns:
+      { by_action: { BUY: { hit_rate_90d, avg_alpha_90d, ... }, ... }, total_tracked: int }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        rows = (
+            _supabase
+            .table("recommendation_outcomes")
+            .select("action,outcome_t90,outcome_t180,outcome_t365,alpha_t90,alpha_t180,alpha_t365")
+            .execute()
+            .data or []
+        )
+
+        from collections import defaultdict
+        groups: dict[str, list] = defaultdict(list)
+        for r in rows:
+            groups[r.get("action", "UNKNOWN")].append(r)
+
+        scorecard: dict[str, dict] = {}
+        for action, grp in groups.items():
+            def _hr(horizon: str):
+                resolved = [r for r in grp if r.get(f"outcome_t{horizon}") not in (None, "PENDING")]
+                hits     = sum(1 for r in resolved if r.get(f"outcome_t{horizon}") == "HIT")
+                return round(hits / len(resolved) * 100, 1) if resolved else None, len(resolved)
+
+            def _avg_alpha(horizon: str):
+                vals = [r[f"alpha_t{horizon}"] for r in grp if r.get(f"alpha_t{horizon}") is not None]
+                return round(sum(vals) / len(vals) * 100, 2) if vals else None
+
+            hr90,  n90  = _hr("90")
+            hr180, n180 = _hr("180")
+            hr365, n365 = _hr("365")
+
+            scorecard[action] = {
+                "total_recs":       len(grp),
+                "resolved_90d":     n90,
+                "hit_rate_90d":     hr90,
+                "avg_alpha_90d":    _avg_alpha("90"),
+                "resolved_180d":    n180,
+                "hit_rate_180d":    hr180,
+                "avg_alpha_180d":   _avg_alpha("180"),
+                "resolved_365d":    n365,
+                "hit_rate_365d":    hr365,
+                "avg_alpha_365d":   _avg_alpha("365"),
+            }
+
+        return {"by_action": scorecard, "total_tracked": len(rows)}
+    except Exception as exc:
+        log.error("performance/accuracy error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/performance/alpha_chart", tags=["performance"])
+async def get_performance_alpha_chart(
+    weeks: int = Query(26, description="Number of weeks of history"),
+    _:     None = Depends(require_api_key),
+):
+    """
+    Weekly average alpha (t90d) time series for charting.
+    Returns:
+      { series: [ { week: "2025-W01", avg_alpha_pct: 2.4, n: 5 }, ... ] }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        cutoff = str(date.today() - timedelta(weeks=weeks))
+        rows = (
+            _supabase
+            .table("recommendation_outcomes")
+            .select("rec_date,alpha_t90,outcome_t90")
+            .gte("rec_date", cutoff)
+            .not_.is_("alpha_t90", "null")
+            .execute()
+            .data or []
+        )
+
+        # Bucket into ISO weeks
+        from collections import defaultdict
+        buckets: dict[str, list[float]] = defaultdict(list)
+        for r in rows:
+            try:
+                d      = date.fromisoformat(str(r["rec_date"])[:10])
+                iso_wk = f"{d.isocalendar().year}-W{d.isocalendar().week:02d}"
+                buckets[iso_wk].append(float(r["alpha_t90"]) * 100)
+            except Exception:
+                continue
+
+        series = [
+            {"week": wk, "avg_alpha_pct": round(sum(vals) / len(vals), 2), "n": len(vals)}
+            for wk, vals in sorted(buckets.items())
+        ]
+        return {"series": series}
+    except Exception as exc:
+        log.error("performance/alpha_chart error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/warren_bot/{symbol}", tags=["analysis"])
 async def get_warren_bot(
     symbol:        str,

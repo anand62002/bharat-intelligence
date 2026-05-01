@@ -1695,6 +1695,157 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
   );
 }
 
+// ─── PERFORMANCE TAB ─────────────────────────────────────────────────────────
+function PerformanceTab({accuracy, outcomes, alphaChart, apiLoaded}){
+  const byAction = accuracy?.by_action || {};
+  const total    = accuracy?.total_tracked || 0;
+  const ACTIONS  = ["BUY","HOLD","SELL","AVOID"];
+
+  const outcomeColor = o =>
+    o==="HIT" ? C.green : o==="MISS" ? C.red : o==="PARTIAL" ? C.orange : C.muted;
+
+  const recent = Array.isArray(outcomes?.outcomes) ? outcomes.outcomes.slice(0,20) : [];
+
+  return(
+    <div style={{animation:"fadeUp .3s ease"}}>
+      <div style={{marginBottom:14}}>
+        <div style={{fontSize:13,fontWeight:700,color:"white"}}>📊 Recommendation Performance</div>
+        <div style={{fontSize:9,color:C.muted,marginTop:1}}>
+          Track record — how accurate have our recommendations been vs NIFTY 50?
+          {total>0 && <span style={{marginLeft:6,color:C.textDim}}>{total} recommendations tracked</span>}
+        </div>
+      </div>
+
+      {IS_LIVE && apiLoaded && !accuracy && (
+        <EmptyState icon="📊" title="No performance data yet"
+          sub="Outcomes are tracked at 90, 180, and 365 day horizons. Come back after the first recommendations are 90+ days old. The tracker runs daily at 18:30 IST." />
+      )}
+
+      {/* Accuracy Scorecard */}
+      {accuracy && total > 0 && (
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:8}}>Accuracy by Signal Type</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
+            {ACTIONS.map(action=>{
+              const d = byAction[action];
+              if(!d || d.total_recs===0) return null;
+              const hr90   = d.hit_rate_90d;
+              const alpha90= d.avg_alpha_90d;
+              const good90 = hr90 != null && hr90 >= 55;
+              const alphaGood = alpha90 != null && alpha90 >= 3;
+              return(
+                <div key={action} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:11}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}>
+                    <Tag color={action==="BUY"?C.green:action==="SELL"?C.red:action==="HOLD"?C.teal:C.orange}>{action}</Tag>
+                    <span style={{fontSize:8,color:C.muted}}>{d.total_recs} recs</span>
+                  </div>
+                  {hr90!=null ? (
+                    <>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                        <span style={{fontSize:8,color:C.muted}}>Hit rate (90d)</span>
+                        <span style={{fontSize:11,fontWeight:700,color:good90?C.green:C.red}}>{hr90}%</span>
+                      </div>
+                      <div style={{background:C.border,borderRadius:3,height:3,marginBottom:7}}>
+                        <div style={{width:`${Math.min(hr90,100)}%`,height:"100%",borderRadius:3,background:good90?C.green:C.red}}/>
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{fontSize:8,color:C.muted,marginBottom:7}}>90d not reached yet</div>
+                  )}
+                  {alpha90!=null && (
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <span style={{fontSize:8,color:C.muted}}>Avg alpha (90d)</span>
+                      <span style={{fontSize:10,fontWeight:600,color:alphaGood?C.green:alpha90>=0?C.accent:C.red}}>
+                        {alpha90>=0?"+":""}{alpha90}% vs NIFTY
+                      </span>
+                    </div>
+                  )}
+                  {d.resolved_90d>0 && (
+                    <div style={{marginTop:5,fontSize:8,color:C.muted}}>{d.resolved_90d} resolved at 90d</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{marginTop:8,fontSize:8,color:C.muted,background:C.surface,borderRadius:5,padding:"4px 8px",display:"inline-block"}}>
+            Target: BUY hit rate &gt;55% · avg alpha &gt;+3% at 90 days vs NIFTY 50
+          </div>
+        </div>
+      )}
+
+      {/* Alpha chart (weekly rolling) */}
+      {alphaChart && alphaChart.series && alphaChart.series.length>0 && (
+        <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:9}}>Rolling Alpha (weekly avg, vs NIFTY 50)</div>
+          <div style={{display:"flex",alignItems:"flex-end",gap:3,height:60}}>
+            {alphaChart.series.slice(-20).map((pt,i)=>{
+              const v   = pt.avg_alpha_pct;
+              const pos = v >= 0;
+              const h   = Math.min(Math.abs(v)*4, 56);
+              return(
+                <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-end",position:"relative",height:60}}>
+                  {pos ? (
+                    <div title={`${pt.week}: ${v>=0?"+":""}${v}% (n=${pt.n})`}
+                      style={{width:"100%",height:h,background:`${C.green}aa`,borderRadius:"2px 2px 0 0",cursor:"default"}}/>
+                  ) : (
+                    <div title={`${pt.week}: ${v}% (n=${pt.n})`}
+                      style={{width:"100%",height:h,background:`${C.red}aa`,borderRadius:"0 0 2px 2px",position:"absolute",top:0,cursor:"default"}}/>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
+            <span style={{fontSize:7,color:C.muted}}>{alphaChart.series.slice(-20)[0]?.week||""}</span>
+            <span style={{fontSize:7,color:C.muted}}>{alphaChart.series.slice(-1)[0]?.week||""}</span>
+          </div>
+          <div style={{display:"flex",gap:10,marginTop:5}}>
+            <div style={{display:"flex",alignItems:"center",gap:3}}><div style={{width:8,height:8,background:C.green,borderRadius:1}}/><span style={{fontSize:7,color:C.muted}}>Outperformed NIFTY</span></div>
+            <div style={{display:"flex",alignItems:"center",gap:3}}><div style={{width:8,height:8,background:C.red,borderRadius:1}}/><span style={{fontSize:7,color:C.muted}}>Underperformed NIFTY</span></div>
+          </div>
+        </div>
+      )}
+
+      {/* Recent outcomes table */}
+      {recent.length > 0 && (
+        <div>
+          <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:8}}>Recent Resolved Outcomes (last 20)</div>
+          <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
+            <div style={{display:"grid",gridTemplateColumns:"80px 55px 70px 80px 80px 80px",gap:0,padding:"6px 10px",borderBottom:`1px solid ${C.border}`,background:C.bg}}>
+              {["Symbol","Action","Date","t90 Outcome","t90 Alpha","t180 Outcome"].map(h=>(
+                <span key={h} style={{fontSize:7,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</span>
+              ))}
+            </div>
+            {recent.map((r,i)=>(
+              <div key={r.id||i} style={{display:"grid",gridTemplateColumns:"80px 55px 70px 80px 80px 80px",gap:0,padding:"6px 10px",borderBottom:i<recent.length-1?`1px solid ${C.border}33`:"none",background:i%2===0?"transparent":C.bg+"44"}}>
+                <span style={{fontSize:9,fontWeight:700,color:"white",fontFamily:"JetBrains Mono"}}>{r.symbol}</span>
+                <Tag color={r.action==="BUY"?C.green:r.action==="SELL"?C.red:r.action==="HOLD"?C.teal:C.orange}>{r.action}</Tag>
+                <span style={{fontSize:8,color:C.muted}}>{(r.rec_date||"").slice(0,10)}</span>
+                {r.outcome_t90&&r.outcome_t90!=="PENDING" ? (
+                  <Tag color={outcomeColor(r.outcome_t90)} small>{r.outcome_t90}</Tag>
+                ) : (
+                  <span style={{fontSize:8,color:C.muted}}>Pending</span>
+                )}
+                {r.alpha_t90!=null ? (
+                  <span style={{fontSize:8,fontWeight:600,color:r.alpha_t90>=0?C.green:C.red}}>
+                    {r.alpha_t90>=0?"+":""}{(r.alpha_t90*100).toFixed(1)}%
+                  </span>
+                ) : <span style={{fontSize:8,color:C.muted}}>—</span>}
+                {r.outcome_t180&&r.outcome_t180!=="PENDING" ? (
+                  <Tag color={outcomeColor(r.outcome_t180)} small>{r.outcome_t180}</Tag>
+                ) : (
+                  <span style={{fontSize:8,color:C.muted}}>Pending</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App(){
   const [tab,setTab]=useState("discovery");
@@ -1718,6 +1869,10 @@ export default function App(){
   const [marketPulse,       setMarketPulse]       = useState(IS_LIVE ? [] : MARKET_PULSE);
   const [govAlerts,         setGovAlerts]         = useState(IS_LIVE ? [] : GOV_ALERTS);
   const [researchFeed,      setResearchFeed]      = useState(IS_LIVE ? [] : AI_RESEARCH_FEED);
+  // Performance / outcome tracking
+  const [perfAccuracy,      setPerfAccuracy]      = useState(null);
+  const [perfOutcomes,      setPerfOutcomes]      = useState(null);
+  const [perfAlphaChart,    setPerfAlphaChart]    = useState(null);
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -1757,6 +1912,15 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/portfolio/broken")
         .then(d=>{ if(d?.broken && Array.isArray(d.broken)) setBrokenSymbols(d.broken); })
+        .catch(()=>{}),
+      apiFetch("/api/performance/accuracy")
+        .then(d=>{ if(d?.by_action) setPerfAccuracy(d); })
+        .catch(()=>{}),
+      apiFetch("/api/performance/outcomes?days=180")
+        .then(d=>{ if(d) setPerfOutcomes(d); })
+        .catch(()=>{}),
+      apiFetch("/api/performance/alpha_chart?weeks=26")
+        .then(d=>{ if(d?.series) setPerfAlphaChart(d); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -1860,6 +2024,7 @@ export default function App(){
     {id:"discovery",icon:"🔍",label:"Discovery",badge:(discoveryUniverse||[]).length,badgeColor:C.cyan},
     {id:"recommendations",icon:"🎯",label:"Portfolio Recs"},
     {id:"portfolio",icon:"💼",label:"Portfolio",badge:portfolioAlerts.length,badgeColor:C.orange},
+    {id:"performance",icon:"📊",label:"Performance"},
     {id:"market",icon:"📡",label:"Market"},
     {id:"governance_research",icon:"🧬",label:"Gov Research",badge:(researchFeed||[]).filter(r=>r.debateStatus==="pending").length,badgeColor:C.purple},
     {id:"governance",icon:"🛡",label:"Governance",badge:openAlerts,badgeColor:C.red},
@@ -2025,6 +2190,15 @@ export default function App(){
                 apiFetch("/api/portfolio/broken").then(d=>{ if(d?.broken) setBrokenSymbols(d.broken); }).catch(()=>{});
               }}
             />}
+
+            {tab==="performance"&&(
+              <PerformanceTab
+                accuracy={perfAccuracy}
+                outcomes={perfOutcomes}
+                alphaChart={perfAlphaChart}
+                apiLoaded={apiLoaded}
+              />
+            )}
 
             {tab==="market"&&(
               <div style={{animation:"fadeUp .3s ease"}}>

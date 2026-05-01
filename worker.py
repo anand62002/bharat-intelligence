@@ -101,6 +101,27 @@ def job_research_agent() -> None:
         log.error("Research agent job failed: %s", exc, exc_info=True)
 
 
+def job_outcome_tracker() -> None:
+    """18:30 IST — resolve pending recommendation outcomes at 90/180/365d horizons."""
+    log.info("=" * 60)
+    log.info("  JOB START: Outcome Tracker (18:30 IST)")
+    log.info("=" * 60)
+    try:
+        from agents.outcome_tracker import run_outcome_tracking
+        result = run_outcome_tracking(dry_run=False)
+        log.info(
+            "Outcome tracker done — tracked=%d updated=%d hits=%d misses=%d avg_alpha_90d=%s",
+            result.get("tracked", 0), result.get("updated", 0),
+            result.get("hits", 0), result.get("misses", 0),
+            f"{result['avg_alpha_90d']:.2%}" if result.get("avg_alpha_90d") is not None else "N/A",
+        )
+        if result.get("errors"):
+            for e in result["errors"]:
+                log.warning("  outcome tracker error: %s", e)
+    except Exception as exc:
+        log.error("Outcome tracker job failed: %s", exc, exc_info=True)
+
+
 def job_portfolio_monitor() -> None:
     """Every 2h during market hours — danger / stoploss / target alerts."""
     log.info("-" * 50)
@@ -157,6 +178,17 @@ def build_scheduler():
         misfire_grace_time=1800,
     )
 
+    # ── Outcome tracker — after market close ─────────────────────────────────
+    scheduler.add_job(
+        job_outcome_tracker,
+        CronTrigger(hour=18, minute=30, timezone=IST),
+        id="outcome_tracker",
+        name="Outcome Tracker",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+
     # ── Portfolio monitor — 4× during market hours ────────────────────────────
     # 09:15 (open), 11:30 (mid-morning), 13:30 (post-lunch), 15:15 (pre-close)
     for h, m in [(9, 15), (11, 30), (13, 30), (15, 15)]:
@@ -192,6 +224,7 @@ def main() -> None:
         job_performance_tracker()
         job_research_agent()
         job_portfolio_monitor()
+        job_outcome_tracker()
         log.info("--now run complete. Starting scheduler...")
 
     try:
@@ -212,6 +245,7 @@ def main() -> None:
     log.info("    11:30  Portfolio Monitor")
     log.info("    13:30  Portfolio Monitor")
     log.info("    15:15  Portfolio Monitor")
+    log.info("    18:30  Outcome Tracker")
     log.info("  Press Ctrl+C to stop")
     log.info("=" * 60)
 

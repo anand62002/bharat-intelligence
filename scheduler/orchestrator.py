@@ -1070,6 +1070,36 @@ async def save_recs_node(state: OrchestratorState) -> dict:
                 if rec_id:
                     saved_ids.append(str(rec_id))
                     log.info("[%s] saved → id=%s", rec["symbol"], rec_id)
+                    # ── Seed PENDING outcome row so track record starts immediately ──
+                    try:
+                        from agents.outcome_tracker import seed_pending_outcome
+                        entry_low  = rec.get("entry_low")
+                        entry_high = rec.get("entry_high")
+                        if entry_low and entry_high:
+                            entry_price = (float(entry_low) + float(entry_high)) / 2
+                        elif entry_low:
+                            entry_price = float(entry_low)
+                        elif entry_high:
+                            entry_price = float(entry_high)
+                        else:
+                            entry_price = None
+                        gov_check = rec.get("gov_check") or {}
+                        val_kappa = None
+                        if isinstance(gov_check, dict) and "validation" in gov_check:
+                            val_kappa = gov_check["validation"].get("aggregate_kappa")
+                        seed_pending_outcome(
+                            client          = client,
+                            rec_id          = str(rec_id),
+                            symbol          = rec["symbol"],
+                            action          = rec.get("action", "BUY"),
+                            entry_price     = entry_price,
+                            rec_date        = date.today(),
+                            composite_score = rec.get("composite_score"),
+                            agent_signals   = rec.get("agent_signals", {}),
+                            validation_kappa = val_kappa,
+                        )
+                    except Exception as ot_exc:
+                        log.debug("[%s] outcome seed skipped: %s", rec["symbol"], ot_exc)
         except Exception as exc:
             log.error("[%s] save failed: %s", rec["symbol"], exc)
             errors.append(f"save {rec['symbol']}: {exc}")
