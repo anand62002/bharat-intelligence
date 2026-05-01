@@ -1869,6 +1869,8 @@ export default function App(){
   const [marketPulse,       setMarketPulse]       = useState(IS_LIVE ? [] : MARKET_PULSE);
   const [govAlerts,         setGovAlerts]         = useState(IS_LIVE ? [] : GOV_ALERTS);
   const [researchFeed,      setResearchFeed]      = useState(IS_LIVE ? [] : AI_RESEARCH_FEED);
+  // Market regime
+  const [marketRegime,      setMarketRegime]      = useState(null);
   // Performance / outcome tracking
   const [perfAccuracy,      setPerfAccuracy]      = useState(null);
   const [perfOutcomes,      setPerfOutcomes]      = useState(null);
@@ -1912,6 +1914,9 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/portfolio/broken")
         .then(d=>{ if(d?.broken && Array.isArray(d.broken)) setBrokenSymbols(d.broken); })
+        .catch(()=>{}),
+      apiFetch("/api/market/regime?days=1")
+        .then(d=>{ if(d?.current) setMarketRegime(d.current); })
         .catch(()=>{}),
       apiFetch("/api/performance/accuracy")
         .then(d=>{ if(d?.by_action) setPerfAccuracy(d); })
@@ -2049,6 +2054,25 @@ export default function App(){
               <span style={{fontSize:8,color:m.up?C.green:C.red}}>{m.change}</span>
             </div>
           ))}
+          {marketRegime&&(()=>{
+            const regimeColor={BULL:C.green,BEAR:C.red,HIGH_VOLATILITY:C.orange,SIDEWAYS:C.muted}[marketRegime.regime]||C.muted;
+            const regimeIcon={BULL:"🟢",BEAR:"🔴",HIGH_VOLATILITY:"🟠",SIDEWAYS:"⚪"}[marketRegime.regime]||"⬜";
+            const tip=[
+              `NIFTY: ${marketRegime.nifty_trend}`,
+              `VIX: ${marketRegime.vix_state}`,
+              `FII: ${marketRegime.fii_trend}`,
+              `Breadth: ${marketRegime.breadth_state}`,
+              `Momentum: ${marketRegime.momentum_state}`,
+              `Confidence: ${marketRegime.confidence}%`,
+            ].join(" | ");
+            return(
+              <div title={tip} style={{display:"flex",gap:3,alignItems:"center",whiteSpace:"nowrap",cursor:"help",borderLeft:`1px solid ${C.border}`,paddingLeft:10,flexShrink:0}}>
+                <span style={{fontSize:9}}>{regimeIcon}</span>
+                <span style={{fontSize:9,fontWeight:700,color:regimeColor}}>{marketRegime.regime}</span>
+                <span style={{fontSize:7,color:C.muted}}>{marketRegime.confidence}%</span>
+              </div>
+            );
+          })()}
         </div>
         <div style={{display:"flex",alignItems:"center",gap:7}}>
           {openAlerts>0&&<button onClick={()=>setTab("governance")} style={{background:C.red+"12",border:`1px solid ${C.red}44`,borderRadius:4,padding:"2px 7px",color:C.red,fontSize:9,fontWeight:700,cursor:"pointer"}}>⚠ {openAlerts}</button>}

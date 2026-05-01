@@ -101,6 +101,23 @@ def job_research_agent() -> None:
         log.error("Research agent job failed: %s", exc, exc_info=True)
 
 
+def job_regime_detector() -> None:
+    """06:30 IST — detect market regime before orchestrator runs."""
+    log.info("-" * 50)
+    log.info("  JOB START: Regime Detector (06:30 IST)")
+    log.info("-" * 50)
+    try:
+        from agents.regime_detector import detect_regime
+        result = detect_regime(dry_run=False)
+        log.info(
+            "Regime: %s (confidence=%d%%) — nifty=%s vix=%s fii=%s",
+            result.get("regime"), result.get("confidence", 0),
+            result.get("nifty_trend"), result.get("vix_state"), result.get("fii_trend"),
+        )
+    except Exception as exc:
+        log.error("Regime detector job failed: %s", exc, exc_info=True)
+
+
 def job_outcome_tracker() -> None:
     """18:30 IST — resolve pending recommendation outcomes at 90/180/365d horizons."""
     log.info("=" * 60)
@@ -178,6 +195,17 @@ def build_scheduler():
         misfire_grace_time=1800,
     )
 
+    # ── Regime detector — before orchestrator ────────────────────────────────
+    scheduler.add_job(
+        job_regime_detector,
+        CronTrigger(hour=6, minute=30, timezone=IST),
+        id="regime_detector",
+        name="Regime Detector",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+    )
+
     # ── Outcome tracker — after market close ─────────────────────────────────
     scheduler.add_job(
         job_outcome_tracker,
@@ -220,6 +248,7 @@ def main() -> None:
 
     if args.now:
         log.info("--now flag: running all jobs once before starting scheduler...")
+        job_regime_detector()
         job_orchestrator()
         job_performance_tracker()
         job_research_agent()
@@ -239,6 +268,7 @@ def main() -> None:
     log.info("  Bharat Intelligence Worker started")
     log.info("  Jobs scheduled (all times IST):")
     log.info("    06:00  Daily Orchestrator")
+    log.info("    06:30  Regime Detector")
     log.info("    07:00  Performance Tracker")
     log.info("    07:30  Research Agent")
     log.info("    09:15  Portfolio Monitor")

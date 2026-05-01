@@ -84,6 +84,7 @@ class OrchestratorState(TypedDict):
     dry_run:           bool
     symbols:           list[str]
     agent_weights:     dict[str, float]        # normalised weights, sum ≈ 1.0
+    current_regime:    Optional[dict]          # today's regime from market_regime table
     symbol_results:    dict[str, dict]         # symbol → {agent_name → result dict}
     recommendations:   list[dict]              # final recommendation dicts
     saved_ids:         list[str]               # Supabase rec IDs saved this run
@@ -163,12 +164,27 @@ def _normalise_weights(raw: dict[str, float]) -> dict[str, float]:
 def _composite_score(
     agent_results: dict[str, dict],
     weights:       dict[str, float],
+    regime:        Optional[str] = None,
 ) -> float:
     """
     Weighted average of all 7 agent scores (0–100).
     Agents with None, missing, or INSUFFICIENT_DATA scores are excluded from
     the average so a data-starved agent doesn't drag down a valid composite.
+
+    When `regime` is provided, applies regime-specific multipliers to agent
+    weights before computing the composite. Weights are re-normalised after
+    applying multipliers so they still sum to 1.0.
     """
+    # Apply regime multipliers if regime is known
+    effective_weights = weights
+    if regime:
+        try:
+            from agents.regime_detector import apply_regime_multipliers
+            effective_weights = apply_regime_multipliers(weights, regime)
+            log.debug("_composite_score: applied %s regime multipliers", regime)
+        except Exception as _re:
+            log.debug("_composite_score: regime multipliers unavailable — %s", _re)
+
     total_w   = 0.0
     total     = 0.0
     default_w = 1.0 / len(AGENT_NAMES)
@@ -183,7 +199,7 @@ def _composite_score(
             )
             continue
         score = res.get("score")
-        w     = weights.get(name, default_w)
+        w     = effective_weights.get(name, default_w)
         if score is not None:
             total   += float(score) * w
             total_w += w
@@ -635,7 +651,23 @@ async def load_weights_node(state: OrchestratorState) -> dict:
         "Agent weights: %s",
         {k: f"{v:.4f}" for k, v in weights.items()},
     )
-    return {"agent_weights": weights}
+
+    # ── Load current market regime ───────────────────────────────────��────────
+    current_regime = None
+    try:
+        from agents.regime_detector import load_current_regime
+        current_regime = load_current_regime()
+        if current_regime:
+            log.info(
+                "Current regime: %s (confidence=%s%%) — applying weight multipliers",
+                current_regime.get("regime"), current_regime.get("confidence"),
+            )
+        else:
+            log.info("No regime data available — using flat weights")
+    except Exception as _regime_exc:
+        log.warning("Regime load failed (non-fatal): %s", _regime_exc)
+
+    return {"agent_weights": weights, "current_regime": current_regime}
 
 
 async def run_agents_node(state: OrchestratorState) -> dict:
@@ -703,6 +735,7 @@ async def synthesise_node(state: OrchestratorState) -> dict:
     """
     symbol_results = state["symbol_results"]
     weights        = state["agent_weights"]
+    current_regime = state.get("current_regime")
     errors         = list(state["errors"])
 
     if not symbol_results:
@@ -732,8 +765,9 @@ async def synthesise_node(state: OrchestratorState) -> dict:
 
     for symbol, agent_results in symbol_results.items():
         try:
-            composite  = _composite_score(agent_results, weights)
-            agent_text = _format_agent_outputs(symbol, agent_results, weights)
+            regime_label = current_regime.get("regime") if current_regime else None
+            composite    = _composite_score(agent_results, weights, regime=regime_label)
+            agent_text   = _format_agent_outputs(symbol, agent_results, weights)
 
             synthesis_data: dict = {}
 
@@ -775,6 +809,24 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                         + "\n\n---\n\n"
                         + prompt
                     )
+
+                # ── Regime context injection ──────────────────────────────────
+                # Prepend current market regime so Claude calibrates conviction
+                # appropriately — e.g. RSI oversold in BEAR regime is not the
+                # same entry signal as RSI oversold in BULL regime.
+                if current_regime:
+                    regime_conf = current_regime.get("confidence", 0)
+                    regime_line = (
+                        f"\n## CURRENT MARKET REGIME\n"
+                        f"Regime: **{current_regime.get('regime')}** "
+                        f"(confidence: {regime_conf}%)\n"
+                        f"  - NIFTY trend: {current_regime.get('nifty_trend')}\n"
+                        f"  - India VIX: {current_regime.get('vix_state')}\n"
+                        f"  - FII 10d trend: {current_regime.get('fii_trend')}\n"
+                        f"  - Market breadth: {current_regime.get('breadth_state')}\n"
+                        f"  - Momentum (RSI): {current_regime.get('momentum_state')}\n\n"
+                    )
+                    prompt = regime_line + prompt
 
                 log.info("[%s] Calling Claude Sonnet for synthesis...", symbol)
                 response = await asyncio.to_thread(

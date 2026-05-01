@@ -1376,6 +1376,44 @@ async def get_market_pulse(
     return await _get_market_pulse()
 
 
+@app.get("/api/market/regime", tags=["market"])
+async def get_market_regime(
+    days: int = Query(30, description="Days of history to return"),
+    _:    None = Depends(require_api_key),
+):
+    """
+    Current market regime (BULL/BEAR/SIDEWAYS/HIGH_VOLATILITY) + last N days history.
+    Regime is detected daily at 06:30 IST before the main orchestrator run.
+
+    Returns:
+      { current: {...regime row...}, history: [...], last_updated: str }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        cutoff = str(date.today() - timedelta(days=days))
+        rows   = (
+            _supabase
+            .table("market_regime")
+            .select("regime_date,regime,confidence,nifty_trend,vix_state,fii_trend,breadth_state,momentum_state,raw_signals,created_at")
+            .gte("regime_date", cutoff)
+            .order("regime_date", desc=True)
+            .limit(days + 5)
+            .execute()
+            .data or []
+        )
+        current = rows[0] if rows else None
+        return {
+            "current":      current,
+            "history":      rows,
+            "last_updated": current.get("created_at") if current else None,
+        }
+    except Exception as exc:
+        log.error("market/regime error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ── 9. Warren Bot — on-demand Buffett quality analysis ────────────────────────
 
 async def _get_warren_bot_cached(symbol: str, force_refresh: bool) -> dict:

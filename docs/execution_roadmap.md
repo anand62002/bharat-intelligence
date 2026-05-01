@@ -11,7 +11,7 @@
 
 | # | Gap | Priority | Effort | Status |
 |---|-----|----------|--------|--------|
-| 1 | Backtesting Outcome Tracker | **Critical** | M | ⬜ |
+| 1 | Backtesting Outcome Tracker | **Critical** | M | ✅ |
 | 2 | Regime Detection Engine | **Critical** | M | ⬜ |
 | 3 | Earnings Calendar Integration | High | S | ⬜ |
 | 4 | Impact Cost Model | High | S | ⬜ |
