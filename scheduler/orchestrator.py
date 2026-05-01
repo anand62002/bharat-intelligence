@@ -850,6 +850,35 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             else:
                 synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
 
+            # ── Earnings guard — inject pre-earnings warning ──────────────────
+            # If earnings are within 14 days, add context to synthesis prompt
+            # and downgrade confidence for CRITICAL events (≤3 days).
+            try:
+                from agents.earnings_guard import check_pre_earnings
+                eg = check_pre_earnings(symbol, days_window=14)
+                if eg["has_upcoming_earnings"] and eg["days_until"] is not None:
+                    days_u = eg["days_until"]
+                    qtr    = eg.get("quarter") or ""
+                    eg_line = (
+                        f"\n⚠ EARNINGS ALERT: {symbol} reports {qtr} results "
+                        f"in {days_u} days ({eg['earnings_date']}).\n"
+                    )
+                    if eg["warning_level"] == "CRITICAL":
+                        eg_line += (
+                            "Binary event risk is CRITICAL — do NOT initiate new position. "
+                            "Downgrade BUY confidence by 20 points minimum.\n"
+                        )
+                    else:
+                        eg_line += "Consider waiting for results before entry.\n"
+                    synthesis_data.setdefault("synthesis", "")
+                    synthesis_data["synthesis"] = eg_line + (synthesis_data.get("synthesis") or "")
+                    if eg["warning_level"] == "CRITICAL":
+                        synthesis_data["confidence"] = max(
+                            0, float(synthesis_data.get("confidence", 50)) - 20
+                        )
+            except Exception as _eg_exc:
+                log.debug("[%s] Earnings guard skipped: %s", symbol, _eg_exc)
+
             # ── Pre-publication validation gate ───────────────────────────────
             # Three independent LLM judges score the synthesis across 5 rubrics.
             # Skipped when: no Anthropic client, dry_run=True, or fallback path.

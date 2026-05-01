@@ -101,6 +101,28 @@ def job_research_agent() -> None:
         log.error("Research agent job failed: %s", exc, exc_info=True)
 
 
+def job_earnings_calendar() -> None:
+    """08:00 IST — refresh earnings calendar for portfolio symbols."""
+    log.info("-" * 50)
+    log.info("  JOB START: Earnings Calendar (08:00 IST)")
+    log.info("-" * 50)
+    try:
+        from supabase import create_client
+        import os
+        client = create_client(os.getenv("SUPABASE_URL",""), os.getenv("SUPABASE_SERVICE_KEY",""))
+        rows   = client.table("portfolio_holdings").select("symbol").eq("status","OPEN").execute().data or []
+        symbols = [r["symbol"] for r in rows]
+        if not symbols:
+            log.info("No open holdings — skipping earnings calendar refresh")
+            return
+        from data.earnings_fetcher import fetch_upcoming_earnings, upsert_earnings_calendar
+        records = fetch_upcoming_earnings(symbols, days_ahead=30)
+        n = upsert_earnings_calendar(records)
+        log.info("Earnings calendar refresh done — %d records upserted for %d symbols", n, len(symbols))
+    except Exception as exc:
+        log.error("Earnings calendar job failed: %s", exc, exc_info=True)
+
+
 def job_regime_detector() -> None:
     """06:30 IST — detect market regime before orchestrator runs."""
     log.info("-" * 50)
@@ -195,6 +217,17 @@ def build_scheduler():
         misfire_grace_time=1800,
     )
 
+    # ── Earnings calendar — daily refresh ────────────────────────────────────
+    scheduler.add_job(
+        job_earnings_calendar,
+        CronTrigger(hour=8, minute=0, timezone=IST),
+        id="earnings_calendar",
+        name="Earnings Calendar",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+    )
+
     # ── Regime detector — before orchestrator ────────────────────────────────
     scheduler.add_job(
         job_regime_detector,
@@ -269,6 +302,7 @@ def main() -> None:
     log.info("  Jobs scheduled (all times IST):")
     log.info("    06:00  Daily Orchestrator")
     log.info("    06:30  Regime Detector")
+    log.info("    08:00  Earnings Calendar")
     log.info("    07:00  Performance Tracker")
     log.info("    07:30  Research Agent")
     log.info("    09:15  Portfolio Monitor")

@@ -542,6 +542,7 @@ def _transform_holding(row: dict) -> dict:
         "dangerTrigger":    row.get("danger_trigger"),
         "dangerWindow":     str(row.get("danger_window") or ""),
         "dangerSources":    danger_sources,
+        "earningsAlert":    row.get("_earnings_alert"),  # injected by get_portfolio
     }
 
 
@@ -966,6 +967,24 @@ async def get_portfolio(
         loop = asyncio.get_event_loop()
         rows = await loop.run_in_executor(None, _refresh_all, rows)
 
+    # ── Earnings alert enrichment (best-effort) ────────────────────────────────
+    try:
+        from agents.earnings_guard import check_pre_earnings
+        from concurrent.futures import ThreadPoolExecutor
+        symbols = [r["symbol"] for r in rows]
+
+        def _check_one(sym):
+            eg = check_pre_earnings(sym, days_window=7)
+            return sym, eg if eg["has_upcoming_earnings"] else None
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            eg_results = dict(pool.map(lambda s: _check_one(s), symbols))
+
+        for r in rows:
+            r["_earnings_alert"] = eg_results.get(r["symbol"])
+    except Exception:
+        pass  # non-fatal — skip earnings enrichment
+
     holdings = [_transform_holding(r) for r in rows]
     # Critical danger holdings first
     holdings.sort(key=lambda h: 0 if (h["dangerDropPct"] >= 70 and h["dangerConfidence"] >= 65) else 1)
@@ -1374,6 +1393,52 @@ async def get_market_pulse(
     Results are cached for 60 seconds.
     """
     return await _get_market_pulse()
+
+
+@app.get("/api/earnings/upcoming", tags=["portfolio"])
+async def get_upcoming_earnings(
+    days: int  = Query(14, description="Days ahead to look for earnings"),
+    _:    None = Depends(require_api_key),
+):
+    """
+    Returns upcoming earnings for all OPEN portfolio holdings within `days` days.
+    Also triggers a fresh fetch + upsert to keep the calendar current.
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        # Load portfolio symbols
+        rows = (
+            _supabase
+            .table("portfolio_holdings")
+            .select("symbol")
+            .eq("status", "OPEN")
+            .execute()
+            .data or []
+        )
+        symbols = [r["symbol"] for r in rows]
+        if not symbols:
+            return {"earnings": [], "symbols_checked": 0}
+
+        loop = asyncio.get_event_loop()
+
+        # Refresh calendar for portfolio symbols (non-blocking)
+        def _refresh():
+            from data.earnings_fetcher import fetch_upcoming_earnings, upsert_earnings_calendar
+            records = fetch_upcoming_earnings(symbols, days_ahead=days)
+            upsert_earnings_calendar(records)
+            return records
+
+        records = await loop.run_in_executor(None, _refresh)
+        return {
+            "earnings":        records,
+            "symbols_checked": len(symbols),
+            "days_ahead":      days,
+        }
+    except Exception as exc:
+        log.error("earnings/upcoming error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/market/regime", tags=["market"])

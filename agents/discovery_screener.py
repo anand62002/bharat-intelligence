@@ -361,6 +361,19 @@ def prescreen(
         )
         return False, []
 
+    # ── Earnings guard: skip symbols with earnings ≤5 days away ─────────────
+    try:
+        from agents.earnings_guard import check_pre_earnings
+        eg = check_pre_earnings(symbol, days_window=5)
+        if eg["has_upcoming_earnings"] and eg["warning_level"] == "CRITICAL":
+            log.debug(
+                "prescreen(%s): skipped — earnings in %s days (%s)",
+                symbol, eg.get("days_until"), eg.get("earnings_date"),
+            )
+            return False, []
+    except Exception:
+        pass  # non-fatal — continue screening
+
     close = df["Close"]
 
     # Filter 1: RSI 40–65

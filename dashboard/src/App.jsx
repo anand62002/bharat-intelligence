@@ -1436,6 +1436,8 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBrok
                     <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
                       <span style={{fontSize:10,fontWeight:700,color:isDanger?"#fca5a5":"white",fontFamily:"JetBrains Mono"}}>{h.symbol}</span>
                       {isDanger&&<span style={{background:C.red,color:"white",borderRadius:3,padding:"0px 4px",fontSize:8,fontWeight:800,animation:"criticalBadge 1.5s ease-in-out infinite"}}>🚨</span>}
+                      {h.earningsAlert?.warning_level==="CRITICAL"&&<span title={`Earnings ${h.earningsAlert.days_until}d away${h.earningsAlert.quarter?" ("+h.earningsAlert.quarter+")":""} — CRITICAL`} style={{fontSize:11,cursor:"default"}}>🗓</span>}
+                      {h.earningsAlert?.warning_level==="WARNING"&&<span title={`Earnings ${h.earningsAlert.days_until}d away${h.earningsAlert.quarter?" ("+h.earningsAlert.quarter+")":""} — WARNING`} style={{fontSize:11,cursor:"default",opacity:0.75}}>🗓</span>}
                     </div>
                     <div style={{fontSize:8,color:C.muted}}>{h.sector}</div>
                   </div>
