@@ -60,6 +60,7 @@ from agents.macro          import analyse as macro_analyse     # noqa: E402
 from agents.historical_rag import analyse as rag_analyse       # noqa: E402
 from agents.commodities    import analyse as comm_analyse      # noqa: E402
 from agents.warren_bot     import analyse as warren_analyse    # noqa: E402
+from agents.mgmt_quality   import analyse as mgmt_analyse      # noqa: E402
 from agents.discovery_screener import run_discovery             # noqa: E402
 
 # ── LangGraph ─────────────────────────────────────────────────────────────────
@@ -498,12 +499,14 @@ async def _run_agents_for_symbol(
     macro and commodities are passed in pre-fetched (symbol-agnostic).
     """
     # ── Phase 1 ──────────────────────────────────────────────────────────────
-    # warren_bot is fully symbol-independent so it runs here in parallel.
-    t_res, f_res, s_res, w_res = await asyncio.gather(
+    # warren_bot and mgmt_quality run in parallel; both are non-blocking
+    # (their scores are stored but don't feed into the main confidence calc).
+    t_res, f_res, s_res, w_res, mq_res = await asyncio.gather(
         asyncio.to_thread(lambda: tech_analyse(symbol)),
         asyncio.to_thread(lambda: fund_analyse(symbol)),
         asyncio.to_thread(lambda: sent_analyse(symbol)),
         asyncio.to_thread(lambda: warren_analyse(symbol)),
+        asyncio.to_thread(lambda: mgmt_analyse(symbol)),
         return_exceptions=True,
     )
 
@@ -521,6 +524,13 @@ async def _run_agents_for_symbol(
         results["warren_bot"] = None
     else:
         results["warren_bot"] = w_res
+
+    # mgmt_quality — stored separately; non-blocking
+    if isinstance(mq_res, Exception):
+        log.warning("[%s] mgmt_quality agent error: %s", symbol, mq_res)
+        results["mgmt_quality"] = None
+    else:
+        results["mgmt_quality"] = mq_res
 
     # Pre-fetched symbol-agnostic results
     results["macro"]       = macro_res
