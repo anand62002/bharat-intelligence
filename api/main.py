@@ -615,6 +615,9 @@ def _transform_recommendation(row: dict) -> dict:
         "pe":               meta.get("pe")                or 0,
         "mktCap":           meta.get("mkt_cap")           or "",
         "notInPortfolio":   True,
+        # Impact-cost / liquidity (stored in metadata by discovery screener)
+        "liquidityTier":    meta.get("liquidity_tier")    or None,
+        "impactCostPct":    meta.get("impact_cost_pct")   or None,
     }
 
 
@@ -1115,6 +1118,38 @@ async def resolve_symbol(
         "price_str":  f"₹{price:,.2f}" if price and exchange in ("NSE", "BSE", "INDEX") else (f"{price:.4f}" if price else None),
         "resolved":   True,
     }
+
+
+# ── 4b-ii. Liquidity / impact-cost probe ─────────────────────────────────────
+
+@app.get("/api/symbol/liquidity", tags=["portfolio"])
+async def symbol_liquidity(
+    q:            str   = Query(..., min_length=1, description="NSE symbol"),
+    trade_value:  float = Query(500_000, description="Trade size in INR (default ₹5 L)"),
+    _:            None  = Depends(require_api_key),
+):
+    """
+    Estimate impact cost (slippage) for executing a trade of `trade_value` INR
+    in the given symbol.
+
+    Returns
+    -------
+    {
+      symbol, impact_cost_pct, liquidity_tier, avg_daily_volume_inr,
+      avg_spread_pct, participation_rate, data_days, source, error
+    }
+
+    liquidity_tier: HIGH | MEDIUM | LOW | ILLIQUID | UNKNOWN
+    """
+    loop   = asyncio.get_event_loop()
+    plain  = q.replace(".NS", "").replace(".BO", "").upper()
+
+    def _run():
+        from data.impact_cost import estimate_impact_cost
+        return estimate_impact_cost(plain, trade_value_inr=trade_value)
+
+    result = await loop.run_in_executor(None, _run)
+    return result
 
 
 # ── 4c. Symbol override (manual fix) ─────────────────────────────────────────

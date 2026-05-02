@@ -261,6 +261,8 @@ class DiscoveryResult:
     composite_score:     float         # weighted average of all agent scores
     current_price:       Optional[float]
     sector:              str
+    liquidity_tier:      Optional[str] = None   # HIGH | MEDIUM | LOW | ILLIQUID | UNKNOWN
+    impact_cost_pct:     Optional[float] = None
     saved_rec_id:        Optional[str] = None   # Supabase recommendations.id
     discovered_at:       str = field(
         default_factory=lambda: datetime.utcnow().isoformat()
@@ -369,6 +371,19 @@ def prescreen(
             log.debug(
                 "prescreen(%s): skipped — earnings in %s days (%s)",
                 symbol, eg.get("days_until"), eg.get("earnings_date"),
+            )
+            return False, []
+    except Exception:
+        pass  # non-fatal — continue screening
+
+    # ── Liquidity guard: skip ILLIQUID symbols (impact cost ≥ 1%) ────────────
+    try:
+        from data.impact_cost import estimate_impact_cost
+        liq = estimate_impact_cost(symbol, trade_value_inr=5_00_000)
+        if liq.get("liquidity_tier") == "ILLIQUID":
+            log.debug(
+                "prescreen(%s): skipped — ILLIQUID (impact_cost=%.2f%%, daily_vol=₹%.0f)",
+                symbol, liq.get("impact_cost_pct") or 0, liq.get("avg_daily_volume_inr") or 0,
             )
             return False, []
     except Exception:
@@ -945,6 +960,8 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 "screen_triggers": result.screen_triggers,
                 "upside_basis":    result.upside_basis,
                 "upside_horizon":  result.upside_horizon,
+                "liquidity_tier":  result.liquidity_tier,
+                "impact_cost_pct": result.impact_cost_pct,
             },
         }
 
@@ -1137,6 +1154,17 @@ def run_discovery(
             price   = _current_price(symbol)
             sector  = _sector_from_fundamental(agent_results)
 
+            # ── Impact cost (liquidity) ───────────────────────────────────────
+            liq_tier = None
+            liq_cost = None
+            try:
+                from data.impact_cost import estimate_impact_cost
+                liq = estimate_impact_cost(symbol, trade_value_inr=5_00_000)
+                liq_tier = liq.get("liquidity_tier")
+                liq_cost = liq.get("impact_cost_pct")
+            except Exception:
+                pass
+
             dr = DiscoveryResult(
                 symbol            = symbol,
                 opportunity_tier  = tier,
@@ -1152,6 +1180,8 @@ def run_discovery(
                 composite_score   = comp_score,
                 current_price     = price,
                 sector            = sector,
+                liquidity_tier    = liq_tier,
+                impact_cost_pct   = liq_cost,
             )
 
             # ── Persist ───────────────────────────────────────────────────────

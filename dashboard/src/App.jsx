@@ -708,10 +708,12 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
               <span style={{fontSize:9,color:dsColor,fontWeight:700}}>Score {stock.discoveryScore}</span>
             </span>
             {stock.govCheck.flags.length>0&&<Tag color={C.accent} small>⚠ flagged</Tag>}
+            {stock.liquidityTier==="ILLIQUID"&&<Tag color={C.red} small>🚫 ILLIQUID</Tag>}
+            {stock.liquidityTier==="LOW"&&<Tag color="#f59e0b" small>⚡ LOW LIQ</Tag>}
           </div>
           <div style={{fontSize:11,color:C.textDim,marginBottom:2}}>{stock.name} · {stock.sector}</div>
           <div style={{fontSize:10,color:isCritical?C.green:C.cyan,lineHeight:1.5}}>💡 {stock.discoveryReason}</div>
-          <div style={{fontSize:9,color:C.muted,marginTop:2}}>conf {stock.confidence}% · valid till {stock.validTill} · {stock.horizon}</div>
+          <div style={{fontSize:9,color:C.muted,marginTop:2}}>conf {stock.confidence}% · valid till {stock.validTill} · {stock.horizon}{stock.impactCostPct!=null?` · impact ${stock.impactCostPct.toFixed(2)}%`:""}</div>
         </div>
         <RiskGauge score={stock.riskScore}/>
       </div>
