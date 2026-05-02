@@ -418,6 +418,21 @@ def _build_recommendation(
     action     = str(synthesis_data.get("action", "HOLD")).upper()
     confidence = float(synthesis_data.get("confidence", composite))
     risk_score = float(synthesis_data.get("risk_score", 100.0 - composite))
+    gov_screen = None   # set below; default None if governance screener fails
+
+    # ── Governance red-flag adjustment ────────────────────────────────────────
+    try:
+        from agents.governance_screener import screen_governance, adjust_risk_score
+        gov_screen = screen_governance(symbol)
+        if gov_screen["flag_count"] > 0:
+            risk_score = adjust_risk_score(risk_score, gov_screen)
+            log.info(
+                "[%s] governance flags=%d delta=+%d → risk_score=%.0f",
+                symbol, gov_screen["flag_count"],
+                gov_screen["risk_score_delta"], risk_score,
+            )
+    except Exception as exc:
+        log.debug("[%s] governance_screener failed (non-blocking): %s", symbol, exc)
 
     def _f(key: str, *fallbacks) -> Optional[float]:
         v = synthesis_data.get(key)
@@ -477,6 +492,8 @@ def _build_recommendation(
         "bear_case":         synthesis_data.get("bear_case", []),
         "composite_score":   round(composite, 2),
         "is_discovery":      False,
+        # Governance red flags (from governance_screener)
+        "gov_screen":        gov_screen,
     }
 
 
