@@ -184,6 +184,29 @@ def job_portfolio_risk() -> None:
         log.error("Portfolio risk job failed: %s", exc, exc_info=True)
 
 
+def job_options_snapshot() -> None:
+    """15:45 IST — capture options market snapshot (PCR, max pain, VIX) just before close."""
+    log.info("-" * 50)
+    log.info("  JOB START: Options Market Snapshot (15:45 IST)")
+    log.info("-" * 50)
+    try:
+        from agents.options_sentiment import analyse_options
+        symbols = ["NIFTY", "BANKNIFTY"]
+        for sym in symbols:
+            r = analyse_options(sym)
+            log.info(
+                "Options[%s] signal=%s score=%s pcr=%s vix=%s source=%s",
+                sym,
+                r.get("signal"),
+                r.get("score"),
+                r.get("pcr"),
+                r.get("india_vix"),
+                r.get("source"),
+            )
+    except Exception as exc:
+        log.error("Options snapshot job failed: %s", exc, exc_info=True)
+
+
 def job_portfolio_monitor() -> None:
     """Every 2h during market hours — danger / stoploss / target alerts."""
     log.info("-" * 50)
@@ -297,6 +320,17 @@ def build_scheduler():
         misfire_grace_time=1800,
     )
 
+    # ── Options snapshot — just before market close ───────────────────────────
+    scheduler.add_job(
+        job_options_snapshot,
+        CronTrigger(hour=15, minute=45, timezone=IST),
+        id="options_snapshot",
+        name="Options Market Snapshot",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+
     return scheduler
 
 
@@ -321,6 +355,7 @@ def main() -> None:
         job_research_agent()
         job_portfolio_monitor()
         job_outcome_tracker()
+        job_options_snapshot()
         log.info("--now run complete. Starting scheduler...")
 
     try:
@@ -343,6 +378,8 @@ def main() -> None:
     log.info("    11:30  Portfolio Monitor")
     log.info("    13:30  Portfolio Monitor")
     log.info("    15:15  Portfolio Monitor")
+    log.info("    15:45  Options Market Snapshot")
+    log.info("    16:00  Portfolio Risk")
     log.info("    18:30  Outcome Tracker")
     log.info("  Press Ctrl+C to stop")
     log.info("=" * 60)

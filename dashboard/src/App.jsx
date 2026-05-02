@@ -1360,6 +1360,57 @@ function BrokenSymbolsBanner({broken, onFixed}){
   );
 }
 
+// ── Options Market Signal Panel ───────────────────────────────────────────────
+function OptionsSignalPanel({signal}){
+  if(!signal) return null;
+  const sig  = signal.signal||"—";
+  const score= signal.score;
+  const pcr  = signal.pcr;
+  const vix  = signal.india_vix;
+  const mp   = signal.max_pain;
+  const src  = signal.source;
+  const ivhv = signal.iv_hv_ratio;
+  const sigColor = sig.includes("BULLISH")?C.green:sig.includes("BEARISH")?C.red:C.accent;
+  const pcrColor = pcr==null?C.muted:pcr<0.9?C.green:pcr>1.3?C.red:C.accent;
+  const vixColor = vix==null?C.muted:vix<16?C.green:vix>24?C.red:C.accent;
+  return(
+    <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:16,marginBottom:16}}>
+      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
+        <span style={{fontSize:18}}>📊</span>
+        <span style={{fontWeight:700,color:C.text}}>NIFTY Options Sentiment</span>
+        {src==='fallback'&&<span style={{fontSize:11,color:C.muted,background:C.surface,padding:'2px 6px',borderRadius:4}}>VIX-estimated</span>}
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(110px,1fr))',gap:8,marginBottom:12}}>
+        <div style={{background:C.surface,borderRadius:6,padding:'10px 8px',textAlign:'center'}}>
+          <div style={{fontSize:11,color:C.muted,marginBottom:4}}>Signal</div>
+          <div style={{fontWeight:700,fontSize:13,color:sigColor}}>{sig.replace('_',' ')}</div>
+        </div>
+        <div style={{background:C.surface,borderRadius:6,padding:'10px 8px',textAlign:'center'}}>
+          <div style={{fontSize:11,color:C.muted,marginBottom:4}}>Score</div>
+          <div style={{fontWeight:700,fontSize:13,color:score>=60?C.green:score<=35?C.red:C.accent}}>{score}/100</div>
+        </div>
+        <div style={{background:C.surface,borderRadius:6,padding:'10px 8px',textAlign:'center'}}>
+          <div style={{fontSize:11,color:C.muted,marginBottom:4}}>PCR</div>
+          <div style={{fontWeight:700,fontSize:13,color:pcrColor}}>{pcr!=null?pcr.toFixed(2):'—'}</div>
+        </div>
+        <div style={{background:C.surface,borderRadius:6,padding:'10px 8px',textAlign:'center'}}>
+          <div style={{fontSize:11,color:C.muted,marginBottom:4}}>India VIX</div>
+          <div style={{fontWeight:700,fontSize:13,color:vixColor}}>{vix!=null?vix.toFixed(1):'—'}</div>
+        </div>
+        <div style={{background:C.surface,borderRadius:6,padding:'10px 8px',textAlign:'center'}}>
+          <div style={{fontSize:11,color:C.muted,marginBottom:4}}>Max Pain</div>
+          <div style={{fontWeight:700,fontSize:13,color:C.text}}>{mp!=null?`₹${mp.toLocaleString('en-IN',{maximumFractionDigits:0})}`:'—'}</div>
+        </div>
+        <div style={{background:C.surface,borderRadius:6,padding:'10px 8px',textAlign:'center'}}>
+          <div style={{fontSize:11,color:C.muted,marginBottom:4}}>IV/HV</div>
+          <div style={{fontWeight:700,fontSize:13,color:ivhv!=null?(ivhv>1.3?C.red:ivhv<0.85?C.green:C.accent):C.muted}}>{ivhv!=null?ivhv.toFixed(2):'—'}</div>
+        </div>
+      </div>
+      {signal.commentary&&<div style={{fontSize:12,color:C.muted,lineHeight:1.5}}>{signal.commentary}</div>}
+    </div>
+  );
+}
+
 function PortfolioRiskPanel({risk}){
   if(!risk) return null;
   const vol=risk.portfolio_vol, var95=risk.var_95, var99=risk.var_99, cvar95=risk.cvar_95;
@@ -1414,7 +1465,7 @@ function PortfolioRiskPanel({risk}){
   );
 }
 
-function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBroken,portfolioRisk}){
+function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBroken,portfolioRisk,optionsSignal}){
   const alerts=computePortfolioAlerts(portfolio);
   const dangerHoldings=portfolio.filter(isCriticalDanger);
   // Sort portfolio: danger holdings first
@@ -1472,6 +1523,9 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBrok
           </div>
         ))}
       </div>
+
+      {/* Options market signal panel */}
+      <OptionsSignalPanel signal={optionsSignal}/>
 
       {/* Portfolio risk panel */}
       <PortfolioRiskPanel risk={portfolioRisk}/>
@@ -1957,6 +2011,7 @@ export default function App(){
   const [perfOutcomes,      setPerfOutcomes]      = useState(null);
   const [perfAlphaChart,    setPerfAlphaChart]    = useState(null);
   const [portfolioRisk,     setPortfolioRisk]     = useState(null);
+  const [optionsSignal,     setOptionsSignal]     = useState(null);
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -2011,6 +2066,9 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/portfolio/risk")
         .then(d=>{ if(d&&!d.error) setPortfolioRisk(d); })
+        .catch(()=>{}),
+      apiFetch("/api/options/NIFTY")
+        .then(d=>{ if(d&&d.signal&&d.signal!=="NO_DATA") setOptionsSignal(d); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -2294,6 +2352,7 @@ export default function App(){
               onOpenARIA={openARIA}
               brokenSymbols={brokenSymbols}
               portfolioRisk={portfolioRisk}
+              optionsSignal={optionsSignal}
               onFixBroken={()=>{
                 // Re-fetch portfolio prices and broken-symbols list after a fix
                 apiFetch("/api/portfolio").then(d=>{ if(Array.isArray(d)) setPortfolio(d); }).catch(()=>{});

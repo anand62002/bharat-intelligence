@@ -1849,7 +1849,39 @@ async def get_warren_bot(
     }
 
 
-# ── 10. WebSocket — real-time critical alerts ──────────────────────────────────
+# ── 10. Options market sentiment ──────────────────────────────────────────────
+
+@app.get("/api/options/{symbol}", tags=["analysis"])
+async def get_options_sentiment(
+    symbol:  str,
+    _:       None = Depends(require_api_key),
+):
+    """
+    Options market sentiment for an NSE index or equity symbol.
+
+    Tries NSE option chain (PCR, max pain, IV skew). Falls back to
+    India VIX + realized vol estimates when NSE blocks server-side access.
+
+    Response keys:
+      symbol, signal, score, pcr, max_pain, atm_iv, iv_skew,
+      india_vix, hv20, iv_hv_ratio, underlying_price,
+      source ("nse" | "fallback"), commentary, score_breakdown, agent_name
+    """
+    plain = symbol.strip().upper().replace(".NS", "").replace(".BO", "")
+    if not plain:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    try:
+        from agents.options_sentiment import analyse_options
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, analyse_options, plain
+        )
+        return result
+    except Exception as exc:
+        log.error("options_sentiment failed for %s: %s", plain, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── 11. WebSocket — real-time critical alerts ──────────────────────────────────
 
 @app.websocket("/ws/alerts")
 async def websocket_alerts(
