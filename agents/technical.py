@@ -159,6 +159,132 @@ def _vwap(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Volume Profile (POC / VAH / VAL / Volume Divergence)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _volume_profile(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    bins: int = 50,
+    value_area_pct: float = 0.70,
+) -> dict:
+    """
+    Compute a simplified fixed-range volume profile (FRVP) over the full
+    OHLCV window.
+
+    Returns
+    -------
+    {
+      poc:          float  — Point of Control (price with highest volume)
+      vah:          float  — Value Area High (top of 70% value area)
+      val:          float  — Value Area Low (bottom of 70% value area)
+      value_area_pct: float
+      above_poc:    bool   — current price above POC
+      current_price: float
+    }
+    """
+    prices = (high + low + close) / 3.0   # typical price
+    price_min = float(prices.min())
+    price_max = float(prices.max())
+
+    if price_max <= price_min:
+        return {}
+
+    edges    = np.linspace(price_min, price_max, bins + 1)
+    bin_mid  = (edges[:-1] + edges[1:]) / 2
+    vol_arr  = np.zeros(bins)
+
+    for tp, vol in zip(prices.values, volume.values):
+        idx = int(np.clip((tp - price_min) / (price_max - price_min) * bins, 0, bins - 1))
+        vol_arr[idx] += vol
+
+    total_vol   = vol_arr.sum()
+    if total_vol == 0:
+        return {}
+
+    poc_idx     = int(np.argmax(vol_arr))
+    poc         = float(bin_mid[poc_idx])
+
+    # Value area: expand around POC until vol >= value_area_pct of total
+    target = total_vol * value_area_pct
+    lo_idx = poc_idx
+    hi_idx = poc_idx
+    va_vol = vol_arr[poc_idx]
+    while va_vol < target and (lo_idx > 0 or hi_idx < bins - 1):
+        lo_can = vol_arr[lo_idx - 1] if lo_idx > 0 else 0
+        hi_can = vol_arr[hi_idx + 1] if hi_idx < bins - 1 else 0
+        if lo_can >= hi_can and lo_idx > 0:
+            lo_idx -= 1
+            va_vol += lo_can
+        elif hi_idx < bins - 1:
+            hi_idx += 1
+            va_vol += hi_can
+        else:
+            break
+
+    current = float(close.iloc[-1])
+    return {
+        "poc":              round(poc, 2),
+        "vah":              round(float(bin_mid[hi_idx]), 2),
+        "val":              round(float(bin_mid[lo_idx]), 2),
+        "value_area_pct":   value_area_pct,
+        "above_poc":        current > poc,
+        "current_price":    round(current, 2),
+    }
+
+
+def _volume_divergence(
+    close: pd.Series,
+    volume: pd.Series,
+    lookback: int = 20,
+) -> dict:
+    """
+    Detect volume divergence over the last `lookback` bars.
+
+    Bearish divergence: price making higher highs but volume declining.
+    Bullish divergence: price making lower lows but volume declining (selling exhaustion).
+
+    Returns
+    -------
+    {
+      signal:     'BULLISH_DIVERGENCE' | 'BEARISH_DIVERGENCE' | 'NONE'
+      price_trend: float  — close slope (normalized)
+      vol_trend:   float  — volume slope (normalized)
+    }
+    """
+    if len(close) < lookback:
+        return {"signal": "NONE", "price_trend": 0.0, "vol_trend": 0.0}
+
+    cl  = close.iloc[-lookback:].values.astype(float)
+    vol = volume.iloc[-lookback:].values.astype(float)
+    x   = np.arange(lookback, dtype=float)
+
+    def _slope(arr: np.ndarray) -> float:
+        if arr.std() == 0:
+            return 0.0
+        arr_n = (arr - arr.mean()) / arr.std()
+        return float(np.polyfit(x, arr_n, 1)[0])
+
+    p_slope = _slope(cl)
+    v_slope = _slope(vol)
+
+    if p_slope > 0.05 and v_slope < -0.05:
+        signal = "BEARISH_DIVERGENCE"   # price up, volume down → weakening move
+    elif p_slope < -0.05 and v_slope < -0.05:
+        signal = "BULLISH_DIVERGENCE"   # price down, volume down → selling exhaustion
+    else:
+        signal = "NONE"
+
+    return {
+        "signal":      signal,
+        "price_trend": round(p_slope, 4),
+        "vol_trend":   round(v_slope, 4),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Pattern detection
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -508,6 +634,8 @@ def analyse(symbol: str) -> dict:
     st_vals, st_dir = _supertrend(high, low, close, period=10, multiplier=3.0)
     obv      = _obv(close, volume)
     vwap     = _vwap(high, low, close, volume)
+    vol_prof = _volume_profile(high, low, close, volume)
+    vol_div  = _volume_divergence(close, volume)
 
     def _last(s: pd.Series) -> Optional[float]:
         v = s.dropna()
@@ -622,10 +750,16 @@ def analyse(symbol: str) -> dict:
             "notes":                mom_notes,
         },
         "volume_confirmation": {
-            "score":        vol_score,
-            "obv_trend":    obv_trend,
-            "volume_vs_avg": vol_ratio,
-            "notes":        vol_notes,
+            "score":             vol_score,
+            "obv_trend":         obv_trend,
+            "volume_vs_avg":     vol_ratio,
+            "notes":             vol_notes,
+            # Volume profile
+            "poc":               vol_prof.get("poc"),
+            "vah":               vol_prof.get("vah"),
+            "val":               vol_prof.get("val"),
+            "above_poc":         vol_prof.get("above_poc"),
+            "volume_divergence": vol_div.get("signal", "NONE"),
         },
         "pattern": {
             "score":    pat_score,
@@ -647,8 +781,22 @@ def analyse(symbol: str) -> dict:
             "vwap":             round(vwap_v, 2),
             "analyst_target":   round(analyst_target, 2) if analyst_target else None,
             "target_price_used": round(target_price, 2),
+            # Volume profile
+            "poc":              vol_prof.get("poc"),
+            "vah":              vol_prof.get("vah"),
+            "val":              vol_prof.get("val"),
+            "above_poc":        vol_prof.get("above_poc"),
+            "volume_divergence": vol_div.get("signal", "NONE"),
+            "vol_div_price_trend": vol_div.get("price_trend"),
+            "vol_div_vol_trend":   vol_div.get("vol_trend"),
         },
     }
+
+    # ── Volume divergence score adjustment (non-blocking) ─────────────────────
+    if vol_div.get("signal") == "BEARISH_DIVERGENCE":
+        total_score = max(0, total_score - 5)   # penalise weakening volume on uptrend
+    elif vol_div.get("signal") == "BULLISH_DIVERGENCE":
+        total_score = min(100, total_score + 3) # slight bonus for exhaustion signal
 
     result = {
         "signal":       signal,
