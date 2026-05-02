@@ -1360,7 +1360,61 @@ function BrokenSymbolsBanner({broken, onFixed}){
   );
 }
 
-function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBroken}){
+function PortfolioRiskPanel({risk}){
+  if(!risk) return null;
+  const vol=risk.portfolio_vol, var95=risk.var_95, var99=risk.var_99, cvar95=risk.cvar_95;
+  const sharpe=risk.sharpe, mdd=risk.max_drawdown_pct, hhi=risk.hhi;
+  const conc=risk.concentration_risk;
+  const concColor=conc==="HIGH"?C.red:conc==="MODERATE"?C.accent:C.green;
+  const varColor=var95>2?C.red:var95>1?C.accent:C.green;
+  const sharpeColor=sharpe!=null?(sharpe>=1?C.green:sharpe>=0?C.accent:C.red):C.muted;
+  const pairs=(risk.top_correlated_pairs||[]).filter(p=>Math.abs(p.correlation)>0.7);
+  return(
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <span style={{fontSize:11,fontWeight:700,color:C.accent}}>⚡ Portfolio Risk Dashboard</span>
+        <span style={{fontSize:9,color:C.muted}}>{risk.snapshot_date} · {risk.holdings_count} holdings</span>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:10}}>
+        {[
+          ["Ann. Vol",vol!=null?`${vol.toFixed(1)}%`:"—",vol>25?C.red:vol>15?C.accent:C.green],
+          ["VaR 95%",var95!=null?`${var95.toFixed(2)}%`:"—",varColor],
+          ["VaR 99%",var99!=null?`${var99.toFixed(2)}%`:"—",var99>3?C.red:C.accent],
+          ["CVaR 95%",cvar95!=null?`${cvar95.toFixed(2)}%`:"—",cvar95>3?C.red:C.accent],
+          ["Sharpe",sharpe!=null?sharpe.toFixed(2):"—",sharpeColor],
+          ["Max DD",mdd!=null?`${mdd.toFixed(1)}%`:"—",mdd>20?C.red:mdd>10?C.accent:C.green],
+        ].map(([l,v,col])=>(
+          <div key={l} style={{background:C.bg,borderRadius:5,padding:"6px 8px",textAlign:"center"}}>
+            <div style={{fontSize:8,color:C.muted,marginBottom:2}}>{l}</div>
+            <div style={{fontSize:12,fontWeight:800,color:col,fontFamily:"JetBrains Mono"}}>{v}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+        <span style={{fontSize:9,color:C.muted}}>Concentration:</span>
+        <Tag color={concColor} small>{conc} (HHI {hhi!=null?hhi.toFixed(3):"—"})</Tag>
+        {Object.entries(risk.sector_weights||{}).slice(0,4).map(([s,w])=>(
+          <span key={s} style={{fontSize:9,color:C.textDim}}>{s} {(w*100).toFixed(0)}%</span>
+        ))}
+      </div>
+      {pairs.length>0&&(
+        <div style={{marginTop:8,fontSize:9,color:C.muted}}>
+          <span style={{fontWeight:700,color:C.accent}}>Correlated pairs: </span>
+          {pairs.map(p=>(
+            <span key={p.a+p.b} style={{marginRight:10,color:Math.abs(p.correlation)>0.85?C.red:C.accent}}>
+              {p.a.replace(".NS","")} ↔ {p.b.replace(".NS","")} ({p.correlation>0?"+":""}{p.correlation.toFixed(2)})
+            </span>
+          ))}
+        </div>
+      )}
+      {(risk.warnings||[]).map((w,i)=>(
+        <div key={i} style={{marginTop:5,fontSize:9,color:C.accent,background:C.accent+"0d",borderRadius:4,padding:"3px 8px"}}>⚠ {w}</div>
+      ))}
+    </div>
+  );
+}
+
+function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBroken,portfolioRisk}){
   const alerts=computePortfolioAlerts(portfolio);
   const dangerHoldings=portfolio.filter(isCriticalDanger);
   // Sort portfolio: danger holdings first
@@ -1418,6 +1472,9 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBrok
           </div>
         ))}
       </div>
+
+      {/* Portfolio risk panel */}
+      <PortfolioRiskPanel risk={portfolioRisk}/>
 
       <div style={{display:"grid",gridTemplateColumns:"180px 1fr",gap:14}}>
         <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:11}}>
@@ -1899,6 +1956,7 @@ export default function App(){
   const [perfAccuracy,      setPerfAccuracy]      = useState(null);
   const [perfOutcomes,      setPerfOutcomes]      = useState(null);
   const [perfAlphaChart,    setPerfAlphaChart]    = useState(null);
+  const [portfolioRisk,     setPortfolioRisk]     = useState(null);
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -1950,6 +2008,9 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/performance/alpha_chart?weeks=26")
         .then(d=>{ if(d?.series) setPerfAlphaChart(d); })
+        .catch(()=>{}),
+      apiFetch("/api/portfolio/risk")
+        .then(d=>{ if(d&&!d.error) setPortfolioRisk(d); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -2232,6 +2293,7 @@ export default function App(){
               setPortfolio={setPortfolio}
               onOpenARIA={openARIA}
               brokenSymbols={brokenSymbols}
+              portfolioRisk={portfolioRisk}
               onFixBroken={()=>{
                 // Re-fetch portfolio prices and broken-symbols list after a fix
                 apiFetch("/api/portfolio").then(d=>{ if(Array.isArray(d)) setPortfolio(d); }).catch(()=>{});

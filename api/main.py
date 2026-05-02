@@ -1329,6 +1329,40 @@ async def get_portfolio_alerts(
     return rows
 
 
+# ── 5b. Portfolio Risk ────────────────────────────────────────────────────────
+
+@app.get("/api/portfolio/risk", tags=["portfolio"])
+async def get_portfolio_risk(
+    refresh: bool = Query(False, description="Recompute metrics live (slow)"),
+    _:       None = Depends(require_api_key),
+):
+    """
+    Portfolio-level risk metrics: VaR, CVaR, volatility, Sharpe, sector
+    concentration, HHI, correlation matrix, max drawdown per holding.
+
+    By default returns the last saved snapshot from `portfolio_risk_snapshots`.
+    Pass `?refresh=true` to recompute live (slow — fetches 1yr daily data).
+    """
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        from agents.portfolio_risk import run_portfolio_risk, load_latest_snapshot
+        if refresh:
+            return run_portfolio_risk(dry_run=False)
+        snap = load_latest_snapshot()
+        if snap:
+            return snap
+        # No snapshot yet — compute live on first call
+        return run_portfolio_risk(dry_run=False)
+
+    try:
+        result = await loop.run_in_executor(None, _run)
+        return result
+    except Exception as exc:
+        log.error("portfolio/risk error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ── 6. Governance alerts ───────────────────────────────────────────────────────
 
 @app.get("/api/governance/alerts", tags=["governance"])

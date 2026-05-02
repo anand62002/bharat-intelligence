@@ -161,6 +161,29 @@ def job_outcome_tracker() -> None:
         log.error("Outcome tracker job failed: %s", exc, exc_info=True)
 
 
+def job_portfolio_risk() -> None:
+    """16:00 IST — compute portfolio-level risk metrics after market close."""
+    log.info("-" * 50)
+    log.info("  JOB START: Portfolio Risk (16:00 IST)")
+    log.info("-" * 50)
+    try:
+        from agents.portfolio_risk import run_portfolio_risk
+        result = run_portfolio_risk(dry_run=False)
+        log.info(
+            "Portfolio risk done — vol=%.1f%% VaR95=%.2f%% Sharpe=%s HHI=%.3f warnings=%d",
+            result.get("portfolio_vol") or 0,
+            result.get("var_95") or 0,
+            result.get("sharpe"),
+            result.get("hhi") or 0,
+            len(result.get("warnings", [])),
+        )
+        if result.get("warnings"):
+            for w in result["warnings"]:
+                log.warning("  portfolio risk warning: %s", w)
+    except Exception as exc:
+        log.error("Portfolio risk job failed: %s", exc, exc_info=True)
+
+
 def job_portfolio_monitor() -> None:
     """Every 2h during market hours — danger / stoploss / target alerts."""
     log.info("-" * 50)
@@ -262,6 +285,17 @@ def build_scheduler():
             coalesce=True,
             misfire_grace_time=600,
         )
+
+    # ── Portfolio risk — after market close ───────────────────────────────────
+    scheduler.add_job(
+        job_portfolio_risk,
+        CronTrigger(hour=16, minute=0, timezone=IST),
+        id="portfolio_risk",
+        name="Portfolio Risk",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+    )
 
     return scheduler
 
