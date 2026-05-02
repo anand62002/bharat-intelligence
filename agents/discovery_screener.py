@@ -263,6 +263,9 @@ class DiscoveryResult:
     sector:              str
     liquidity_tier:      Optional[str] = None   # HIGH | MEDIUM | LOW | ILLIQUID | UNKNOWN
     impact_cost_pct:     Optional[float] = None
+    forward_pe:          Optional[float] = None
+    peg_ratio_fwd:       Optional[float] = None
+    eps_growth_pct:      Optional[float] = None
     saved_rec_id:        Optional[str] = None   # Supabase recommendations.id
     discovered_at:       str = field(
         default_factory=lambda: datetime.utcnow().isoformat()
@@ -962,6 +965,10 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 "upside_horizon":  result.upside_horizon,
                 "liquidity_tier":  result.liquidity_tier,
                 "impact_cost_pct": result.impact_cost_pct,
+                # Forward estimates
+                "forward_pe":      result.forward_pe,
+                "peg_ratio_fwd":   result.peg_ratio_fwd,
+                "eps_growth_pct":  result.eps_growth_pct,
             },
         }
 
@@ -1165,6 +1172,19 @@ def run_discovery(
             except Exception:
                 pass
 
+            # ── Forward estimates ─────────────────────────────────────────────
+            fwd_pe       = None
+            fwd_peg      = None
+            fwd_eps_gr   = None
+            try:
+                from data.forward_estimates import get_forward_estimates
+                fe = get_forward_estimates(symbol)
+                fwd_pe     = fe.get("forward_pe")
+                fwd_peg    = fe.get("peg_ratio")
+                fwd_eps_gr = fe.get("eps_growth_pct")
+            except Exception:
+                pass
+
             dr = DiscoveryResult(
                 symbol            = symbol,
                 opportunity_tier  = tier,
@@ -1182,6 +1202,9 @@ def run_discovery(
                 sector            = sector,
                 liquidity_tier    = liq_tier,
                 impact_cost_pct   = liq_cost,
+                forward_pe        = fwd_pe,
+                peg_ratio_fwd     = fwd_peg,
+                eps_growth_pct    = fwd_eps_gr,
             )
 
             # ── Persist ───────────────────────────────────────────────────────

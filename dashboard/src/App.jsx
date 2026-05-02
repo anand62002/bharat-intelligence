@@ -725,6 +725,26 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
           </div>
         ))}
       </div>
+      {/* Forward estimates mini-row */}
+      {(stock.forwardPe!=null||stock.pegRatio!=null||stock.epsGrowthPct!=null)&&(
+        <div style={{display:"flex",gap:5,marginBottom:7,flexWrap:"wrap"}}>
+          {stock.forwardPe!=null&&(
+            <span style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 7px",fontSize:9,color:C.accent}}>
+              <span style={{color:C.muted}}>Fwd PE </span>{stock.forwardPe.toFixed(1)}x
+            </span>
+          )}
+          {stock.pegRatio!=null&&(
+            <span style={{background:C.panel,border:`1px solid ${stock.pegRatio<1?C.green+"55":stock.pegRatio>2?C.red+"55":C.border}`,borderRadius:4,padding:"2px 7px",fontSize:9,color:stock.pegRatio<1?C.green:stock.pegRatio>2?C.red:C.accent}}>
+              <span style={{color:C.muted}}>PEG </span>{stock.pegRatio.toFixed(2)}
+            </span>
+          )}
+          {stock.epsGrowthPct!=null&&(
+            <span style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 7px",fontSize:9,color:stock.epsGrowthPct>0?C.green:C.red}}>
+              <span style={{color:C.muted}}>EPS gr </span>{stock.epsGrowthPct>0?"+":""}{stock.epsGrowthPct.toFixed(1)}%
+            </span>
+          )}
+        </div>
+      )}
       {/* Screen triggers */}
       <div style={{marginBottom:7}}>
         <div style={{fontSize:9,color:C.muted,marginBottom:3}}>Why it screened today:</div>

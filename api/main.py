@@ -618,6 +618,10 @@ def _transform_recommendation(row: dict) -> dict:
         # Impact-cost / liquidity (stored in metadata by discovery screener)
         "liquidityTier":    meta.get("liquidity_tier")    or None,
         "impactCostPct":    meta.get("impact_cost_pct")   or None,
+        # Forward estimates (from fundamental agent or metadata)
+        "forwardPe":        meta.get("forward_pe")        or None,
+        "pegRatio":         meta.get("peg_ratio_fwd") or meta.get("peg_ratio") or None,
+        "epsGrowthPct":     meta.get("eps_growth_pct")    or None,
     }
 
 
@@ -1729,6 +1733,42 @@ async def get_performance_alpha_chart(
         return {"series": series}
     except Exception as exc:
         log.error("performance/alpha_chart error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/estimates/{symbol}", tags=["analysis"])
+async def get_forward_estimates_endpoint(
+    symbol:        str,
+    force_refresh: bool = Query(False, description="Bypass 24h cache and re-fetch"),
+    _:             None = Depends(require_api_key),
+):
+    """
+    Forward earnings estimates for a symbol — analyst EPS, revenue, forward PE, PEG.
+    Cached in Supabase `forward_estimates_cache` for 24 hours.
+
+    Returns
+    -------
+    {
+      symbol, eps_current_yr, eps_next_yr, eps_growth_pct,
+      forward_pe, peg_ratio, current_price, analyst_count,
+      valuation_signal, forward_pe_comment, peg_comment, summary,
+      cached_at, source, error
+    }
+    """
+    loop  = asyncio.get_event_loop()
+    plain = symbol.replace(".NS", "").replace(".BO", "").upper()
+
+    def _run():
+        from data.forward_estimates import get_forward_estimates, interpret_estimates
+        est    = get_forward_estimates(plain, force_refresh=force_refresh)
+        interp = interpret_estimates(est)
+        return {**est, **interp}
+
+    try:
+        result = await loop.run_in_executor(None, _run)
+        return result
+    except Exception as exc:
+        log.error("estimates/%s error: %s", plain, exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 

@@ -1711,6 +1711,24 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
         },
     }
 
+    # ── 9b. Forward estimates enrichment (non-blocking) ──────────────────────
+    forward_est: dict = {}
+    forward_interp: dict = {}
+    try:
+        from data.forward_estimates import get_forward_estimates, interpret_estimates
+        fe = get_forward_estimates(symbol)
+        if fe.get("forward_pe") is not None or fe.get("eps_current_yr") is not None:
+            forward_est   = fe
+            forward_interp = interpret_estimates(fe)
+            data_sources.append("yfinance_forward_estimates")
+            # Prefer analyst forward PE over trailing PE when available
+            if fe.get("forward_pe") is not None:
+                detail.setdefault("metrics", {})["forward_pe"]     = fe["forward_pe"]
+                detail.setdefault("metrics", {})["peg_ratio_fwd"]  = fe.get("peg_ratio")
+                detail.setdefault("metrics", {})["eps_growth_pct"] = fe.get("eps_growth_pct")
+    except Exception as exc:
+        log.debug("forward_estimates enrichment failed for %s: %s", symbol, exc)
+
     result = {
         "signal":            signal,
         "score":             total_score,
@@ -1720,6 +1738,10 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
         "danger_confidence": danger_confidence,
         "data_sources":      data_sources,
         "agent_name":        AGENT_NAME,
+        # Forward estimates (None if unavailable)
+        "forward_estimates": forward_est if forward_est else None,
+        "forward_valuation": forward_interp.get("valuation_signal"),
+        "forward_summary":   forward_interp.get("summary"),
     }
 
     # ── 10. Persist agent run ─────────────────────────────────────────────────
