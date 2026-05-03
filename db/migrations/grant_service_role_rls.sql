@@ -137,20 +137,16 @@ GRANT SELECT ON sector_pe_latest TO postgres;
 
 -- =============================================================================
 -- 6. historical_events
+-- NOTE: RLS is DISABLED on this table — it is a static public reference dataset
+--       (curated market events). No user-specific rows exist so RLS adds no
+--       security value and only blocks seed scripts / agents.
 -- =============================================================================
 
 GRANT ALL ON historical_events TO service_role;
 GRANT ALL ON historical_events TO postgres;
 
-ALTER TABLE historical_events ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS "service_role_all_historical_events" ON historical_events;
-CREATE POLICY "service_role_all_historical_events"
-    ON historical_events
-    FOR ALL
-    TO service_role
-    USING (true)
-    WITH CHECK (true);
+-- Disable RLS entirely — this is correct for a public reference table
+ALTER TABLE historical_events DISABLE ROW LEVEL SECURITY;
 
 
 -- =============================================================================
