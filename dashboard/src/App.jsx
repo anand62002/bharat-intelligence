@@ -409,6 +409,107 @@ const GovShield=({size=18})=>(
   </svg>
 );
 
+// ─── VALUATION SCENARIOS PANEL ───────────────────────────────────────────────
+const ValuationScenariosPanel=({val,onFetch,symbol})=>{
+  if(!val){
+    return(
+      <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:"8px 12px",marginTop:10,marginBottom:6,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <span style={{fontSize:10,color:C.muted}}>📐 Valuation Scenarios — not loaded</span>
+        {onFetch&&<button onClick={onFetch} style={{fontSize:10,background:C.accent,color:'#000',border:'none',borderRadius:4,padding:'3px 8px',cursor:'pointer'}}>Load</button>}
+      </div>
+    );
+  }
+  const rec=val.recommendation||"—";
+  const recColor=rec==="STRONG_BUY"||rec==="BUY"?C.green:rec==="SELL"?C.red:rec==="HOLD"?C.accent:C.muted;
+  const sc=val.scenarios||{};
+  const fv=val.fair_value_range||{};
+  const cp=val.current_price;
+  const tornado=val.tornado||[];
+  const maxImpact=tornado[0]?.impact||1;
+  return(
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:"10px 12px",marginTop:10,marginBottom:6}}>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+        <span style={{fontSize:13}}>📐</span>
+        <span style={{fontWeight:700,fontSize:12,color:C.text}}>Valuation Scenarios</span>
+        <span style={{fontSize:11,color:recColor,fontWeight:700}}>{rec.replace('_',' ')}</span>
+        {val.data_quality==='ESTIMATED'&&<span style={{fontSize:9,color:C.muted,background:C.card,padding:'1px 5px',borderRadius:3}}>estimated</span>}
+      </div>
+
+      {/* Three scenario tiles */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6,marginBottom:10}}>
+        {['BEAR','BASE','BULL'].map(sn=>{
+          const s=sc[sn];
+          if(!s) return <div key={sn}/>;
+          const iv=s.intrinsic_value;
+          const mos=s.margin_of_safety_pct;
+          const color=sn==='BULL'?C.green:sn==='BEAR'?C.red:C.accent;
+          const mosColor=mos>20?C.green:mos>0?C.accent:C.red;
+          return(
+            <div key={sn} style={{background:C.card,border:`1px solid ${color}33`,borderRadius:6,padding:'8px 6px',textAlign:'center'}}>
+              <div style={{fontSize:9,fontWeight:700,color,marginBottom:4}}>{sn}</div>
+              <div style={{fontWeight:800,fontSize:13,color:C.text}}>
+                {iv!=null?`₹${iv.toLocaleString('en-IN',{maximumFractionDigits:0})}`:'—'}
+              </div>
+              <div style={{fontSize:9,color:mosColor,marginTop:3}}>
+                MOS {mos!=null?`${mos>0?'+':''}${mos.toFixed(0)}%`:'—'}
+              </div>
+              <div style={{fontSize:9,color:C.muted,marginTop:2}}>
+                g={s.growth_rate?.toFixed(1)}% w={s.wacc?.toFixed(1)}%
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Fair value range bar */}
+      {fv.low&&fv.high&&cp&&(
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:9,color:C.muted,marginBottom:4}}>
+            Fair Value Range: ₹{fv.low.toLocaleString('en-IN',{maximumFractionDigits:0})} – ₹{fv.high.toLocaleString('en-IN',{maximumFractionDigits:0})}
+            &nbsp;·&nbsp;Current: ₹{cp.toLocaleString('en-IN',{maximumFractionDigits:0})}
+          </div>
+          <div style={{background:C.card,borderRadius:4,height:8,position:'relative',overflow:'hidden'}}>
+            {/* Range bar */}
+            <div style={{
+              position:'absolute',height:'100%',
+              left:`${Math.min(100,Math.max(0,(fv.low/fv.high)*60))}%`,
+              width:`${Math.min(100,(1-(fv.low/fv.high))*60)}%`,
+              background:`${C.accent}44`,borderRadius:4
+            }}/>
+            {/* Current price marker */}
+            {(()=>{const pct=Math.min(100,Math.max(0,(cp/fv.high)*60));return(
+              <div style={{position:'absolute',height:'100%',width:2,
+                background:cp<fv.low?C.red:cp>fv.high?C.green:C.text,
+                left:`${pct}%`,top:0}}/>
+            )})()}
+          </div>
+        </div>
+      )}
+
+      {/* Sensitivity Tornado */}
+      {tornado.length>0&&(
+        <div>
+          <div style={{fontSize:9,fontWeight:700,color:C.muted,marginBottom:4,textTransform:'uppercase'}}>Sensitivity Tornado</div>
+          {tornado.map(row=>{
+            const barW=Math.round((row.impact/maxImpact)*100);
+            return(
+              <div key={row.assumption} style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}>
+                <div style={{fontSize:9,color:C.textDim,width:90,flexShrink:0}}>{row.assumption}</div>
+                <div style={{flex:1,background:C.card,borderRadius:3,height:6,overflow:'hidden'}}>
+                  <div style={{width:`${barW}%`,height:'100%',background:C.accent,borderRadius:3}}/>
+                </div>
+                <div style={{fontSize:9,color:C.muted,width:45,textAlign:'right'}}>
+                  ±{row.impact_pct?.toFixed(0)}%
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── WARREN BOT PANEL ────────────────────────────────────────────────────────
 const WarrenBotPanel=({wb})=>{
   if(!wb) return(
@@ -904,6 +1005,17 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discover
 
             {/* Warren Bot panel */}
             <WarrenBotPanel wb={selected.warrenBot}/>
+
+            {/* Valuation Scenarios panel */}
+            <ValuationScenariosPanel
+              val={valuationCache[selected.symbol]}
+              symbol={selected.symbol}
+              onFetch={()=>{
+                apiFetch(`/api/valuation/${encodeURIComponent(selected.symbol)}`)
+                  .then(d=>{if(d&&!d.error)setValuationCache(prev=>({...prev,[selected.symbol]:d}));})
+                  .catch(()=>{});
+              }}
+            />
 
             {/* Risks + Catalysts */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
@@ -2012,6 +2124,7 @@ export default function App(){
   const [perfAlphaChart,    setPerfAlphaChart]    = useState(null);
   const [portfolioRisk,     setPortfolioRisk]     = useState(null);
   const [optionsSignal,     setOptionsSignal]     = useState(null);
+  const [valuationCache,    setValuationCache]    = useState({});   // keyed by symbol
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -2339,6 +2452,15 @@ export default function App(){
                           ))}
                         </div>
                         <WarrenBotPanel wb={r.warrenBot}/>
+                        <ValuationScenariosPanel
+                          val={valuationCache[r.symbol]}
+                          symbol={r.symbol}
+                          onFetch={()=>{
+                            apiFetch(`/api/valuation/${encodeURIComponent(r.symbol)}`)
+                              .then(d=>{if(d&&!d.error)setValuationCache(prev=>({...prev,[r.symbol]:d}));})
+                              .catch(()=>{});
+                          }}
+                        />
                       </>);})()}
                     </div>
                   )}

@@ -1881,7 +1881,44 @@ async def get_options_sentiment(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-# ── 11. WebSocket — real-time critical alerts ──────────────────────────────────
+# ── 11. Valuation scenarios (bull / base / bear DCF) ─────────────────────────
+
+@app.get("/api/valuation/{symbol}", tags=["analysis"])
+async def get_valuation_scenarios(
+    symbol: str,
+    _:      None = Depends(require_api_key),
+):
+    """
+    Bull / base / bear DCF valuation scenarios for an NSE equity symbol.
+
+    Uses 3-stage DCF identical to warren_bot but with three parameterised
+    scenarios and a sensitivity tornado showing which assumption matters most.
+
+    Response keys:
+      symbol, current_price, base_assumptions,
+      scenarios {BULL/BASE/BEAR each: intrinsic_value, margin_of_safety_pct,
+                 upside_pct, growth_rate, wacc, terminal_growth},
+      fair_value_range {low, mid, high},
+      margin_of_safety {bull, base, bear},
+      upside_pct {bull, base, bear},
+      tornado [{assumption, low_iv, high_iv, impact, impact_pct}],
+      recommendation, data_quality, agent_name
+    """
+    plain = symbol.strip().upper().replace(".NS", "").replace(".BO", "")
+    if not plain:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    try:
+        from agents.valuation_scenarios import run_scenarios
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, run_scenarios, plain
+        )
+        return result
+    except Exception as exc:
+        log.error("valuation_scenarios failed for %s: %s", plain, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── 12. WebSocket — real-time critical alerts ──────────────────────────────────
 
 @app.websocket("/ws/alerts")
 async def websocket_alerts(
