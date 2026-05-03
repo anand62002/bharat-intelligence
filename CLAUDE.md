@@ -88,7 +88,8 @@ Stock analysis/
 │       ├── fix_rls_permissions.sql
 │       ├── sector_pe_snapshots.sql
 │       ├── create_warren_bot_cache.sql         # warren_bot 24-hr result cache
-│       └── create_discovery_runs.sql           # ← NEW: daily screened-symbol log
+│       ├── create_discovery_runs.sql           # daily screened-symbol log
+│       └── create_earnings_calendar.sql        # ← NEW: earnings dates for earnings_guard
 │
 ├── tests/                      # pytest — one test file per module
 ├── requirements.txt
@@ -115,10 +116,18 @@ Stock analysis/
 | `enhancement_proposals` | User-requested enhancements | `title, description, cost_usd, status, is_paid` |
 | `warren_bot_cache` | 24-hr on-demand cache | `symbol (PK), result (jsonb), cached_at` |
 | `discovery_runs` | Daily screened-symbol log | `run_date (unique), slice_symbols, passed_symbols, discovery_symbols, coverage_stats, total_screened, total_passed, total_discoveries` |
+| `recommendation_outcomes` | Forward outcome tracker | `rec_id, symbol, action, entry_price, rec_date, price_t90/t180/t365, nifty_t90/t180/t365, alpha_t90/t180/t365, outcome_t90/t180/t365, nifty_entry, composite_score, validation_kappa` |
+| `market_regime` | Daily market regime | `regime_date (unique), regime, confidence, nifty_trend, vix_state, fii_trend, breadth_state, momentum_state, raw_signals (jsonb)` |
+| `earnings_calendar` | Earnings dates for pre-earnings guard | `symbol, earnings_date, quarter, source, confirmed` |
+| `backtest_results` | Historical signal backtest runs | `period_start/end, split_type, hit_rate_90d, avg_alpha_90d/180d, sharpe_ratio, max_drawdown, signal_details (jsonb)` — **PENDING: create when P1-A built** |
 
-> **Pending migrations (run in Supabase SQL Editor):**
-> - `db/migrations/create_warren_bot_cache.sql` — required for warren_bot caching
-> - ~~`db/migrations/create_discovery_runs.sql`~~ — ✅ already applied
+> **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime)
+>
+> **New pending migration (run in Supabase SQL Editor):**
+> - `db/migrations/create_earnings_calendar.sql` — required for earnings_guard primary lookup
+>
+> **Pending data seed:**
+> - `python -m db.seed_historical_events_comprehensive --append` — loads 57 new historical events (Gap 11)
 
 ---
 
@@ -420,3 +429,41 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | `f5952d9` | Add GitHub Actions: CI, deploy, and governance rollback workflows |
 | `452c5e5` | Fix worker logging to stdout so Railway shows [inf] not [err] |
 | `5b1fb1d` | Symbol auto-resolution, live price refresh, /api/symbol/resolve endpoint |
+
+---
+
+## Known Issues (tracked)
+
+| Issue | Severity | File | Fix in Plan |
+|---|---|---|---|
+| `warren_bot._log_to_supabase()` tries to write `notes` column to `agent_performance` (doesn't exist) → recurring WARNING in logs | LOW | `agents/warren_bot.py` ~line 625 | P0-C |
+| Options signal is India VIX proxy, not real option chain (NSE blocks server-side) | HIGH | `data/options_fetcher.py` | P1-B |
+| WACC hardcoded 12% for all stocks — wrong for capital-heavy / low-risk sectors | HIGH | `agents/valuation_scenarios.py`, `agents/warren_bot.py` | P0-A |
+| Macro score identical for all stocks in same pipeline run | HIGH | `scheduler/orchestrator.py` | P0-B |
+| DCF owner earnings uses full capex (not 0.6× maintenance) in `valuation_scenarios.py` | MEDIUM | `agents/valuation_scenarios.py` | P0-D |
+| Discovery CRITICAL threshold (upside≥100%) produces false positives from data artefacts | MEDIUM | `agents/discovery_screener.py` | P0-E |
+| FII filter in discovery pre-screen is index-level, not stock-specific | MEDIUM | `agents/discovery_screener.py` | P0-F |
+| All 3 synthesis validation judges use Claude variants — correlated sampling | MEDIUM | `scheduler/synthesis_validator.py` | P1-C |
+| `earnings_calendar` table not yet created — earnings_guard falls through to yfinance | MEDIUM | `agents/earnings_guard.py` | Pre-work migration |
+| 57 new historical RAG events not yet seeded to DB | LOW | `db/seed_historical_events_comprehensive.py` | Pre-work seed |
+| `fallback_synthesis` thresholds (≥72=BUY) uncalibrated | LOW | `scheduler/orchestrator.py` | P1-D |
+| Single data provider (screener.in) — no fallback if blocked | HIGH | `data/fetchers.py` | P2-A |
+
+---
+
+## Execution Roadmap
+
+Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project root.
+
+**Phase summary:**
+- **Pre-work**: Run `create_earnings_calendar.sql` migration + seed 150 RAG events
+- **Step 9**: Analyse Railway + Vercel logs before coding (see EXECUTION_PLAN.md for prompts)
+- **Phase 0 (P0)**: Zero-cost code fixes — WACC, macro sensitivity, DCF fix, discovery thresholds (improves next run)
+- **Phase 1 (P1)**: Historical backtest framework, options paid feed, GPT-4o 3rd judge
+- **Phase 2 (P2)**: Data diversification, RAG auto-refresh, portfolio concentration alerts
+- **Phase 3 (P3)**: Position sizing, correlation alerts
+- **Phase 4 (P4)**: Commentary grounding, symbol cache persistence, governance numerical check
+- **Phase 5 (P5)**: Robust forward paper portfolio tracker + attribution analysis
+- **Phase 6 (P6)**: Dashboard performance tab (hit rate, alpha, backtest results)
+
+**Estimated additional monthly cost at full build:** ₹1,039–3,498/month (Quantsapp options feed + Trendlyne fundamentals backup + OpenAI GPT-4o-mini judges)
