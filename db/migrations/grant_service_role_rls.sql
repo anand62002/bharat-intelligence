@@ -136,7 +136,25 @@ GRANT SELECT ON sector_pe_latest TO postgres;
 
 
 -- =============================================================================
--- 6. research_proposals
+-- 6. historical_events
+-- =============================================================================
+
+GRANT ALL ON historical_events TO service_role;
+GRANT ALL ON historical_events TO postgres;
+
+ALTER TABLE historical_events ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "service_role_all_historical_events" ON historical_events;
+CREATE POLICY "service_role_all_historical_events"
+    ON historical_events
+    FOR ALL
+    TO service_role
+    USING (true)
+    WITH CHECK (true);
+
+
+-- =============================================================================
+-- 7. research_proposals
 -- =============================================================================
 
 GRANT ALL ON research_proposals TO service_role;
@@ -154,7 +172,7 @@ CREATE POLICY "service_role_all_research_proposals"
 
 
 -- =============================================================================
--- 7. Sequence grants  (required for uuid_generate_v4() / gen_random_uuid()
+-- 8. Sequence grants  (required for uuid_generate_v4() / gen_random_uuid()
 --    and any SERIAL / BIGSERIAL columns to work on INSERT)
 -- =============================================================================
 
@@ -163,7 +181,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO postgres;
 
 
 -- =============================================================================
--- 8. Future tables  -- run this after every new CREATE TABLE so new tables
+-- 9. Future tables  -- run this after every new CREATE TABLE so new tables
 --    automatically inherit service_role access without a separate migration.
 -- =============================================================================
 
