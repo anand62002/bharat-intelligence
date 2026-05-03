@@ -24,13 +24,9 @@ CREATE INDEX IF NOT EXISTS idx_ec_symbol
     ON earnings_calendar (symbol);
 
 -- Range scans: "all earnings in the next 14 days"
+-- (CURRENT_DATE cannot be used in index predicates — not IMMUTABLE — so no partial index)
 CREATE INDEX IF NOT EXISTS idx_ec_date
     ON earnings_calendar (earnings_date);
-
--- Partial index for upcoming-only lookups (most common access pattern)
-CREATE INDEX IF NOT EXISTS idx_ec_upcoming
-    ON earnings_calendar (earnings_date)
-    WHERE earnings_date >= CURRENT_DATE;
 
 -- Auto-update updated_at on row modification
 CREATE OR REPLACE FUNCTION update_earnings_calendar_updated_at()
