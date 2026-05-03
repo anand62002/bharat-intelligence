@@ -36,12 +36,58 @@ log = logging.getLogger(__name__)
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 AGENT_NAME = "warren_bot"
-DISCOUNT_RATE = 0.12
+DISCOUNT_RATE = 0.12       # global fallback — overridden per-sector below
 TERMINAL_GROWTH = 0.07
 MAX_STAGE1_GROWTH = 0.25
 STAGE2_FLOOR_GROWTH = 0.12
 CONGLOMERATE_DISCOUNT = 0.20
 MIN_MARKET_CAP_CR = 200.0
+
+# Sector-calibrated discount rates for DCF valuation.
+# Consistent with valuation_scenarios._SECTOR_WACC.
+_SECTOR_DISCOUNT_RATES: dict[str, float] = {
+    "FMCG":            0.10,
+    "Consumer Staples":0.10,
+    "Pharma":          0.10,
+    "Healthcare":      0.10,
+    "Utilities":       0.10,
+    "Power":           0.10,
+    "IT":              0.11,
+    "Technology":      0.11,
+    "Banking":         0.11,
+    "Finance":         0.11,
+    "NBFC":            0.11,
+    "Insurance":       0.11,
+    "Consumer Discretionary": 0.12,
+    "Retail":          0.12,
+    "Auto":            0.12,
+    "Cement":          0.12,
+    "Chemical":        0.12,
+    "Specialty Chemicals": 0.12,
+    "Metals":          0.13,
+    "Mining":          0.13,
+    "Realty":          0.13,
+    "Infrastructure":  0.13,
+    "Capital Goods":   0.13,
+    "Construction":    0.13,
+    "Oil & Gas":       0.14,
+    "Telecom":         0.14,
+    "Media":           0.14,
+    "Aviation":        0.15,
+}
+
+
+def _get_sector_discount_rate(sector: str) -> float:
+    """Return sector-calibrated discount rate; falls back to DISCOUNT_RATE."""
+    if not sector:
+        return DISCOUNT_RATE
+    if sector in _SECTOR_DISCOUNT_RATES:
+        return _SECTOR_DISCOUNT_RATES[sector]
+    sector_lower = sector.lower()
+    for key, rate in _SECTOR_DISCOUNT_RATES.items():
+        if key.lower() in sector_lower or sector_lower in key.lower():
+            return rate
+    return DISCOUNT_RATE
 
 
 # ─── Small utilities ──────────────────────────────────────────────────────────
@@ -344,14 +390,15 @@ def _dcf_valuation(
     shares_cr: Optional[float],
     current_price: float,
     conglomerate_discount: bool,
+    discount_rate: Optional[float] = None,
 ) -> tuple[int, Optional[float], Optional[float]]:
     """
     3-Stage DCF model to compute intrinsic value and margin of safety (0–20).
 
     Stages:
-      Stage 1 (yr 1–5):  grow at min(growth_rate, MAX_STAGE1_GROWTH), discount at 12%
+      Stage 1 (yr 1–5):  grow at min(growth_rate, MAX_STAGE1_GROWTH), discount at sector WACC
       Stage 2 (yr 6–10): fade linearly from stage1_growth to STAGE2_FLOOR_GROWTH
-      Terminal:          CF_10 * (1 + TERMINAL_GROWTH) / (DISCOUNT_RATE - TERMINAL_GROWTH)
+      Terminal:          CF_10 * (1 + TERMINAL_GROWTH) / (discount_rate - TERMINAL_GROWTH)
                          discounted back at year 10
 
     Args:
@@ -368,6 +415,9 @@ def _dcf_valuation(
     if owner_earnings <= 0 or shares_cr is None or shares_cr <= 0:
         return 10, None, None
 
+    # Use sector-calibrated discount rate when provided, else global fallback
+    dr = discount_rate if discount_rate is not None else DISCOUNT_RATE
+
     stage1_growth = min(growth_rate, MAX_STAGE1_GROWTH)
 
     # Stage 1: years 1–5
@@ -375,7 +425,7 @@ def _dcf_valuation(
     cf = owner_earnings
     for yr in range(1, 6):
         cf = cf * (1 + stage1_growth)
-        pv = cf / ((1 + DISCOUNT_RATE) ** yr)
+        pv = cf / ((1 + dr) ** yr)
         total_dcf += pv
 
     # Stage 2: years 6–10, growth fades linearly from stage1_growth to STAGE2_FLOOR_GROWTH
@@ -389,13 +439,13 @@ def _dcf_valuation(
     for yr_idx, g in enumerate(stage2_growths):
         yr = 6 + yr_idx
         cf_10 = cf_10 * (1 + g)
-        pv = cf_10 / ((1 + DISCOUNT_RATE) ** yr)
+        pv = cf_10 / ((1 + dr) ** yr)
         total_dcf += pv
 
     # Terminal value at year 10
     terminal_cf = cf_10 * (1 + TERMINAL_GROWTH)
-    terminal_value = terminal_cf / (DISCOUNT_RATE - TERMINAL_GROWTH)
-    terminal_pv = terminal_value / ((1 + DISCOUNT_RATE) ** 10)
+    terminal_value = terminal_cf / (dr - TERMINAL_GROWTH)
+    terminal_pv = terminal_value / ((1 + dr) ** 10)
     total_dcf += terminal_pv
 
     # Conglomerate discount
@@ -909,8 +959,10 @@ def analyse(symbol: str) -> dict:
         mos_pct: Optional[float]
 
         if owner_earnings is not None and current_price is not None and current_price > 0:
+            sector_dr = _get_sector_discount_rate(sector)
             val_score, intrinsic, mos_pct = _dcf_valuation(
-                owner_earnings, growth_rate, shares_cr, current_price, is_conglomerate
+                owner_earnings, growth_rate, shares_cr, current_price, is_conglomerate,
+                discount_rate=sector_dr,
             )
         else:
             val_score, intrinsic, mos_pct = 10, None, None

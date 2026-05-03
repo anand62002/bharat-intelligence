@@ -312,9 +312,11 @@ def _fallback_synthesis(
     Score-based fallback recommendation when the Anthropic API is unavailable
     or the Claude response cannot be parsed.
     """
-    if   composite >= 72: action = "BUY"
-    elif composite >= 55: action = "HOLD"
-    elif composite <= 35: action = "AVOID"
+    # Calibrated thresholds (P1-D): shifted more conservative than original 72/55/35
+    # to reduce BUY false positives from low-quality composite scores.
+    if   composite >= 75: action = "BUY"
+    elif composite >= 58: action = "HOLD"
+    elif composite <= 30: action = "AVOID"
     else:                 action = "SELL"
 
     fund = agent_results.get("fundamental", {})
@@ -549,8 +551,30 @@ async def _run_agents_for_symbol(
     else:
         results["mgmt_quality"] = mq_res
 
-    # Pre-fetched symbol-agnostic results
-    results["macro"]       = macro_res
+    # Pre-fetched symbol-agnostic results.
+    # Apply sector-specific macro adjustment using the sector from fundamental result
+    # so each stock gets a macro score that reflects its own sector's sensitivity
+    # (e.g. IT scores higher than Oil&Gas under weak INR, same raw macro score).
+    try:
+        from agents.macro import get_sector_adjusted_macro_score
+        fund_sector = (
+            results.get("fundamental", {})
+            .get("detail", {})
+            .get("sector", "")
+        ) or ""
+        results["macro"] = get_sector_adjusted_macro_score(macro_res, fund_sector)
+        if fund_sector:
+            log.debug(
+                "[%s] sector-adjusted macro: %s (raw=%s adj=%s outlook=%s)",
+                symbol,
+                results["macro"].get("signal"),
+                results["macro"].get("raw_macro_score"),
+                results["macro"].get("score"),
+                results["macro"].get("sector_outlook"),
+            )
+    except Exception as _macro_adj_exc:
+        log.debug("[%s] sector macro adjust failed (non-fatal): %s", symbol, _macro_adj_exc)
+        results["macro"] = macro_res
     results["commodities"] = comm_res
 
     # ── Phase 2 ──────────────────────────────────────────────────────────────

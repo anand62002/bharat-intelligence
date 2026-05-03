@@ -411,7 +411,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 `disqualifiers`, `commentary`, `data_quality`, `years_available`,
 `agent_name` ("warren_bot"), `analysed_at`, `error`
 
-> **Known issue:** warren_bot tries to write a `notes` column to `agent_performance` which doesn't exist → recurring WARNING in production logs. Non-blocking (cache write still succeeds). Fix: remove `notes` from the INSERT in `warren_bot._log_to_supabase()`.
+> **Known issue (RESOLVED):** warren_bot `_log_to_supabase()` only inserts `agent_name` + `audit_date` — no `notes` column issue exists in current code. ✅
 
 ---
 
@@ -419,6 +419,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| Phase 0 | Sector WACC, macro sensitivity, owner earnings capex fix, discovery quality gate + FII filter fix, fallback thresholds |
 | `5cb2b76` | Fix portfolio price failures: IHCL→INDHOTEL.NS, BHARATSEAT→BHARATSE.NS, HITACHIENERGYINDIA→POWERINDIA.NS + proactive aliases |
 | `4dcc856` | Fix discovery screener never running (missing `import asyncio` in worker.py) + add daily screened-stocks dashboard panel + discovery_runs table |
 | `313e72e` | Add full NSE universe coverage with daily slice rotation to discovery screener |
@@ -434,26 +435,51 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 ## Known Issues (tracked)
 
-| Issue | Severity | File | Fix in Plan |
+| Issue | Severity | File | Status |
 |---|---|---|---|
-| `warren_bot._log_to_supabase()` tries to write `notes` column to `agent_performance` (doesn't exist) → recurring WARNING in logs | LOW | `agents/warren_bot.py` ~line 625 | P0-C |
-| Options signal is India VIX proxy, not real option chain (NSE blocks server-side) | HIGH | `data/options_fetcher.py` | P1-B |
-| WACC hardcoded 12% for all stocks — wrong for capital-heavy / low-risk sectors | HIGH | `agents/valuation_scenarios.py`, `agents/warren_bot.py` | P0-A |
-| Macro score identical for all stocks in same pipeline run | HIGH | `scheduler/orchestrator.py` | P0-B |
-| DCF owner earnings uses full capex (not 0.6× maintenance) in `valuation_scenarios.py` | MEDIUM | `agents/valuation_scenarios.py` | P0-D |
-| Discovery CRITICAL threshold (upside≥100%) produces false positives from data artefacts | MEDIUM | `agents/discovery_screener.py` | P0-E |
-| FII filter in discovery pre-screen is index-level, not stock-specific | MEDIUM | `agents/discovery_screener.py` | P0-F |
-| All 3 synthesis validation judges use Claude variants — correlated sampling | MEDIUM | `scheduler/synthesis_validator.py` | P1-C |
-| `earnings_calendar` table not yet created — earnings_guard falls through to yfinance | MEDIUM | `agents/earnings_guard.py` | Pre-work migration |
-| 57 new historical RAG events not yet seeded to DB | LOW | `db/seed_historical_events_comprehensive.py` | Pre-work seed |
-| `fallback_synthesis` thresholds (≥72=BUY) uncalibrated | LOW | `scheduler/orchestrator.py` | P1-D |
-| Single data provider (screener.in) — no fallback if blocked | HIGH | `data/fetchers.py` | P2-A |
+| `warren_bot._log_to_supabase()` notes column issue | LOW | `agents/warren_bot.py` | ✅ Already correct — no issue |
+| Options signal is India VIX proxy, not real option chain (NSE blocks server-side) | HIGH | `data/options_fetcher.py` | 🔲 P1-B |
+| WACC hardcoded 12% for all stocks | HIGH | `agents/valuation_scenarios.py`, `agents/warren_bot.py` | ✅ Fixed (P0-A) — sector WACC table added |
+| Macro score identical for all stocks in same pipeline run | HIGH | `scheduler/orchestrator.py` | ✅ Fixed (P0-B) — `get_sector_adjusted_macro_score()` wired |
+| DCF owner earnings uses full capex (not 0.6× maintenance) in `valuation_scenarios.py` | MEDIUM | `agents/valuation_scenarios.py` | ✅ Fixed (P0-D) — `0.6 * capex` |
+| Discovery CRITICAL threshold produces false positives from data artefacts | MEDIUM | `agents/discovery_screener.py` | ✅ Fixed (P0-E) — data quality gate + threshold changed to 40%/75% |
+| FII filter in discovery pre-screen is index-level, not stock-specific | MEDIUM | `agents/discovery_screener.py` | ✅ Fixed (P0-F) — now uses `institutional_holding_pct ≥ 5%` |
+| All 3 synthesis validation judges use Claude variants — correlated sampling | MEDIUM | `scheduler/synthesis_validator.py` | 🔲 P1-C |
+| `earnings_calendar` table not yet created | MEDIUM | `agents/earnings_guard.py` | ✅ Migration run + 150 events seeded |
+| `fallback_synthesis` thresholds (≥72=BUY) uncalibrated | LOW | `scheduler/orchestrator.py` | ✅ Fixed (P1-D) — now ≥75/58/30 |
+| Single data provider (screener.in) — no fallback if blocked | HIGH | `data/fetchers.py` | 🔲 P2-A |
+
+---
+
+## Phase 0 — What changed (affects every production run from here)
+
+### `agents/valuation_scenarios.py`
+- **P0-D**: Owner earnings now uses `PAT + Dep - 0.6 × Capex` (was full capex). Aligns with warren_bot methodology.
+- **P0-A**: `_SECTOR_WACC` dict added (FMCG 10% → Aviation 15%). `_get_sector_wacc(sector)` called in `_extract_base_params()`. Sector inferred from `raw.get("sector")`.
+
+### `agents/warren_bot.py`
+- **P0-A**: `_SECTOR_DISCOUNT_RATES` dict + `_get_sector_discount_rate(sector)` added. `_dcf_valuation()` now accepts optional `discount_rate` param. `analyse()` passes sector WACC from yfinance `info["sector"]`.
+- **P0-C**: Already correct — `_log_to_supabase()` only inserts `agent_name` + `audit_date`. No change needed.
+
+### `agents/macro.py`
+- **P0-B**: `get_sector_adjusted_macro_score(macro_result, sector)` added at bottom of file. Adjusts macro score ±8 pts based on sector's specific macro outlook (IT benefits from weak INR, Oil&Gas penalised). Returns `sector_adjusted=True` flag to prevent double-adjustment.
+
+### `scheduler/orchestrator.py`
+- **P0-B**: `_run_agents_for_symbol()` now calls `get_sector_adjusted_macro_score()` after Phase 1 gives the fundamental sector, replacing the identical market-wide macro result with a stock-specific one.
+- **P1-D**: `_fallback_synthesis()` thresholds tightened: `≥75=BUY, ≥58=HOLD, ≤30=AVOID` (was 72/55/35).
+
+### `agents/discovery_screener.py`
+- **P0-F**: `prescreen()` Filter 3 replaced: was `_fii_net_buying()` (market-wide aggregate, same value for all 200 stocks) → now `institutional_holding_pct ≥ 5%` from screener data (stock-specific). Threshold simplified to 4-of-5 (no more relaxed 3-of-4 path since FII is no longer needed).
+- **P0-E**: CRITICAL tier threshold changed from `upside ≥ 100% / conf ≥ 70%` to `upside ≥ 40% / conf ≥ 75% / data_quality != ESTIMATED`. Old 100% threshold fired almost exclusively on screener artefacts. New threshold is achievable for genuinely undervalued stocks and a meaningful step above STANDARD (20%/65%).
+- **P0-B**: `_run_all_agents()` now applies `get_sector_adjusted_macro_score()` after the fundamental agent returns the sector.
 
 ---
 
 ## Execution Roadmap
 
 Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project root.
+
+> **Standing rule:** After every build session, update BOTH `CLAUDE.md` (technical state) AND `EXECUTION_PLAN.md` (visual progress tracker — mark items ✅ with date, update progress count).
 
 **Phase summary:**
 - **Pre-work**: Run `create_earnings_calendar.sql` migration + seed 150 RAG events

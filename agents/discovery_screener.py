@@ -16,8 +16,8 @@ Pre-screen filters (stock passes if it meets 4+ of 5):
     5. Price above 200-day EMA
 
 Opportunity tiers:
-    CRITICAL  — upside_pct >= 100 AND upside_confidence >= 70
-    STANDARD  — upside_pct >=  20 AND confidence >= 65
+    CRITICAL  — upside_pct >= 40 AND upside_confidence >= 75 AND data_quality != ESTIMATED
+    STANDARD  — upside_pct >= 20 AND confidence >= 65
 """
 
 import hashlib
@@ -59,10 +59,14 @@ _REVENUE_GROWTH_MIN = 15.0   # YoY %
 _MIN_PRESCREEN_PASS        = 4   # must pass this many of 5 filters (FII data available)
 _MIN_PRESCREEN_PASS_NO_FII = 3   # relaxed threshold when FII API is blocked (3-of-4 known filters)
 
-_CRITICAL_UPSIDE    = 100.0
-_CRITICAL_CONF      = 70.0
-_STANDARD_UPSIDE    =  20.0
-_STANDARD_CONF      =  65.0
+_CRITICAL_UPSIDE    = 40.0   # ≥40% upside — achievable for real opportunities, not data artefacts
+_CRITICAL_CONF      = 75.0   # ≥75% confidence — tighter bar than STANDARD to ensure conviction
+_STANDARD_UPSIDE    = 20.0
+_STANDARD_CONF      = 65.0
+# NOTE: CRITICAL also requires data_quality != "ESTIMATED" (enforced in run_discovery classify block).
+# Rationale: old threshold of 100% upside fired almost exclusively on screener data artefacts for
+# illiquid small-caps. 40%/75% distinguishes meaningfully from STANDARD (20%/65%) while remaining
+# achievable for genuinely undervalued mid/large-cap stocks on NSE.
 
 _INTER_STOCK_DELAY  = 0.5    # seconds between yfinance calls to avoid rate-limiting
 
@@ -320,6 +324,10 @@ def _fii_net_buying(fii_data: Optional[dict]) -> Optional[bool]:
 
     Returning None lets the caller distinguish "not buying" from "we don't know",
     so the pre-screen threshold can be relaxed appropriately.
+
+    NOTE: This function is kept for compatibility but is no longer used in
+    prescreen(). Filter 3 now checks stock-specific institutional holding % via
+    screener data instead of the index-level market-wide FII net flow.
     """
     if fii_data is None:
         return None   # API unavailable — treat as unknown, not as "not buying"
@@ -329,17 +337,28 @@ def _fii_net_buying(fii_data: Optional[dict]) -> Optional[bool]:
         return None   # malformed payload → also unknown
 
 
+_MIN_INSTITUTIONAL_HOLDING_PCT = 5.0   # Filter 3: stock must have ≥5% institutional ownership
+
+
 def prescreen(
     symbol: str,
-    fii_data: Optional[dict] = None,
+    fii_data: Optional[dict] = None,   # kept for API compatibility; no longer used for Filter 3
 ) -> tuple[bool, list[str]]:
     """
     Run the 5 quick pre-screen filters against a single symbol.
 
-    Threshold logic:
-      - FII API available  → must pass 4-of-5 filters  (_MIN_PRESCREEN_PASS)
-      - FII API blocked    → FII filter is skipped; must pass 3-of-4 remaining
-                             filters  (_MIN_PRESCREEN_PASS_NO_FII)
+    Threshold logic: must pass 4-of-5 filters.
+
+    Filters:
+      1. RSI between 40–65  (momentum sweet spot)
+      2. PE < 50  OR  revenue growth > 30%  (valuation / growth justification)
+      3. Institutional holding ≥ 5%  (smart money present)  ← was: FII market-wide net flow
+      4. Revenue growth YoY > 15%  (business momentum)
+      5. Price above 200-day EMA   (uptrend confirmed)
+
+    Filter 3 was changed from index-level FII net flow (market-wide aggregate,
+    same value for ALL stocks = methodologically wrong) to stock-specific
+    institutional holding % from screener data.
 
     Returns:
         (passes: bool, triggers: list[str])
@@ -425,25 +444,30 @@ def prescreen(
         if revenue_growth is not None and revenue_growth > _REVENUE_GROWTH_MIN:
             triggers.append(f"Revenue growth YoY {revenue_growth:.1f}% > 15%")
 
-    # Filter 3: FII net buying (market-wide indicator)
-    # _fii_net_buying returns None when the NSE API is blocked, True/False when available.
-    fii_result = _fii_net_buying(fii_data)
-    fii_available = fii_result is not None
+    # Filter 3: Stock-specific institutional holding ≥ 5%
+    # Uses screener data already fetched above (no extra API call).
+    # This is methodologically correct: we want stocks WHERE smart money is already
+    # present for THIS specific stock, not a market-wide FII aggregate that is
+    # identical for all 200 symbols in the slice.
+    if raw is not None:
+        inst_holding = raw.get("institutional_holding_pct") or raw.get("fii_holding")
+        if inst_holding is None:
+            # Try deriving from promoter_holding if total is available
+            total_holding = raw.get("total_institutional") or raw.get("institutional")
+            inst_holding = total_holding
+        try:
+            inst_pct = float(inst_holding) if inst_holding is not None else None
+        except (TypeError, ValueError):
+            inst_pct = None
 
-    if fii_available:
-        # API responded — count the filter normally
-        if fii_result:
-            triggers.append("FII net buyer last session (market-wide flow positive)")
-        threshold = _MIN_PRESCREEN_PASS            # 4-of-5
-    else:
-        # NSE API blocked — skip FII filter, relax threshold to 3-of-4
-        triggers_meta = ["[FII data unavailable — threshold relaxed to 3-of-4 known filters]"]
-        log.debug("prescreen(%s): FII API unavailable, using relaxed 3-of-4 threshold", symbol)
-        # We prepend the meta note but don't count it as a passing filter
-        triggers = triggers_meta + triggers
-        threshold = _MIN_PRESCREEN_PASS_NO_FII     # 3-of-4
+        if inst_pct is not None and inst_pct >= _MIN_INSTITUTIONAL_HOLDING_PCT:
+            triggers.append(
+                f"Institutional holding {inst_pct:.1f}% ≥ 5% (smart money present)"
+            )
+        # If data is missing, we simply don't add the trigger (filter not passed)
 
-    # Count only real filter hits (not the meta note)
+    # Threshold: 4-of-5 filters must pass
+    threshold = _MIN_PRESCREEN_PASS
     real_hits = sum(1 for t in triggers if not t.startswith("["))
     passes = real_hits >= threshold
     return passes, triggers
@@ -502,15 +526,28 @@ def _run_all_agents(symbol: str, macro_result: Optional[dict] = None) -> dict:
         results["institutional"] = {"signal": "NO_DATA", "score": 0, "agent_name": "institutional"}
 
     # 5. Macro (symbol-agnostic — reuse pre-fetched if provided)
-    if macro_result is not None:
-        results["macro"] = macro_result
-    else:
+    # Apply sector-adjusted macro score so each stock's macro signal reflects
+    # its own sector's sensitivity (P0-B fix: was identical for all stocks).
+    base_macro = macro_result
+    if base_macro is None:
         try:
             from agents.macro import analyse as macro_analyse
-            results["macro"] = macro_analyse()
+            base_macro = macro_analyse()
         except Exception as exc:
             log.warning("macro agent failed: %s", exc)
-            results["macro"] = {"signal": "NEUTRAL", "score": 50, "agent_name": "macro"}
+            base_macro = {"signal": "NEUTRAL", "score": 50, "agent_name": "macro"}
+
+    try:
+        from agents.macro import get_sector_adjusted_macro_score
+        fund_sector = (
+            results.get("fundamental", {})
+            .get("detail", {})
+            .get("sector", "")
+        ) or ""
+        results["macro"] = get_sector_adjusted_macro_score(base_macro, fund_sector)
+    except Exception as _mac_exc:
+        log.debug("[%s] sector macro adjust failed (non-fatal): %s", symbol, _mac_exc)
+        results["macro"] = base_macro
 
     # 6. Historical RAG
     try:
@@ -1147,11 +1184,32 @@ def run_discovery(
             comp_score = _composite_score(agent_results)
 
             # ── Classify ──────────────────────────────────────────────────────
+            fund_res = agent_results.get("fundamental", {})
+            fund_data_quality = fund_res.get("data_quality") or ""
+
+            # CRITICAL data quality gate: only promote to CRITICAL when we have
+            # real PAT data (not estimated/proxy FCF yield). High upside from
+            # ESTIMATED data is a screener artefact, not a real opportunity.
+            # STANDARD tier is allowed with ESTIMATED data since the bar is lower.
+            is_estimated = fund_data_quality.upper() in ("ESTIMATED", "NO_DATA", "PARTIAL")
+
             if upside_pct >= _CRITICAL_UPSIDE and upside_conf >= _CRITICAL_CONF:
-                tier = "CRITICAL"
+                if is_estimated:
+                    # Demote to STANDARD rather than discard — real signal may still exist
+                    log.info(
+                        "  %s demoted CRITICAL→STANDARD: data_quality=%s "
+                        "(upside=%.1f%% may be artefact)",
+                        symbol, fund_data_quality, upside_pct,
+                    )
+                    tier = "STANDARD" if upside_pct >= _STANDARD_UPSIDE and upside_conf >= _STANDARD_CONF else None
+                else:
+                    tier = "CRITICAL"
             elif upside_pct >= _STANDARD_UPSIDE and upside_conf >= _STANDARD_CONF:
                 tier = "STANDARD"
             else:
+                tier = None
+
+            if tier is None:
                 log.info("  %s below thresholds (upside=%.1f%% conf=%.1f)",
                          symbol, upside_pct, upside_conf)
                 continue

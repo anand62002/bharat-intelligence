@@ -441,6 +441,131 @@ def analyse() -> dict:
     return result
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sector-adjusted macro score  (P0-B fix)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Sector-to-canonical-key mapping for lookup in sector_impacts dict.
+# Keys must match what _sector_impacts() returns.
+_SECTOR_MACRO_KEY: dict[str, str] = {
+    "IT":              "IT",
+    "Technology":      "IT",
+    "Software":        "IT",
+    "Banking":         "BANKING",
+    "Finance":         "BANKING",
+    "NBFC":            "BANKING",
+    "Insurance":       "BANKING",
+    "Pharma":          "PHARMA",
+    "Healthcare":      "PHARMA",
+    "Oil & Gas":       "OIL_GAS",
+    "Refineries":      "OIL_GAS",
+    "Realty":          "REALTY",
+    "Infrastructure":  "REALTY",
+    "Construction":    "REALTY",
+    "Auto":            "AUTO",
+    "Automobile":      "AUTO",
+    "Metals":          "METALS",
+    "Mining":          "METALS",
+    "Steel":           "METALS",
+    "FMCG":            "FMCG",
+    "Consumer Staples":"FMCG",
+    "Consumer Goods":  "FMCG",
+}
+
+# Score adjustments applied when a sector's macro outlook is POSITIVE / NEGATIVE
+_MACRO_SECTOR_BOOST  = +8   # points added to raw macro score for POSITIVE outlook
+_MACRO_SECTOR_DRAG   = -8   # points deducted for NEGATIVE outlook
+# NEUTRAL → no change
+
+
+def get_sector_adjusted_macro_score(macro_result: dict, sector: str) -> dict:
+    """
+    Return a copy of *macro_result* with the macro score adjusted for
+    sector-specific macro sensitivity.
+
+    The raw macro score is a market-wide aggregate.  A RISK_ON macro score of 70
+    means different things for an IT exporter (benefits from weak INR) vs an
+    oil importer (hurt by weak INR).  This function adjusts the score by
+    ±8 points based on the sector's specific macro outlook already computed
+    in _sector_impacts(), then re-derives the signal.
+
+    Usage
+    -----
+    In orchestrator / discovery_screener, call this AFTER the fundamental agent
+    has returned the stock's sector:
+
+        sector = fund_res.get("detail", {}).get("sector", "")
+        adj_macro = get_sector_adjusted_macro_score(macro_result, sector)
+        results["macro"] = adj_macro
+
+    Parameters
+    ----------
+    macro_result : the dict returned by agents.macro.analyse()
+    sector       : sector string from the fundamental agent (e.g. "IT", "Pharma")
+
+    Returns
+    -------
+    dict — same shape as macro_result but with score, signal, and
+           sector_adjusted=True / sector_key / sector_outlook added to detail.
+    """
+    if not macro_result or not sector:
+        return macro_result
+
+    # Already adjusted for this sector? Return as-is to avoid double-adjusting.
+    if macro_result.get("sector_adjusted"):
+        return macro_result
+
+    # Resolve sector to canonical key
+    sector_key = None
+    if sector in _SECTOR_MACRO_KEY:
+        sector_key = _SECTOR_MACRO_KEY[sector]
+    else:
+        sector_lower = sector.lower()
+        for k, v in _SECTOR_MACRO_KEY.items():
+            if k.lower() in sector_lower or sector_lower in k.lower():
+                sector_key = v
+                break
+
+    if not sector_key:
+        # Unknown sector — return unchanged with a note
+        result = dict(macro_result)
+        result["sector_adjusted"] = False
+        result["sector_key"] = None
+        return result
+
+    # Get the sector's macro outlook from sector_impacts in macro_result
+    sector_impacts = macro_result.get("sector_impacts", {})
+    outlook = sector_impacts.get(sector_key, {}).get("outlook", "NEUTRAL")
+
+    # Apply score adjustment
+    base_score = int(macro_result.get("score", 50))
+    if outlook == "POSITIVE":
+        adj_score = min(100, base_score + _MACRO_SECTOR_BOOST)
+    elif outlook == "NEGATIVE":
+        adj_score = max(0, base_score + _MACRO_SECTOR_DRAG)
+    else:
+        adj_score = base_score
+
+    # Re-derive signal from adjusted score
+    if adj_score >= 65:
+        adj_signal = "RISK_ON"
+    elif adj_score >= 40:
+        adj_signal = "NEUTRAL"
+    else:
+        adj_signal = "RISK_OFF"
+
+    result = dict(macro_result)
+    result["score"]           = adj_score
+    result["signal"]          = adj_signal
+    result["sector_adjusted"] = True
+    result["sector_key"]      = sector_key
+    result["sector_outlook"]  = outlook
+    # Preserve original score for audit / debugging
+    result["raw_macro_score"] = base_score
+
+    return result
+
+
 if __name__ == "__main__":
     import json as _json
     out = analyse()

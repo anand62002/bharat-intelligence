@@ -98,6 +98,74 @@ _MAX_WACC       = 0.20    # 20%
 _MIN_TERMINAL   = 0.03    # 3%
 _MAX_TERMINAL   = 0.09    # 9%
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Sector-calibrated WACC table
+# Rationale: different sectors have structurally different risk profiles.
+# Using a blanket 12% WACC overvalues low-risk defensives (FMCG, Pharma) and
+# undervalues high-risk cyclicals (Aviation, Metals), distorting intrinsic value.
+# Sources: Damodaran India 2024, SEBI risk premium reports.
+# ──────────────────────────────────────────────────────────────────────────────
+_SECTOR_WACC: dict[str, float] = {
+    # Defensive / low-beta
+    "FMCG":            0.10,
+    "Consumer Staples":0.10,
+    "Pharma":          0.10,
+    "Healthcare":      0.10,
+    "Utilities":       0.10,
+    "Power":           0.10,
+    # Moderate risk
+    "IT":              0.11,
+    "Technology":      0.11,
+    "Banking":         0.11,
+    "Finance":         0.11,
+    "NBFC":            0.11,
+    "Insurance":       0.11,
+    "Consumer Discretionary": 0.12,
+    "Retail":          0.12,
+    "Auto":            0.12,
+    "Cement":          0.12,
+    "Chemical":        0.12,
+    "Specialty Chemicals": 0.12,
+    # Higher risk / cyclical
+    "Metals":          0.13,
+    "Mining":          0.13,
+    "Realty":          0.13,
+    "Infrastructure":  0.13,
+    "Capital Goods":   0.13,
+    "Construction":    0.13,
+    # High risk
+    "Oil & Gas":       0.14,
+    "Telecom":         0.14,
+    "Media":           0.14,
+    "Aviation":        0.15,
+    # Default for unknown sectors
+    "_default":        0.12,
+}
+
+
+def _get_sector_wacc(sector: Optional[str]) -> float:
+    """
+    Return the sector-calibrated WACC for DCF valuation.
+    Falls back to 12% for unknown sectors.
+
+    Parameters
+    ----------
+    sector : sector string from screener data (e.g. "FMCG", "IT", "Pharma")
+    """
+    if not sector:
+        return _SECTOR_WACC["_default"]
+    # Exact match first
+    if sector in _SECTOR_WACC:
+        return _SECTOR_WACC[sector]
+    # Partial / case-insensitive match
+    sector_lower = sector.lower()
+    for key, wacc in _SECTOR_WACC.items():
+        if key.startswith("_"):
+            continue
+        if key.lower() in sector_lower or sector_lower in key.lower():
+            return wacc
+    return _SECTOR_WACC["_default"]
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Core DCF engine
@@ -256,7 +324,7 @@ def _extract_base_params(symbol: str) -> dict:
     base = {
         "owner_earnings_cr": None,
         "base_growth":       0.12,
-        "base_wacc":         0.12,
+        "base_wacc":         0.12,   # overridden below with sector-calibrated value
         "base_terminal":     0.07,
         "shares_cr":         None,
         "current_price":     None,
@@ -266,6 +334,12 @@ def _extract_base_params(symbol: str) -> dict:
         from data.fetchers import get_screener_data, get_screener_history
         raw  = get_screener_data(symbol) or {}
         hist = get_screener_history(symbol) or {}
+
+        # Apply sector-calibrated WACC — overrides the 12% default immediately so
+        # all downstream calculations use the correct discount rate for this sector.
+        sector = raw.get("sector") or raw.get("industry") or ""
+        base["base_wacc"] = _get_sector_wacc(sector)
+        log.debug("valuation_scenarios(%s): sector=%r → WACC=%.2f%%", sym if 'sym' in dir() else symbol, sector, base["base_wacc"] * 100)
 
         # Owner earnings proxy: PAT – capex + depreciation
         pat_hist   = [float(v) for v in (hist.get("pat") or []) if v is not None]
@@ -279,7 +353,9 @@ def _extract_base_params(symbol: str) -> dict:
                 pat   = pat_hist[i]
                 dep   = dep_hist[i] if dep_hist else 0.0
                 capex = abs(capex_hist[i])
-                oe_list.append(pat + dep - capex)
+                # Use 0.6× capex as maintenance capex proxy (matches warren_bot methodology).
+                # Growth capex (≈40%) should not reduce owner earnings — it creates future value.
+                oe_list.append(pat + dep - 0.6 * capex)
             if oe_list:
                 base["owner_earnings_cr"] = sum(oe_list) / len(oe_list)
 
