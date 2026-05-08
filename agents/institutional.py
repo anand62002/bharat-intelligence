@@ -286,9 +286,44 @@ def _store_flow(session_date: str, fii_net: float, dii_net: float) -> None:
             "session_date": session_date,
             "fii_net": fii_net,
             "dii_net": dii_net,
-        }).execute()
+        }, on_conflict="session_date").execute()
     except Exception as exc:
         log.debug("Supabase flow store failed (non-critical): %s", exc)
+
+
+def _save_institutional_flows(result: dict, client) -> None:
+    """
+    Upsert today's market-wide FII/DII flow into institutional_flows.
+
+    Designed to be called ONCE per pipeline run from the orchestrator
+    save_recs node, using the Supabase client already open for the run.
+    Supplements the per-symbol _store_flow() calls inside analyse() by
+    ensuring the write always happens even when get_nse_fii_dii() fails
+    mid-pipeline, and adds fii_buy/fii_sell when available.
+    """
+    fii_net      = result.get("today_fii_net")
+    dii_net      = result.get("today_dii_net")
+    if fii_net is None and dii_net is None:
+        log.debug("_save_institutional_flows: no live data in result, skipping")
+        return
+    session_date = result.get("today_date") or date.today().isoformat()
+    try:
+        client.table("institutional_flows").upsert(
+            {
+                "session_date": session_date,
+                "fii_net":      float(fii_net)  if fii_net  is not None else None,
+                "dii_net":      float(dii_net)  if dii_net  is not None else None,
+                "fii_buy":      result.get("today_fii_buy"),
+                "fii_sell":     result.get("today_fii_sell"),
+            },
+            on_conflict="session_date",
+        ).execute()
+        log.info(
+            "institutional_flows upserted: date=%s fii_net=%.0f dii_net=%.0f",
+            session_date, fii_net or 0, dii_net or 0,
+        )
+    except Exception as exc:
+        log.warning("_save_institutional_flows failed (non-critical): %s", exc)
 
 
 def _write_agent_performance() -> None:
@@ -816,6 +851,14 @@ def analyse(
         "data_quality":          data_quality,
         "data_unavailable_note": data_unavailable_note,
         "agent_name":            AGENT_NAME,
+        # ── Today's individual live values (for DB writer) ────────────────────
+        # Exposed so the orchestrator can call _save_institutional_flows() once
+        # per run using these values rather than the 5-day aggregates above.
+        "today_fii_net":  live["fii_net"]        if live else None,
+        "today_dii_net":  live["dii_net"]        if live else None,
+        "today_fii_buy":  live.get("fii_buy")    if live else None,
+        "today_fii_sell": live.get("fii_sell")   if live else None,
+        "today_date":     live.get("date", date.today().isoformat()) if live else date.today().isoformat(),
     }
 
     try:

@@ -1237,6 +1237,26 @@ async def save_recs_node(state: OrchestratorState) -> dict:
             errors.append(f"save {rec['symbol']}: {exc}")
 
     log.info("Saved %d / %d recommendations", len(saved_ids), len(recommendations))
+
+    # ── Save market-wide FII/DII flows once per pipeline run ─────────────────
+    # The institutional agent fetches live FII/DII data per symbol, but only
+    # one upsert is needed since these are market-wide values (not per-stock).
+    # We reuse the already-open Supabase client from this node.
+    try:
+        from agents.institutional import _save_institutional_flows
+        symbol_results = state.get("symbol_results") or {}
+        for sym_res in symbol_results.values():
+            if not isinstance(sym_res, dict):
+                continue
+            inst = sym_res.get("institutional")
+            if isinstance(inst, dict) and inst.get("today_fii_net") is not None:
+                _save_institutional_flows(inst, client)
+                break
+        else:
+            log.debug("No live institutional flow data found in this run's results")
+    except Exception as _iff_exc:
+        log.warning("institutional_flows save failed (non-fatal): %s", _iff_exc)
+
     return {"saved_ids": saved_ids, "errors": errors}
 
 
