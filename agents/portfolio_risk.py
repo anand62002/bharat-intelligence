@@ -66,8 +66,32 @@ _TRADING_DAYS   = 252
 # Data loading
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _resolve_yf_symbol(symbol: str, stored_yf: str | None) -> str:
+    """
+    Return the correct yfinance ticker for a holding.
+    Preference order:
+      1. YF_SYMBOL_MAP (canonical alias map in data/symbol_map.py)
+      2. The stored yf_symbol column if it looks valid (.NS / .BO suffix, or ^/=)
+      3. Fall back to SYMBOL.NS
+    This fixes cases where yf_symbol was stored as IHCL.NS instead of INDHOTEL.NS
+    before the NSE_OVERRIDES were added.
+    """
+    try:
+        from data.symbol_map import YF_SYMBOL_MAP
+        if symbol in YF_SYMBOL_MAP:
+            return YF_SYMBOL_MAP[symbol]
+    except Exception:
+        pass
+    if stored_yf and (
+        stored_yf.endswith(".NS") or stored_yf.endswith(".BO")
+        or stored_yf.startswith("^") or "=F" in stored_yf or "=X" in stored_yf
+    ):
+        return stored_yf
+    return f"{symbol}.NS"
+
+
 def _load_holdings() -> list[dict]:
-    """Load open portfolio holdings from Supabase."""
+    """Load open portfolio holdings from Supabase, resolving yf_symbol via alias map."""
     url = os.getenv("SUPABASE_URL", "")
     key = os.getenv("SUPABASE_SERVICE_KEY", "")
     if not url or not key:
@@ -81,6 +105,10 @@ def _load_holdings() -> list[dict]:
         .execute()
         .data or []
     )
+    # Resolve yf_symbol through the canonical alias map so stale/wrong tickers
+    # (e.g. IHCL.NS stored before the INDHOTEL.NS alias was added) are corrected.
+    for row in rows:
+        row["yf_symbol"] = _resolve_yf_symbol(row.get("symbol", ""), row.get("yf_symbol"))
     return rows
 
 

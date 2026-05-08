@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -67,6 +68,17 @@ VERCEL_DASHBOARD_URL = os.getenv("VERCEL_DASHBOARD_URL", "")   # e.g. "https://a
 _supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
     _supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+
+def _sanitise_floats(obj: Any) -> Any:
+    """Recursively replace NaN / ±Inf with None so FastAPI can serialise to JSON."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitise_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitise_floats(v) for v in obj]
+    return obj
     log.info("Supabase client initialised → %s", SUPABASE_URL)
 else:
     log.warning("Supabase not configured — set SUPABASE_URL and SUPABASE_SERVICE_KEY")
@@ -1357,7 +1369,9 @@ async def get_portfolio_risk(
 
     try:
         result = await loop.run_in_executor(None, _run)
-        return result
+        # portfolio_risk may produce NaN/Inf for delisted symbols — sanitise before
+        # serialising, otherwise FastAPI raises ValueError: Out of range float values
+        return _sanitise_floats(result)
     except Exception as exc:
         log.error("portfolio/risk error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))

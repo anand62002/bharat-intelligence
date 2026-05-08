@@ -364,14 +364,14 @@ def _analyse_holding(
     )
 
     # ── 2. Fetch latest recommendation for this symbol ───────────────────────
+    # NOTE: only select columns that exist in the recommendations table.
+    # danger_drop_pct / danger_confidence / danger_trigger / danger_window live
+    # on portfolio_holdings, NOT on recommendations — querying them causes HTTP 400.
     latest_rec: dict = {}
     try:
         resp = (
             client.table("recommendations")
-            .select(
-                "danger_drop_pct, danger_confidence, "
-                "danger_trigger, danger_window, action, target, stoploss"
-            )
+            .select("action, target, stoploss")
             .eq("symbol", symbol)
             .order("created_at", desc=True)
             .limit(1)
@@ -379,32 +379,15 @@ def _analyse_holding(
         )
         if resp.data:
             latest_rec = resp.data[0]
-            # Sync danger fields from latest rec → holding (for future runs)
-            rec_ddp  = float(latest_rec.get("danger_drop_pct") or 0)
-            rec_dcon = float(latest_rec.get("danger_confidence") or 0)
-            if (rec_ddp != h_danger_drop or rec_dcon != h_danger_conf) and not dry_run:
-                try:
-                    client.table("portfolio_holdings").update({
-                        "danger_drop_pct":   rec_ddp,
-                        "danger_confidence": rec_dcon,
-                        "danger_trigger":    latest_rec.get("danger_trigger") or h_danger_trig,
-                        "danger_window":     latest_rec.get("danger_window") or h_danger_win,
-                    }).eq("id", holding_id).execute()
-                    # Refresh locals after sync
-                    h_danger_drop = rec_ddp
-                    h_danger_conf = rec_dcon
-                    h_danger_trig = latest_rec.get("danger_trigger") or h_danger_trig
-                    h_danger_win  = latest_rec.get("danger_window") or h_danger_win
-                except Exception as exc:
-                    log.debug("[%s] danger sync failed: %s", symbol, exc)
     except Exception as exc:
         log.debug("[%s] latest rec fetch failed: %s", symbol, exc)
 
-    # Effective danger values (rec takes precedence over holding row)
-    eff_danger_drop = float(latest_rec.get("danger_drop_pct") or h_danger_drop)
-    eff_danger_conf = float(latest_rec.get("danger_confidence") or h_danger_conf)
-    eff_danger_trig = latest_rec.get("danger_trigger") or h_danger_trig or "Multi-agent danger signal"
-    eff_danger_win  = latest_rec.get("danger_window") or h_danger_win
+    # Effective danger values — sourced entirely from portfolio_holdings row
+    # (written there by the orchestrator after each agent run).
+    eff_danger_drop = h_danger_drop
+    eff_danger_conf = h_danger_conf
+    eff_danger_trig = h_danger_trig or "Multi-agent danger signal"
+    eff_danger_win  = h_danger_win
 
     # ── 3. CRITICAL DANGER alert ─────────────────────────────────────────────
     is_critical = (

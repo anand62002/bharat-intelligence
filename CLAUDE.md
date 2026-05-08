@@ -448,6 +448,13 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | `earnings_calendar` table not yet created | MEDIUM | `agents/earnings_guard.py` | ✅ Migration run + 150 events seeded |
 | `fallback_synthesis` thresholds (≥72=BUY) uncalibrated | LOW | `scheduler/orchestrator.py` | ✅ Fixed (P1-D) — now ≥75/58/30 |
 | Single data provider (screener.in) — no fallback if blocked | HIGH | `data/fetchers.py` | 🔲 P2-A |
+| portfolio_monitor HTTP 400 on ALL recommendations queries (danger_trigger/window not in table) | CRITICAL | `scheduler/portfolio_monitor.py` | ✅ Fixed (Step 9) — removed non-existent columns from SELECT |
+| `/api/portfolio/risk` returns HTTP 500 — NaN floats not JSON-serialisable | HIGH | `api/main.py` | ✅ Fixed (Step 9) — `_sanitise_floats()` wrapper added |
+| `portfolio_risk_snapshots` table missing (PGRST205) | HIGH | `agents/portfolio_risk.py` | ✅ Migration created — run `db/migrations/create_portfolio_risk_snapshots.sql` |
+| portfolio_risk uses wrong yf_symbol for IHCL/HITACHIENERGYINDIA/BHARATSEAT | MEDIUM | `agents/portfolio_risk.py` | ✅ Fixed (Step 9) — `_resolve_yf_symbol()` added to `_load_holdings()` |
+| `institutional_flows` table always empty — FII 5-session always Rs 0 Cr | HIGH | `scheduler/` | 🔲 No writer job exists — institutional agent writes to JSON not DB |
+| Telegram not configured — STOPLOSS_HIT / CRITICAL alerts not delivered | HIGH | `scheduler/portfolio_monitor.py` | 🔲 Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars on Railway |
+| `recommendation_outcomes` table empty — no forward tracking | MEDIUM | `agents/outcome_tracker.py` | 🔲 Needs seeding from historical recs |
 
 ---
 
