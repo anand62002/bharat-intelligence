@@ -220,6 +220,31 @@ def job_portfolio_monitor() -> None:
         log.error("Portfolio monitor job failed: %s", exc, exc_info=True)
 
 
+def job_backtest() -> None:
+    """1st of every month, 07:45 IST — walk-forward backtest on NIFTY 500 quality universe."""
+    log.info("=" * 60)
+    log.info("  JOB START: Monthly Backtest (07:45 IST, 1st of month)")
+    log.info("=" * 60)
+    try:
+        from agents.backtester import run_backtest
+        result = run_backtest(dry_run=False)
+        if "error" in result:
+            log.error("Backtest failed: %s", result["error"])
+        else:
+            t = result["test"]
+            log.info(
+                "Backtest done — symbols=%d TEST: signals=%d hit_rate=%.1f%% "
+                "avg_alpha=%.2f%% sharpe=%s",
+                result["symbols_processed"],
+                t["total_signals"],
+                t["hit_rate_90d"],
+                t["avg_alpha_90d"],
+                t.get("sharpe_ratio"),
+            )
+    except Exception as exc:
+        log.error("Backtest job failed: %s", exc, exc_info=True)
+
+
 # =============================================================================
 # Scheduler setup
 # =============================================================================
@@ -331,6 +356,19 @@ def build_scheduler():
         misfire_grace_time=600,
     )
 
+    # ── Monthly backtest — 1st of month, 07:45 IST ───────────────────────────
+    # Runs after performance tracker (07:00) + research agent (07:30) so the
+    # system is warm. Takes ~20–30 min for 80 symbols × 5yr OHLCV.
+    scheduler.add_job(
+        job_backtest,
+        CronTrigger(day=1, hour=7, minute=45, timezone=IST),
+        id="backtest_monthly",
+        name="Monthly Backtest (07:45 IST, 1st)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=7200,  # 2-hour grace (long job)
+    )
+
     return scheduler
 
 
@@ -381,6 +419,7 @@ def main() -> None:
     log.info("    15:45  Options Market Snapshot")
     log.info("    16:00  Portfolio Risk")
     log.info("    18:30  Outcome Tracker")
+    log.info("    07:45 (1st/month)  Monthly Backtest")
     log.info("  Press Ctrl+C to stop")
     log.info("=" * 60)
 

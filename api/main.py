@@ -68,6 +68,9 @@ VERCEL_DASHBOARD_URL = os.getenv("VERCEL_DASHBOARD_URL", "")   # e.g. "https://a
 _supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
     _supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    log.info("Supabase client initialised → %s", SUPABASE_URL)
+else:
+    log.warning("Supabase not configured — set SUPABASE_URL and SUPABASE_SERVICE_KEY")
 
 
 def _sanitise_floats(obj: Any) -> Any:
@@ -79,9 +82,6 @@ def _sanitise_floats(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_sanitise_floats(v) for v in obj]
     return obj
-    log.info("Supabase client initialised → %s", SUPABASE_URL)
-else:
-    log.warning("Supabase not configured — set SUPABASE_URL and SUPABASE_SERVICE_KEY")
 
 # ── Market symbols ─────────────────────────────────────────────────────────────
 # (display_label, yfinance_symbol, format_mode)
@@ -1817,6 +1817,42 @@ async def get_forward_estimates_endpoint(
         return result
     except Exception as exc:
         log.error("estimates/%s error: %s", plain, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/backtest/summary", tags=["performance"])
+async def get_backtest_summary(
+    split:   str  = Query("TEST", description="TRAIN | TEST | FULL — TEST is the out-of-sample period"),
+    limit:   int  = Query(5, description="Number of most-recent monthly runs to return"),
+    _:       None = Depends(require_api_key),
+):
+    """
+    Walk-forward backtest summary from the backtest_results table.
+
+    split=TEST (2023–2024 out-of-sample) is the most meaningful metric for
+    evaluating whether the system's signal logic generates genuine alpha.
+
+    Run automatically by worker.py on the 1st of each month at 07:45 IST.
+    Trigger manually: python -m agents.backtester --dry-run (test without saving)
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        rows = (
+            _supabase.table("backtest_results")
+            .select(
+                "run_date, universe, period_start, period_end, split_type, "
+                "total_signals, hit_rate_90d, avg_alpha_90d, avg_alpha_180d, "
+                "sharpe_ratio, max_drawdown, win_loss_ratio, created_at"
+            )
+            .eq("split_type", split.upper())
+            .order("run_date", desc=True)
+            .limit(limit)
+            .execute()
+        ).data or []
+        return {"split": split.upper(), "count": len(rows), "results": rows}
+    except Exception as exc:
+        log.error("backtest/summary error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 

@@ -14,14 +14,14 @@
 |---|---|---|---|---|
 | Pre-1 | Run `earnings_calendar` SQL migration | Pre-work | ✅ **DONE** | 2026-05-04 |
 | Pre-2 | Seed 150 historical RAG events | Pre-work | ✅ **DONE** | 2026-05-04 |
-| 9 | Railway + Vercel log analysis | Step 9 | ⬜ TODO | — |
+| 9 | Railway + Vercel log analysis | Step 9 | ✅ **DONE** | 2026-05-09 |
 | P0-A | Sector-specific WACC (valuation_scenarios + warren_bot) | Phase 0 | ✅ **DONE** | 2026-05-04 |
 | P0-B | Stock-specific macro sensitivities | Phase 0 | ✅ **DONE** | 2026-05-04 |
 | P0-C | warren_bot notes column bug | Phase 0 | ✅ **DONE** (already fixed) | 2026-05-04 |
 | P0-D | DCF owner earnings maintenance capex (0.6×) | Phase 0 | ✅ **DONE** | 2026-05-04 |
 | P0-E | Discovery CRITICAL tier data quality gate | Phase 0 | ✅ **DONE** | 2026-05-04 |
 | P0-F | Replace index-level FII filter → institutional_holding_pct | Phase 0 | ✅ **DONE** | 2026-05-04 |
-| P1-A | Historical backtest framework | Phase 1 | ⬜ TODO | — |
+| P1-A | Historical backtest framework | Phase 1 | ✅ **DONE** | 2026-05-09 |
 | P1-B | Options paid data feed (Quantsapp / Upstox) | Phase 1 | ⬜ TODO | — |
 | P1-C | GPT-4o as independent 3rd validation judge | Phase 1 | ⬜ TODO | — |
 | P1-D | Calibrate composite score thresholds (75/58/30) | Phase 1 | ✅ **DONE** | 2026-05-04 |
@@ -39,7 +39,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 9 / 26 items complete (35%)**
+**Progress: 11 / 26 items complete (42%)**
 
 ---
 
@@ -175,45 +175,45 @@ Logs:
 
 ---
 
-### ⬜ P1-A: Historical Backtest Framework
-**New files:** `agents/backtester.py`, `db/migrations/create_backtest_results.sql`, `GET /api/backtest/summary`  
+### ✅ P1-A: Historical Backtest Framework
+**Status:** Done 2026-05-09  
+**New files:** `agents/backtester.py`, `db/migrations/create_backtest_results.sql`  
+**Modified:** `api/main.py` (`GET /api/backtest/summary`), `worker.py` (monthly job)  
 **New DB table:** `backtest_results`
 
-**What it does:**
-Uses 5-year yfinance OHLCV + current screener quality filters to replay technical entry signals and measure performance vs NIFTY 50.
+**What was built:**
 
-**Methodology:**
-1. **Quality Universe:** Filter NIFTY 500 using current screener data (ROCE > 15%, positive 5yr EPS CAGR, D/E < 1.5, market cap > 500 Cr, not disqualified by warren_bot)
-2. **Technical Signal Replay:** On each trading day (2020–2024), compute RSI, EMA200, MACD using historical OHLCV. BUY when RSI 40–65 + price > EMA200 + MACD positive crossover. EXIT when RSI > 75 OR price drops 15% from entry.
-3. **Walk-Forward Split:** Train 2020–2022, Test 2023–2024 (out-of-sample). Check for overfitting.
-4. **Metrics per signal:** abs_return_90d, nifty_return_90d, alpha_90d, hit_rate, sharpe_ratio, max_drawdown, win_loss_ratio
-5. **Output summary:** stored in `backtest_results` table; accessible via `/api/backtest/summary`
+#### `agents/backtester.py` — full walk-forward engine
+1. **Quality Universe** — downloads NIFTY 500 constituent list from NSE archives CSV; falls back to YF_SYMBOL_MAP if NSE is unreachable. Filters: market cap > ₹500 Cr via yfinance `fast_info`.
+2. **Indicators** — RSI(14) via Wilder EMA smoothing, EMA(200), MACD(12,26,9) + bullish crossover detection.
+3. **Signal logic** — BUY: RSI 40–65 AND price > EMA200 AND MACD bullish crossover. EXIT: RSI > 75 OR price < entry × 0.85 (15% SL) OR 90 days elapsed.
+4. **Alpha measurement** — each trade's 90d and 180d return vs NIFTY 50 (^NSEI) over the same holding period.
+5. **Walk-forward split** — TRAIN 2020–2022 (in-sample) | TEST 2023–2024 (out-of-sample). TEST is the meaningful metric.
+6. **Metrics** — `hit_rate_90d` (% signals beating NIFTY), `avg_alpha_90d/180d`, `sharpe_ratio` (mean/std of alpha across trades), `max_drawdown` (worst single trade), `win_loss_ratio`.
+7. **DB persistence** — inserts 3 rows per run (TRAIN, TEST, FULL) into `backtest_results`.
 
-**DB Migration — run in Supabase SQL Editor:**
-```sql
-CREATE TABLE IF NOT EXISTS backtest_results (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_date        DATE NOT NULL DEFAULT CURRENT_DATE,
-    universe        TEXT NOT NULL DEFAULT 'NIFTY500_QUALITY',
-    period_start    DATE NOT NULL,
-    period_end      DATE NOT NULL,
-    split_type      TEXT CHECK (split_type IN ('TRAIN', 'TEST', 'FULL')),
-    total_signals   INTEGER,
-    hit_rate_90d    NUMERIC(5,2),
-    avg_alpha_90d   NUMERIC(7,4),
-    avg_alpha_180d  NUMERIC(7,4),
-    sharpe_ratio    NUMERIC(6,3),
-    max_drawdown    NUMERIC(7,4),
-    win_loss_ratio  NUMERIC(6,3),
-    signal_details  JSONB,
-    created_at      TIMESTAMPTZ DEFAULT now()
-);
-GRANT ALL ON backtest_results TO service_role;
+#### CLI
+```powershell
+python -m agents.backtester                          # default: 80 symbols, 2020–2024
+python -m agents.backtester --max-symbols 30 --dry-run  # quick test
+python -m agents.backtester --start 2021-01-01 --end 2024-12-31
 ```
 
-**CLI:** `python -m agents.backtester --period 2020-2024 --universe nifty500_quality`  
-**Worker job:** Monthly (1st of month, 07:45 IST)  
-**Manual step required:** ⚠️ Run migration SQL above in Supabase.
+#### API endpoint
+```
+GET /api/backtest/summary?split=TEST&limit=5
+```
+Returns last 5 monthly run summaries for the requested split.
+
+#### Worker schedule
+Monthly on 1st of month at 07:45 IST. Takes ~20–30 min for 80 symbols.
+
+#### ⚠️ MANUAL STEP REQUIRED
+**Run in Supabase SQL Editor:**
+```sql
+-- db/migrations/create_backtest_results.sql
+```
+The table must exist before the first backtest run or job save will fail silently.
 
 ---
 

@@ -56,6 +56,7 @@ Stock analysis/
 │   #    07:00 — performance tracker
 │   #    07:30 — research agent
 │   #    09:15, 11:30, 13:30, 15:15 — portfolio monitor
+│   #    07:45 (1st of month) — historical backtest (agents/backtester.py)
 │
 ├── data/
 │   ├── fetchers.py             # India market data fetchers (NSE, BSE, RBI, SEBI)
@@ -89,7 +90,9 @@ Stock analysis/
 │       ├── sector_pe_snapshots.sql
 │       ├── create_warren_bot_cache.sql         # warren_bot 24-hr result cache
 │       ├── create_discovery_runs.sql           # daily screened-symbol log
-│       └── create_earnings_calendar.sql        # ← NEW: earnings dates for earnings_guard
+│       ├── create_earnings_calendar.sql        # earnings dates for earnings_guard
+│       ├── create_portfolio_risk_snapshots.sql # portfolio risk snapshot table
+│       └── create_backtest_results.sql         # ← NEW: walk-forward backtest results (P1-A)
 │
 ├── tests/                      # pytest — one test file per module
 ├── requirements.txt
@@ -119,7 +122,7 @@ Stock analysis/
 | `recommendation_outcomes` | Forward outcome tracker | `rec_id, symbol, action, entry_price, rec_date, price_t90/t180/t365, nifty_t90/t180/t365, alpha_t90/t180/t365, outcome_t90/t180/t365, nifty_entry, composite_score, validation_kappa` |
 | `market_regime` | Daily market regime | `regime_date (unique), regime, confidence, nifty_trend, vix_state, fii_trend, breadth_state, momentum_state, raw_signals (jsonb)` |
 | `earnings_calendar` | Earnings dates for pre-earnings guard | `symbol, earnings_date, quarter, source, confirmed` |
-| `backtest_results` | Historical signal backtest runs | `period_start/end, split_type, hit_rate_90d, avg_alpha_90d/180d, sharpe_ratio, max_drawdown, signal_details (jsonb)` — **PENDING: create when P1-A built** |
+| `backtest_results` | Walk-forward backtest runs | `run_date, universe, period_start/end, split_type (TRAIN/TEST/FULL), hit_rate_90d, avg_alpha_90d/180d, sharpe_ratio, max_drawdown, win_loss_ratio, signal_details (jsonb)` |
 
 > **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime)
 >
@@ -149,6 +152,7 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/api/governance/research` | Research proposals with debate status computed |
 | GET | `/api/market/pulse` | Live yfinance prices (NIFTY, SENSEX, GOLD, CRUDE, VIX, FII) — 60s cache |
 | GET | `/api/warren_bot/{symbol}` | On-demand Buffett/Jhunjhunwala quality score — 24h Supabase cache |
+| GET | `/api/backtest/summary` | Walk-forward backtest summary from `backtest_results` — `?split=TEST\|TRAIN\|FULL&limit=5` |
 | WS | `/ws/alerts` | WebSocket — broadcasts DANGER/CRITICAL alerts every 30s |
 
 **Auth:** `x-api-key: <DASHBOARD_API_KEY>` header on all HTTP. `?api_key=<key>` on WebSocket.
