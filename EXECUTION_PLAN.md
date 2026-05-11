@@ -1,6 +1,6 @@
 # Bharat Intelligence — Investment-Grade Execution Plan
 ### Target: 6.0 → 8.8 / 10 System Robustness
-*Last updated: 2026-05-04*
+*Last updated: 2026-05-12*
 
 > **Standing rules (apply after every build):**
 > 1. Update `CLAUDE.md` — new files, tables, endpoints, env vars, resolved issues
@@ -25,6 +25,13 @@
 | P1-B | Options real data feed (ICICI Breeze Connect) | Phase 1 | ✅ **DONE** | 2026-05-11 |
 | P1-C | GPT-4o-mini as independent 3rd validation judge | Phase 1 | ✅ **DONE** | 2026-05-11 |
 | P1-D | Calibrate composite score thresholds (75/58/30) | Phase 1 | ✅ **DONE** | 2026-05-04 |
+| BF-1 | yfinance 1.2.0 progress=False silent failure (all prices stuck) | Bug Fix | ✅ **DONE** | 2026-05-12 |
+| BF-2 | Discovery screener: NaN close, wrong FII field, threshold 3/5 | Bug Fix | ✅ **DONE** | 2026-05-12 |
+| BF-3 | FII stale-zero filter (institutional.py) | Bug Fix | ✅ **DONE** | 2026-05-12 |
+| BF-4 | India macro news monitoring (macro.py) | Enhancement | ✅ **DONE** | 2026-05-12 |
+| BF-5 | Historical events embeddings backfill (98→150/150) | Data | ✅ **DONE** | 2026-05-12 |
+| BF-6 | ARIA partial sell support + backend field-clobber fix | Enhancement | ✅ **DONE** | 2026-05-12 |
+| BF-7 | Symbol resolution: SHAKTIPUMPS, GEVERNOVA, ELFORGE | Bug Fix | ✅ **DONE** | 2026-05-12 |
 | P2-A | Data provider diversification (Trendlyne fallback) | Phase 2 | ⬜ TODO | — |
 | P2-B | RAG corpus auto-refresh monthly job | Phase 2 | ⬜ TODO | — |
 | P2-C | Portfolio-level concentration alerts | Phase 2 | ⬜ TODO | — |
@@ -39,7 +46,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 13 / 26 items complete (50%)**
+**Progress: 20 / 33 items complete (61%)**
 
 ---
 
@@ -291,18 +298,95 @@ pip install breeze-connect pyotp
 
 ---
 
-### ⬜ P1-C: GPT-4o as Independent 3rd Validation Judge
-**Context:** All 3 synthesis judges use Claude variants — correlated failure modes. GPT-4o as 3rd judge gives genuine model diversity.
+### ✅ P1-C: GPT-4o-mini as Independent 3rd Validation Judge
+**Status:** Done 2026-05-11  
+**Files changed:** `scheduler/synthesis_validator.py`
 
-**Note:** OpenAI API already in stack (RAG embeddings use `text-embedding-3-small`). Same key covers this.
+**What was built:**
+- Replaced 3rd judge (was `claude-haiku`) with `gpt-4o-mini` (genuine model diversity)
+- Added lazy-init to `_call_anthropic_judge`: if `ant_client=None` at startup, reads `ANTHROPIC_API_KEY` from env and constructs its own Anthropic client on demand. Prevents auth failures when client is passed as None from the orchestrator.
+- All 3 judges now have self-healing lazy-init: GPT-4o-mini, Claude Sonnet, Claude Opus all initialise their own clients if the passed-in client is None.
 
-**Manual steps:**
-1. Confirm `OPENAI_API_KEY` is in Railway env vars (web + worker)
-2. If not: get from https://platform.openai.com/api-keys → add to Railway
-3. Smoke-test: `python -c "import openai; c=openai.OpenAI(); print('OK')"`
+**Cost:** ~₹40-80/month (negligible — OpenAI key already in stack for embeddings)
 
-**Files:** `scheduler/synthesis_validator.py` — replace 3rd judge (currently `claude-haiku`) with `gpt-4o-mini`  
-**Cost:** ~₹40-80/month (negligible)
+---
+
+---
+
+## ✅ SESSION: Bug Fixes + Enhancements (2026-05-12)
+
+> These were not in the original execution plan but were diagnosed and fixed in response to live system observations.
+
+### ✅ BF-1: yfinance 1.2.0 — All Portfolio Prices Stuck at Upload Price
+**Root cause:** yfinance 1.2.0 removed the `progress=` parameter from `history()`. All calls used `progress=False` which raised `TypeError`, silently caught by `except Exception: return None`. Every price refresh returned None for weeks.
+
+**Additional yfinance 1.x issue:** yfinance now appends today's incomplete candle as `NaN` as the last row. `float(df["Close"].iloc[-1])` returned `float(NaN)` — broke discovery screener DataCompletenessValidator (every stock failed price>0 check).
+
+**Files fixed:** `api/main.py`, `data/options_fetcher.py`, `agents/backtester.py`, `agents/discovery_screener.py`
+- Removed `progress=False` from all `yf.history()` / `yf.download()` calls
+- Added `.dropna()` before `iloc[-1]` in all price extractions
+- `api/main.py _fetch_current_price`: added period fallback loop (1d → 5d → 1mo) — needed for BSE-only stocks (e.g. GE Vernova `522275.BO` returns empty on `period='1d'`)
+
+---
+
+### ✅ BF-2: Discovery Screener — 0 Pre-Screen Passes
+Three bugs combined to produce 0 discoveries every day:
+
+1. **NaN close price** (yfinance 1.x trailing row) — DataCompletenessValidator failed every stock. Fixed with `.dropna()`.
+2. **Wrong screener field name** — code used `raw.get("fii_holding")` but screener.in returns `fii_holding_pct` + `dii_holding_pct`. HDFCBANK's 84% institutional holding was invisible → filter 3 always 0 < 5%. Fixed with correct field names + legacy fallback.
+3. **Threshold 4/5 impossible** — `revenue_growth` almost always `None` from screener.in (multi-year data, no single figure), so max achievable was 4 filters. Lowered `_MIN_PRESCREEN_PASS` from 4 → 3.
+
+**Verified:** HDFCBANK PASS (RSI 45.7 ✓, PE 15.7 ✓, institutional 84.2% ✓), BAJFINANCE PASS (4/5), DIXON correctly skipped (earnings guard).
+
+---
+
+### ✅ BF-3: FII Stale-Zero Data Masking NO_DATA State
+**Root cause:** `institutional_flows` table had rows with `fii_net=0.0, dii_net=0.0` since April 22 (stored when NSE API was blocked and no live data available). `_fetch_historical_flows` returned these zero rows, which `_build_flow_history` included — making `data_quality="PARTIAL"` when it should be `"NO_DATA"`. Score of 50 (neutral) was being produced for the wrong reasons.
+
+**Fix:** `_fetch_historical_flows` now filters out rows where both `fii_net=0.0` AND `dii_net=0.0` (treated as missing-data placeholders). Over-fetches 3× rows to survive filtering. Logs a warning when all DB rows are zero.
+
+---
+
+### ✅ BF-4: India Macro News Monitoring (PM Modi / RBI / Budget Announcements)
+**Problem:** Macro agent only read FRED + RBI repo rate + VIX/INR. Major political/policy announcements (PM Modi speech, budget surprise, geopolitical event) were completely invisible until they showed up in price action.
+
+**Fix added to `agents/macro.py`:**
+- `_fetch_india_macro_news()`: fetches Google News RSS for 4 India macro query terms. Also uses NewsAPI if `NEWSAPI_KEY` set. No API key required for RSS path.
+- `_score_macro_news()`: keyword-matches positive events (rate cut, trade deal, GST record) and negative shocks (war, tariff hike, capital flight). Returns ±10 score adjustment.
+- `analyse()` now calls this as Step 1c. Adds `macro_news_signal` + `macro_news_events` to top-level output for synthesiser. Score adjustment applied to base indicator total.
+
+---
+
+### ✅ BF-5: Historical Events Embeddings Backfill
+**Problem:** 150 events in `historical_events` table, only 52 had OpenAI embeddings, 98 were NULL. RAG agent was falling back to keyword-TF-IDF for 65% of the corpus.
+
+**Fix:** Created `db/backfill_embeddings.py` — generates `text-embedding-3-small` (1536-dim) vectors for rows missing embeddings. **All 98 generated and stored.** Table is now 150/150 complete.
+
+**Cost:** ~$0.0002 (98 rows × ~80 tokens at $0.02/1M).
+
+---
+
+### ✅ BF-6: ARIA Partial Sell Support + Backend Field-Clobber Fix
+**Problem:** Selling 125 of 140 Voltas shares deleted the entire position (should leave 15 shares).
+
+Three bugs:
+1. **ARIA system prompt** had no `qty` field in exit JSON → ARIA couldn't express partial quantity
+2. **`handlePortfolioUpdate`** always marked the full holding as "exited" regardless of qty
+3. **`upsert_portfolio` backend** rebuilt the entire row from defaults on every update — `{symbol, status:"CLOSED"}` would set `qty=1`, `avg_buy=0`, etc. before closing
+
+**Fix:**
+- ARIA system prompt: added `qty` (required), explicit partial sell instructions
+- `handlePortfolioUpdate`: checks `soldQty < holding.qty` → partial (reduce qty, keep status=holding) vs full exit
+- `upsert_portfolio` backend: UPDATE path now only touches fields explicitly present in payload; INSERT path unchanged
+
+---
+
+### ✅ BF-7: Symbol Resolution — SHAKTIPUMPS, GEVERNOVA, ELFORGE
+- `SHAKTIPUMPS` → `SHAKTIPUMP.NS` (NSE ticker drops trailing S)
+- `GEVERNOVA` / `GE VERNOVA` / `GETDINDIA` → `522275.BO` (GE Vernova T&D India — only on BSE in Yahoo Finance, quoteType=MUTUALFUND)
+- `ELFORGE` → `ELFORGE.BO` (BSE-listed only)
+
+Added to both `data/symbol_map.py::YF_SYMBOL_MAP` and `api/main.py::_NSE_OVERRIDES`.
 
 ---
 
@@ -462,7 +546,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P0-F** | Replace FII filter with institutional_holding_pct | Code | None | S | ✅ Done |
 | **P1-A** | Historical backtest framework | Code + SQL | None | XL | ✅ Done |
 | **P1-B** | Options real data feed (ICICI Breeze) | Code + Service | ₹0 | L | ✅ Done |
-| **P1-C** | GPT-4o-mini as 3rd validation judge | Code | OpenAI API (existing) | S | ✅ Done |
+| **P1-C** | GPT-4o-mini as 3rd validation judge + Anthropic lazy-init | Code | OpenAI API (existing) | S | ✅ Done |
 | **P1-D** | Calibrate composite score thresholds | Code | None | XS | ✅ Done |
 | **P2-A** | Data provider diversification (Trendlyne) | Code + Service | ₹999/mo | L | ⬜ TODO |
 | **P2-B** | RAG corpus auto-refresh monthly job | Code | None (OpenAI existing) | M | ⬜ TODO |
@@ -506,5 +590,5 @@ After every build session, before closing:
 
 ---
 
-*Document version: 2.0 — 2026-05-04 (Phase 0 + Pre-work complete)*  
-*Next milestone: Step 9 (log analysis) → P1-A (backtest framework)*
+*Document version: 3.0 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session complete)*  
+*Next milestone: P2-A (data provider diversification)*

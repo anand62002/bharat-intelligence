@@ -89,6 +89,9 @@ Stock analysis/
 │
 ├── db/
 │   ├── schema.sql              # Full Supabase schema (run once to create all tables)
+│   ├── backfill_embeddings.py  # One-time: generate OpenAI embeddings for historical_events rows
+│   │                           # python -m db.backfill_embeddings [--run] [--batch N] [--limit N]
+│   │                           # All 150/150 rows now have embeddings (run 2026-05-12)
 │   └── migrations/
 │       ├── grant_service_role_rls.sql          # RLS policies for service_role
 │       ├── create_research_proposals.sql
@@ -186,6 +189,9 @@ Results cached in `_symbol_cache` dict for process lifetime.
 | `ZOMATO` | `ETERNAL.NS` | Zomato rebranded → Eternal (2025) |
 | `MUTHOOT` | `MUTHOOTFIN.NS` | Short alias |
 | `L&T` / `LNT` | `LT.NS` | Larsen & Toubro |
+| `SHAKTIPUMPS` | `SHAKTIPUMP.NS` | NSE ticker drops trailing S |
+| `GEVERNOVA` / `GE VERNOVA` / `GETDINDIA` | `522275.BO` | GE Vernova T&D India — BSE only in YF |
+| `ELFORGE` | `ELFORGE.BO` | El Forge Ltd — BSE-listed only |
 
 ---
 
@@ -262,6 +268,13 @@ const [apiLoaded, setApiLoaded] = useState(!IS_LIVE);
 2. ARIA outputs `<portfolio_action>{"action":"add","symbol":"RELIANCE","qty":15,"avgBuy":2850}</portfolio_action>` at end of response
 3. `handlePortfolioUpdate()` in App() parses it → calls `POST /api/portfolio`
 4. Backend auto-resolves RELIANCE→RELIANCE.NS, fetches live price, saves to Supabase
+
+**ARIA sell / partial sell:**
+- Full exit: `{"action":"exit","symbol":"VOLTAS","exitPrice":1650,"qty":140,"notes":"..."}`
+  → marks holding as "exited", POSTs `status: "CLOSED"` to backend
+- Partial sell: `{"action":"exit","symbol":"VOLTAS","exitPrice":1650,"qty":125,"notes":"..."}`
+  → reduces holding qty from 140 → 15, keeps `status: "holding"`, POSTs `{qty: 15, notes: ...}` (no status change)
+- Backend UPDATE path only updates fields explicitly in payload (no field-clobber)
 
 **ARIA endpoint:** `POST /api/aria` → Vercel serverless function (`dashboard/api/aria.js`) → Anthropic Messages API.
 Uses `ANTHROPIC_API_KEY` env var server-side (never exposed to browser).
@@ -436,17 +449,17 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| `51fa452` | Fix partial sell: ARIA qty field, partial vs full exit logic, backend field-clobber fix |
+| `77d5775` | Fix log format string in backfill_embeddings (UUID id, not int) |
+| `4472416` | Fix FII stale zeros, add India macro news monitoring, add embedding backfill script |
+| `897ea26` | Fix yfinance 1.2.0 breaking changes + discovery screener pre-screen bugs |
+| `a7ec99a` | Fix all price refresh failures + ARIA sell action |
+| `d6fc799` | Fix symbol resolution for Shakti Pumps, GE Vernova, El Forge |
+| `c5b2c4a` | Fix Vercel build + ARIA portfolio update bugs |
+| `3f6d68d` | Fix Anthropic judge lazy-init: self-heal when ant_client=None |
+| `293d517` | P1-C: Replace Claude Haiku judge with GPT-4o-mini for model diversity |
 | Phase 0 | Sector WACC, macro sensitivity, owner earnings capex fix, discovery quality gate + FII filter fix, fallback thresholds |
 | `5cb2b76` | Fix portfolio price failures: IHCL→INDHOTEL.NS, BHARATSEAT→BHARATSE.NS, HITACHIENERGYINDIA→POWERINDIA.NS + proactive aliases |
-| `4dcc856` | Fix discovery screener never running (missing `import asyncio` in worker.py) + add daily screened-stocks dashboard panel + discovery_runs table |
-| `313e72e` | Add full NSE universe coverage with daily slice rotation to discovery screener |
-| `a364525` | Remove all mock data from dashboard; IS_LIVE pattern; EmptyState components |
-| `34c1e2d` | Fix discovery price freeze (DIXON stale price); add valid_till filter; persist metadata.price at write-time |
-| `d86bd83` | Add warren_bot: Buffett+Jhunjhunwala long-term quality agent + get_screener_history |
-| `4813119` | Simplify deploy.yml — remove Railway webhooks, keep Telegram notify |
-| `f5952d9` | Add GitHub Actions: CI, deploy, and governance rollback workflows |
-| `452c5e5` | Fix worker logging to stdout so Railway shows [inf] not [err] |
-| `5b1fb1d` | Symbol auto-resolution, live price refresh, /api/symbol/resolve endpoint |
 
 ---
 
@@ -461,7 +474,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | DCF owner earnings uses full capex (not 0.6× maintenance) in `valuation_scenarios.py` | MEDIUM | `agents/valuation_scenarios.py` | ✅ Fixed (P0-D) — `0.6 * capex` |
 | Discovery CRITICAL threshold produces false positives from data artefacts | MEDIUM | `agents/discovery_screener.py` | ✅ Fixed (P0-E) — data quality gate + threshold changed to 40%/75% |
 | FII filter in discovery pre-screen is index-level, not stock-specific | MEDIUM | `agents/discovery_screener.py` | ✅ Fixed (P0-F) — now uses `institutional_holding_pct ≥ 5%` |
-| All 3 synthesis validation judges use Claude variants — correlated sampling | MEDIUM | `scheduler/synthesis_validator.py` | 🔲 P1-C |
+| All 3 synthesis validation judges use Claude variants — correlated sampling | MEDIUM | `scheduler/synthesis_validator.py` | ✅ Fixed (P1-C) — GPT-4o-mini as 3rd judge + Anthropic lazy-init |
 | `earnings_calendar` table not yet created | MEDIUM | `agents/earnings_guard.py` | ✅ Migration run + 150 events seeded |
 | `fallback_synthesis` thresholds (≥72=BUY) uncalibrated | LOW | `scheduler/orchestrator.py` | ✅ Fixed (P1-D) — now ≥75/58/30 |
 | Single data provider (screener.in) — no fallback if blocked | HIGH | `data/fetchers.py` | 🔲 P2-A |
@@ -469,9 +482,15 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | `/api/portfolio/risk` returns HTTP 500 — NaN floats not JSON-serialisable | HIGH | `api/main.py` | ✅ Fixed (Step 9) — `_sanitise_floats()` wrapper added |
 | `portfolio_risk_snapshots` table missing (PGRST205) | HIGH | `agents/portfolio_risk.py` | ✅ Migration created — run `db/migrations/create_portfolio_risk_snapshots.sql` |
 | portfolio_risk uses wrong yf_symbol for IHCL/HITACHIENERGYINDIA/BHARATSEAT | MEDIUM | `agents/portfolio_risk.py` | ✅ Fixed (Step 9) — `_resolve_yf_symbol()` added to `_load_holdings()` |
-| `institutional_flows` table always empty — FII 5-session always Rs 0 Cr | HIGH | `scheduler/` | 🔲 No writer job exists — institutional agent writes to JSON not DB |
+| `institutional_flows` table stale since April 22 (fii_net=0.0 — NSE API blocked) | HIGH | `agents/institutional.py` | ✅ Fixed (BF-3) — zero rows filtered, NO_DATA returned correctly |
+| Discovery screener returning 0 passes (yfinance NaN + wrong field names + threshold 4/5) | CRITICAL | `agents/discovery_screener.py` | ✅ Fixed (BF-2) — .dropna(), fii_holding_pct, threshold=3 |
+| All portfolio prices stuck at upload price (yfinance 1.2.0 progress=False removed) | CRITICAL | `api/main.py`, `data/options_fetcher.py`, `agents/backtester.py` | ✅ Fixed (BF-1) — removed progress=False, added .dropna() |
+| Macro agent blind to major announcements (PM Modi, budget, geopolitical) | HIGH | `agents/macro.py` | ✅ Fixed (BF-4) — Google News RSS macro monitoring added |
+| 98 of 150 historical_events rows missing OpenAI embeddings | MEDIUM | `db/` | ✅ Fixed (BF-5) — all 150/150 now have embeddings |
+| ARIA partial sell removes entire position instead of reducing qty | HIGH | `dashboard/src/App.jsx`, `api/main.py` | ✅ Fixed (BF-6) — partial sell support + backend field-clobber fix |
 | Telegram not configured — STOPLOSS_HIT / CRITICAL alerts not delivered | HIGH | `scheduler/portfolio_monitor.py` | 🔲 Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars on Railway |
 | `recommendation_outcomes` table empty — no forward tracking | MEDIUM | `agents/outcome_tracker.py` | 🔲 Needs seeding from historical recs |
+| ICICI Breeze primary IP update due ~May 18 | MEDIUM | Railway env | 🔲 Update primary IP to `52.5.155.132` on ICICI Direct portal |
 
 ---
 
@@ -487,6 +506,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 ### `agents/macro.py`
 - **P0-B**: `get_sector_adjusted_macro_score(macro_result, sector)` added at bottom of file. Adjusts macro score ±8 pts based on sector's specific macro outlook (IT benefits from weak INR, Oil&Gas penalised). Returns `sector_adjusted=True` flag to prevent double-adjustment.
+- **BF-4**: `_fetch_india_macro_news()` + `_score_macro_news()` added. Fetches Google News RSS for 4 India macro query terms every run (no API key needed). Keyword-matches positive/negative macro shocks (±10 score adjustment). `analyse()` now outputs `macro_news_signal`, `macro_news_events` at top level + `detail.macro_news` sub-dict.
 
 ### `scheduler/orchestrator.py`
 - **P0-B**: `_run_agents_for_symbol()` now calls `get_sector_adjusted_macro_score()` after Phase 1 gives the fundamental sector, replacing the identical market-wide macro result with a stock-specific one.
@@ -506,11 +526,12 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 > **Standing rule:** After every build session, update BOTH `CLAUDE.md` (technical state) AND `EXECUTION_PLAN.md` (visual progress tracker — mark items ✅ with date, update progress count).
 
 **Phase summary:**
-- **Pre-work**: Run `create_earnings_calendar.sql` migration + seed 150 RAG events
-- **Step 9**: Analyse Railway + Vercel logs before coding (see EXECUTION_PLAN.md for prompts)
-- **Phase 0 (P0)**: Zero-cost code fixes — WACC, macro sensitivity, DCF fix, discovery thresholds (improves next run)
-- **Phase 1 (P1)**: Historical backtest framework, options paid feed, GPT-4o 3rd judge
-- **Phase 2 (P2)**: Data diversification, RAG auto-refresh, portfolio concentration alerts
+- **Pre-work** ✅: Run `create_earnings_calendar.sql` migration + seed 150 RAG events
+- **Step 9** ✅: Analyse Railway + Vercel logs before coding
+- **Phase 0 (P0)** ✅: Zero-cost code fixes — WACC, macro sensitivity, DCF fix, discovery thresholds
+- **Phase 1 (P1)** ✅: Historical backtest framework, options paid feed, GPT-4o 3rd judge, score calibration
+- **Bug Fix Session** ✅: yfinance 1.2.0 fix, discovery screener 0-pass bugs, FII stale zeros, macro news, embeddings, partial sell, symbol aliases
+- **Phase 2 (P2)** ← CURRENT: Data diversification, RAG auto-refresh, portfolio concentration alerts, earnings calendar auto-populate
 - **Phase 3 (P3)**: Position sizing, correlation alerts
 - **Phase 4 (P4)**: Commentary grounding, symbol cache persistence, governance numerical check
 - **Phase 5 (P5)**: Robust forward paper portfolio tracker + attribution analysis
