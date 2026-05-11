@@ -380,12 +380,22 @@ def _resolve_yf_symbol(raw: str) -> str:
 
 
 def _fetch_current_price(yf_symbol: str) -> float | None:
-    """Fetches the latest closing price for a single yfinance symbol."""
-    try:
-        hist = yf.Ticker(yf_symbol).history(period="2d", progress=False)["Close"].dropna()
-        return float(hist.iloc[-1]) if not hist.empty else None
-    except Exception:
-        return None
+    """
+    Fetches the latest closing price for a single yfinance symbol.
+
+    Uses progressively longer periods so BSE-only stocks (e.g. 522275.BO)
+    that sometimes return empty on short windows still get a price.
+    progress= param was removed in yfinance ≥1.0 — never pass it.
+    """
+    ticker = yf.Ticker(yf_symbol)
+    for period in ("1d", "5d", "1mo"):
+        try:
+            hist = ticker.history(period=period)["Close"].dropna()
+            if not hist.empty:
+                return float(hist.iloc[-1])
+        except Exception:
+            pass
+    return None
 
 
 # =============================================================================
