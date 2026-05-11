@@ -56,8 +56,10 @@ _RSI_HIGH           = 65.0
 _PE_MAX             = 50.0
 _GROWTH_PE_OVERRIDE = 30.0   # revenue growth % that justifies PE > 50
 _REVENUE_GROWTH_MIN = 15.0   # YoY %
-_MIN_PRESCREEN_PASS        = 4   # must pass this many of 5 filters (FII data available)
-_MIN_PRESCREEN_PASS_NO_FII = 3   # relaxed threshold when FII API is blocked (3-of-4 known filters)
+_MIN_PRESCREEN_PASS        = 3   # must pass this many of 5 filters
+                                 # (revenue_growth is frequently None from screener.in,
+                                 #  making effective ceiling 4 available filters — 3/4 pass rate)
+_MIN_PRESCREEN_PASS_NO_FII = 2   # legacy constant (kept for backward compat)
 
 _CRITICAL_UPSIDE    = 40.0   # ≥40% upside — achievable for real opportunities, not data artefacts
 _CRITICAL_CONF      = 75.0   # ≥75% confidence — tighter bar than STANDARD to ensure conviction
@@ -371,8 +373,11 @@ def prescreen(
         return False, []
 
     # ── Data completeness check (skip symbol cleanly, no hallucinated screen) ─
-    _close_val  = float(df["Close"].iloc[-1]) if "Close" in df.columns and not df.empty else None
-    _vol_avg    = float(df["Volume"].mean())  if "Volume" in df.columns and not df.empty else None
+    # yfinance ≥1.x appends today's incomplete candle as NaN — always dropna()
+    # before taking iloc[-1] so a NaN close doesn't block every stock.
+    _close_series = df["Close"].dropna() if "Close" in df.columns else None
+    _close_val    = float(_close_series.iloc[-1]) if (_close_series is not None and not _close_series.empty) else None
+    _vol_avg      = float(df["Volume"].fillna(0).mean()) if "Volume" in df.columns and not df.empty else None
     _chk = _dcv.validate({
         "symbol":     symbol,
         "ohlcv_rows": len(df),
@@ -411,7 +416,7 @@ def prescreen(
     except Exception:
         pass  # non-fatal — continue screening
 
-    close = df["Close"]
+    close = df["Close"].dropna()   # strip trailing NaN from today's incomplete candle
 
     # Filter 1: RSI 40–65
     rsi_val = _rsi(close)
@@ -450,13 +455,18 @@ def prescreen(
     # present for THIS specific stock, not a market-wide FII aggregate that is
     # identical for all 200 symbols in the slice.
     if raw is not None:
-        inst_holding = raw.get("institutional_holding_pct") or raw.get("fii_holding")
-        if inst_holding is None:
-            # Try deriving from promoter_holding if total is available
-            total_holding = raw.get("total_institutional") or raw.get("institutional")
-            inst_holding = total_holding
+        # Screener.in returns fii_holding_pct and dii_holding_pct separately.
+        # Sum them for total institutional; fall back to any variant key present.
+        fii_pct = raw.get("fii_holding_pct") or raw.get("fii_holding") or 0.0
+        dii_pct = raw.get("dii_holding_pct") or raw.get("dii_holding") or 0.0
         try:
-            inst_pct = float(inst_holding) if inst_holding is not None else None
+            inst_pct: float | None = float(fii_pct or 0) + float(dii_pct or 0)
+            if inst_pct == 0.0:
+                # Try legacy / alternate keys
+                alt = (raw.get("institutional_holding_pct")
+                       or raw.get("institutional_holding")
+                       or raw.get("total_institutional"))
+                inst_pct = float(alt) if alt is not None else None
         except (TypeError, ValueError):
             inst_pct = None
 

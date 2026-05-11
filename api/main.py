@@ -279,10 +279,9 @@ def _search_yf_symbol(query: str) -> str | None:
                     if ticker.endswith(suffix):
                         # Quick validation — must return a price
                         try:
-                            hist = yf.Ticker(ticker).history(
-                                period="1d", progress=False
-                            )
-                            if not hist.empty and float(hist["Close"].iloc[-1]) > 0:
+                            hist = yf.Ticker(ticker).history(period="1d")
+                            close = hist["Close"].dropna()
+                            if not close.empty and float(close.iloc[-1]) > 0:
                                 return ticker
                         except Exception:
                             pass
@@ -348,8 +347,9 @@ def _resolve_yf_symbol(raw: str) -> str:
     # 4 & 5. Live probe — try NSE first, then BSE
     for candidate in (f"{sym}.NS", f"{sym}.BO"):
         try:
-            hist = yf.Ticker(candidate).history(period="1d", progress=False)
-            if not hist.empty and float(hist["Close"].iloc[-1]) > 0:
+            hist = yf.Ticker(candidate).history(period="1d")
+            close = hist["Close"].dropna()
+            if not close.empty and float(close.iloc[-1]) > 0:
                 log.info("Symbol resolved via probe: %s → %s", raw, candidate)
                 _symbol_cache[key] = candidate
                 # Persist so next restart skips the probe

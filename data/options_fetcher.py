@@ -266,7 +266,7 @@ def _get_underlying_price(symbol: str) -> Optional[float]:
         if price and price > 0:
             return float(price)
         # Fallback to 1-day history
-        hist = yf.download(yf_sym, period="2d", progress=False, auto_adjust=True)
+        hist = yf.download(yf_sym, period="2d", auto_adjust=True)
         if not hist.empty:
             return float(hist["Close"].squeeze().iloc[-1])
     except Exception as exc:
@@ -540,12 +540,12 @@ def _fallback_metrics(symbol: str) -> dict:
         import numpy as np
 
         # India VIX
-        vix_hist  = yf.download("^INDIAVIX", period="5d", progress=False, auto_adjust=True)
+        vix_hist  = yf.download("^INDIAVIX", period="5d", auto_adjust=True)
         india_vix = float(vix_hist["Close"].squeeze().iloc[-1]) if not vix_hist.empty else None
 
         # Underlying price
         yf_sym = _resolve_yf_sym(symbol)
-        hist   = yf.download(yf_sym, period="60d", interval="1d", progress=False, auto_adjust=True)
+        hist   = yf.download(yf_sym, period="60d", interval="1d", auto_adjust=True)
         if hist.empty:
             return {"source": "fallback", "error": "no_price_data", "india_vix": india_vix}
 

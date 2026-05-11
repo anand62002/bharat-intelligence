@@ -179,7 +179,6 @@ def _fetch_ohlcv(ticker: str, start: str, end: str):
             end=end,
             interval="1d",
             auto_adjust=True,
-            progress=False,
         )
         if df.empty:
             return pd.DataFrame()
