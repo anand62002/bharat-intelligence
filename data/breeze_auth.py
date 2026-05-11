@@ -89,37 +89,31 @@ def get_breeze_client():
     try:
         from breeze_connect import BreezeConnect  # type: ignore[import]
         client = BreezeConnect(api_key=api_key)
-        resp = client.generate_session(api_secret=api_secret, session_token=token)
-        if isinstance(resp, dict) and resp.get("Status") == 500:
-            log.warning("Breeze session rejected: %s", resp.get("Error", "unknown"))
-            return None
+        # generate_session() always returns None in this SDK version — that is normal.
+        # It calls api_util() internally which validates the token against ICICI and
+        # decodes the real session_key from base64.  On success it sets client.user_id.
+        # We verify success by checking that user_id was populated.
+        client.generate_session(api_secret=api_secret, session_token=token)
 
-        # Verify the session is actually live by calling a lightweight endpoint.
-        # generate_session() can silently succeed even with a wrong token — the
-        # internal session_key stays empty and every data call returns
-        # "API Session cannot be empty".
-        try:
-            check = client.get_customer_details()
-            if isinstance(check, dict) and "API Session cannot be empty" in str(check.get("Error", "")):
-                log.warning(
-                    "Breeze session token appears invalid — BREEZE_SESSION_TOKEN may be "
-                    "wrong or expired.\n"
-                    "  Get a fresh token:\n"
-                    "  1. Open: https://api.icicidirect.com/apiuser/login?api_key=%s\n"
-                    "  2. Login with ICICI Direct ID + password + TOTP\n"
-                    "  3. From the redirect URL copy the ENTIRE value after `code=`\n"
-                    "     (it looks like: ?code=XXXXXXXX&state=...)\n"
-                    "  4. Set BREEZE_SESSION_TOKEN=<that value> in your .env / Railway vars",
-                    api_key[:8] + "...",
-                )
-                return None
-        except Exception:
-            pass  # If check itself fails for other reasons, proceed optimistically
+        user_id = getattr(client, "user_id", None)
+        if not user_id:
+            log.warning(
+                "Breeze session token appears invalid — BREEZE_SESSION_TOKEN may be "
+                "wrong or expired.\n"
+                "  Get a fresh token:\n"
+                "  1. Open: https://api.icicidirect.com/apiuser/login?api_key=%s\n"
+                "  2. Login with ICICI Direct ID + password + TOTP\n"
+                "  3. From the redirect URL copy the value after `apisession=`\n"
+                "     (it looks like: https://127.0.0.1/?apisession=XXXXXXXX)\n"
+                "  4. Set BREEZE_SESSION_TOKEN=<that value> in your .env / Railway vars",
+                api_key[:8] + "...",
+            )
+            return None
 
         _cache["client"]     = client
         _cache["created_at"] = time.time()
         _cache["token"]      = token
-        log.info("Breeze session established and verified (api_key=...%s)", api_key[-6:])
+        log.info("Breeze session established — user_id=%s (api_key=...%s)", user_id, api_key[-6:])
         return client
 
     except ImportError:
@@ -322,7 +316,7 @@ def _manual_mode_check(api_key: str, api_secret: str) -> dict:
             "⚠ BREEZE_SESSION_TOKEN is not set.\n"
             "  To enable real options chain data:\n"
             "  1. Visit: https://api.icicidirect.com/apiuser/login?api_key={key}\n"
-            "  2. Login → copy `code=` value from redirect URL\n"
+            "  2. Login → copy `apisession=` value from redirect URL\n"
             "  3. Set BREEZE_SESSION_TOKEN=<code> in Railway env vars\n"
             "  Token refreshes daily.  For auto-refresh, also set:\n"
             "    ICICI_USER_ID, ICICI_PASSWORD, BREEZE_TOTP_SECRET"
