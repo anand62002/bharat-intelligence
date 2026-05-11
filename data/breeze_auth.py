@@ -43,6 +43,7 @@ Usage
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import time
@@ -57,6 +58,57 @@ _cache: dict = {
     "token":      "",       # session token used to build this client
 }
 _MAX_AGE_SECS = 23 * 3600  # refresh before 24-h expiry
+
+
+# =============================================================================
+# Proxy context (Fixie — surgical, only wraps Breeze API calls)
+# =============================================================================
+
+@contextlib.contextmanager
+def breeze_proxy():
+    """
+    Context manager: temporarily routes outbound HTTP/HTTPS through the
+    Fixie proxy (if FIXIE_URL env var is set) for the duration of the block.
+
+    Usage:
+        with breeze_proxy():
+            client.generate_session(...)
+            resp = client.get_option_chain_quotes(...)
+
+    Why surgical (not global)?
+        Fixie free tier = 500 req/month.  yfinance + screener calls would
+        blow past that instantly.  We only need the proxy for ICICI API calls
+        so Railway's outbound IP matches what ICICI has whitelisted.
+
+    Env var:
+        FIXIE_URL=http://fixie:<token>@criterium.usefixie.com:80
+    """
+    fixie_url = os.getenv("FIXIE_URL", "").strip()
+    if not fixie_url:
+        yield
+        return
+
+    # Save existing proxy settings (if any)
+    saved = {
+        "HTTPS_PROXY": os.environ.get("HTTPS_PROXY"),
+        "HTTP_PROXY":  os.environ.get("HTTP_PROXY"),
+        "https_proxy": os.environ.get("https_proxy"),
+        "http_proxy":  os.environ.get("http_proxy"),
+    }
+    # Activate proxy
+    os.environ["HTTPS_PROXY"] = fixie_url
+    os.environ["HTTP_PROXY"]  = fixie_url
+    os.environ["https_proxy"] = fixie_url
+    os.environ["http_proxy"]  = fixie_url
+    try:
+        yield
+    finally:
+        # Restore previous state
+        for key, val in saved.items():
+            if val is not None:
+                os.environ[key] = val
+            else:
+                os.environ.pop(key, None)
 
 
 # =============================================================================
@@ -93,7 +145,9 @@ def get_breeze_client():
         # It calls api_util() internally which validates the token against ICICI and
         # decodes the real session_key from base64.  On success it sets client.user_id.
         # We verify success by checking that user_id was populated.
-        client.generate_session(api_secret=api_secret, session_token=token)
+        # Route through Fixie proxy so Railway's outbound IP matches ICICI whitelist.
+        with breeze_proxy():
+            client.generate_session(api_secret=api_secret, session_token=token)
 
         user_id = getattr(client, "user_id", None)
         if not user_id:

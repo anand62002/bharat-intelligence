@@ -294,14 +294,16 @@ def _fetch_one_breeze_strike(
 ) -> Optional[dict]:
     """Fetch a single strike/right pair from Breeze API."""
     try:
-        resp = breeze.get_option_chain_quotes(
-            stock_code=stock_code,
-            exchange_code=exchange_code,
-            product_type="options",
-            expiry_date=expiry_date,
-            right=right.lower(),
-            strike_price=str(strike),
-        )
+        from data.breeze_auth import breeze_proxy
+        with breeze_proxy():
+            resp = breeze.get_option_chain_quotes(
+                stock_code=stock_code,
+                exchange_code=exchange_code,
+                product_type="options",
+                expiry_date=expiry_date,
+                right=right.lower(),
+                strike_price=str(strike),
+            )
         rows = (resp or {}).get("Success") or []
         return rows[0] if rows else None
     except Exception as exc:
@@ -343,17 +345,19 @@ def _fetch_breeze_option_chain(symbol: str) -> Optional[list[dict]]:
     step       = _STRIKE_STEP.get(sym, _DEFAULT_STRIKE_STEP)
 
     # ── Strategy 1: bulk call with empty strike_price ──────────────────────
+    from data.breeze_auth import breeze_proxy
     rows_bulk: list[dict] = []
     for right in ("call", "put"):
         try:
-            resp = breeze.get_option_chain_quotes(
-                stock_code=stock_code,
-                exchange_code=exchange,
-                product_type="options",
-                expiry_date=expiry,
-                right=right,
-                strike_price="",
-            )
+            with breeze_proxy():
+                resp = breeze.get_option_chain_quotes(
+                    stock_code=stock_code,
+                    exchange_code=exchange,
+                    product_type="options",
+                    expiry_date=expiry,
+                    right=right,
+                    strike_price="",
+                )
             success = (resp or {}).get("Success") or []
             rows_bulk.extend(success)
         except Exception as exc:
