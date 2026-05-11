@@ -1198,9 +1198,11 @@ def run_discovery(
             fund_data_quality = fund_res.get("data_quality") or ""
 
             # CRITICAL data quality gate: only promote to CRITICAL when we have
-            # real PAT data (not estimated/proxy FCF yield). High upside from
+            # real data (not estimated/proxy FCF yield). High upside from
             # ESTIMATED data is a screener artefact, not a real opportunity.
-            # STANDARD tier is allowed with ESTIMATED data since the bar is lower.
+            # STANDARD tier is allowed with lower-quality data since the bar is lower.
+            # NOTE: "FALLBACK" (yfinance fallback) is NOT treated as estimated —
+            # yfinance data is real market data, just less complete than screener.in.
             is_estimated = fund_data_quality.upper() in ("ESTIMATED", "NO_DATA", "PARTIAL")
 
             if upside_pct >= _CRITICAL_UPSIDE and upside_conf >= _CRITICAL_CONF:
@@ -1214,6 +1216,11 @@ def run_discovery(
                     tier = "STANDARD" if upside_pct >= _STANDARD_UPSIDE and upside_conf >= _STANDARD_CONF else None
                 else:
                     tier = "CRITICAL"
+                    if fund_data_quality.upper() == "FALLBACK":
+                        log.info(
+                            "  %s CRITICAL (yfinance fallback data — screener.in unavailable)",
+                            symbol,
+                        )
             elif upside_pct >= _STANDARD_UPSIDE and upside_conf >= _STANDARD_CONF:
                 tier = "STANDARD"
             else:

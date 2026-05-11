@@ -1237,20 +1237,29 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
     """
     data_sources: list[str] = []
 
-    # ── 1. Fetch screener data ───────────────────────────────────────────────
+    # ── 1. Fetch screener data (with yfinance fallback) ─────────────────────
     raw = get_screener_data(symbol)
     if raw is None:
         return {
-            "signal": "NO_DATA",
-            "score": 0,
-            "detail": {"error": f"screener.in returned no data for {symbol}"},
-            "upside_pct": None,
-            "danger_drop_pct": None,
+            "signal":            "NO_DATA",
+            "score":             0,
+            "detail":            {"error": f"screener.in and yfinance both returned no data for {symbol}"},
+            "upside_pct":        None,
+            "danger_drop_pct":   None,
             "danger_confidence": 0.0,
-            "data_sources": [],
-            "agent_name": AGENT_NAME,
+            "data_sources":      [],
+            "data_quality":      "NO_DATA",
+            "agent_name":        AGENT_NAME,
         }
-    data_sources.append("screener_in")
+    # Track which data source was used — screener.in or yfinance fallback
+    _screener_used = raw.get("data_source") != "yfinance_fallback"
+    if _screener_used:
+        data_sources.append("screener_in")
+    else:
+        data_sources.append("yfinance_fundamentals")
+        log.info("fundamental(%s): using yfinance fallback data (screener.in unavailable)", symbol)
+    # data_quality reflects source: FULL = screener.in, FALLBACK = yfinance (real but partial)
+    _raw_data_quality = "FULL" if _screener_used else "FALLBACK"
 
     # ── 1a. Data completeness check ──────────────────────────────────────────
     _snapshot = {
@@ -1737,6 +1746,9 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
         "danger_drop_pct":   danger_drop_pct,
         "danger_confidence": danger_confidence,
         "data_sources":      data_sources,
+        # data_quality: FULL=screener.in, FALLBACK=yfinance (real but partial),
+        # ESTIMATED/PARTIAL/NO_DATA from DataCompletenessValidator or valuation proxy
+        "data_quality":      _raw_data_quality,
         "agent_name":        AGENT_NAME,
         # Forward estimates (None if unavailable)
         "forward_estimates": forward_est if forward_est else None,

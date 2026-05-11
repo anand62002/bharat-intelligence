@@ -715,8 +715,22 @@ def get_screener_data(symbol: str) -> dict | None:
             break
 
     if resp is None:
-        log.error("get_screener_data(%s): all URL variants returned non-200", symbol)
-        return None
+        log.warning(
+            "get_screener_data(%s): screener.in unavailable — trying yfinance fallback",
+            symbol,
+        )
+        # ── yfinance fallback ─────────────────────────────────────────────────
+        # Resolve to yfinance symbol (try .NS first, then .BO)
+        from data.symbol_map import YF_SYMBOL_MAP
+        clean_sym = symbol.replace(".NS", "").replace(".BO", "").upper()
+        yf_sym = YF_SYMBOL_MAP.get(clean_sym) or f"{clean_sym}.NS"
+        fb = _get_yfinance_fundamentals(yf_sym, clean_sym)
+        if fb is None and not yf_sym.endswith(".BO"):
+            # Try BSE suffix as last resort
+            fb = _get_yfinance_fundamentals(f"{clean_sym}.BO", clean_sym)
+        if fb is not None:
+            log.info("get_screener_data(%s): returning yfinance fallback data", symbol)
+        return fb
 
     try:
         resp.raise_for_status()
@@ -947,6 +961,138 @@ def _safe_float(val: str) -> float | None:
     try:
         return float(str(val).strip())
     except (ValueError, TypeError):
+        return None
+
+
+# ─── 5b. yfinance fundamentals fallback ──────────────────────────────────────
+
+def _get_yfinance_fundamentals(yf_symbol: str, display_symbol: str) -> dict | None:
+    """
+    Extract fundamental ratios from yfinance Ticker.info as a fallback when
+    screener.in is unavailable (blocked IP, timeout, 403, etc.).
+
+    Maps yfinance fields to the same output schema as get_screener_data() so
+    agents work without code changes.  Fields that yfinance doesn't provide
+    (CAGR series, promoter pledging, FII/DII split) are returned as None.
+
+    Returns the same schema as get_screener_data() with two additions:
+      data_source      — "yfinance_fallback"  (agents can check data quality)
+      sector           — sector string from yfinance (used by macro sector adj)
+
+    Returns None if yfinance also fails.
+    """
+    try:
+        ticker = yf.Ticker(yf_symbol)
+        info   = ticker.info or {}
+
+        if not info or info.get("quoteType") not in (
+            "EQUITY", "MUTUALFUND", None
+        ):
+            # Empty info dict or a non-equity type we can't use
+            log.debug("_get_yfinance_fundamentals(%s): empty or non-equity info", yf_symbol)
+            return None
+
+        def _pct(val, mult=100.0):
+            """Convert decimal fraction → percentage, return None if unavailable."""
+            try:
+                f = float(val)
+                return round(f * mult, 2) if f != 0 else None
+            except (TypeError, ValueError):
+                return None
+
+        def _raw(val):
+            try:
+                f = float(val)
+                return round(f, 4) if f != 0 else None
+            except (TypeError, ValueError):
+                return None
+
+        # ── P/E ───────────────────────────────────────────────────────────────
+        pe = _raw(info.get("trailingPE") or info.get("forwardPE"))
+
+        # ── Revenue growth (YoY %) ────────────────────────────────────────────
+        # yfinance revenueGrowth is a decimal (0.12 = 12%)
+        rev_growth = _pct(info.get("revenueGrowth"))
+
+        # ── EBITDA / OPM margin ───────────────────────────────────────────────
+        # operatingMargins is a better proxy for OPM than ebitdaMargins
+        ebitda_margin = _pct(info.get("operatingMargins") or info.get("ebitdaMargins"))
+
+        # ── Debt / Equity ─────────────────────────────────────────────────────
+        # yfinance debtToEquity is already a ratio (e.g. 0.45 = 45%), divide by 100
+        de_raw = info.get("debtToEquity")
+        debt_equity = round(float(de_raw) / 100.0, 3) if de_raw not in (None, 0) else None
+
+        # ── ROCE — approximated as EBIT / (Total Assets - Current Liabilities) ─
+        # yfinance doesn't give ROCE directly; use returnOnAssets as a rough proxy
+        roce = _pct(info.get("returnOnAssets"))
+
+        # ── ROE ───────────────────────────────────────────────────────────────
+        roe = _pct(info.get("returnOnEquity"))
+
+        # ── Promoter holding — yfinance heldPercentInsiders (US-centric) ──────
+        # For Indian stocks this is often 0 or very low; treat as best-effort
+        promoter_holding = _pct(info.get("heldPercentInsiders"))
+
+        # ── Institutional holding — split unavailable; use total institutions ──
+        # For Indian stocks: FII+DII combined from heldPercentInstitutions
+        inst_total = _pct(info.get("heldPercentInstitutions"))
+        # Split 60/40 FII/DII as a rough estimate (India average is ~60% FII of inst.)
+        fii_est = round(inst_total * 0.60, 2) if inst_total else None
+        dii_est = round(inst_total * 0.40, 2) if inst_total else None
+
+        # ── OCF margin ────────────────────────────────────────────────────────
+        ocf_abs  = info.get("operatingCashflow") or info.get("freeCashflow")
+        rev_abs  = info.get("totalRevenue")
+        ocf_margin = None
+        if ocf_abs and rev_abs and float(rev_abs) > 0:
+            ocf_margin = round(float(ocf_abs) / float(rev_abs) * 100, 2)
+
+        # ── Earnings growth ───────────────────────────────────────────────────
+        # earningsGrowth is YoY (decimal); map to eps_cagr_3y as best-effort
+        eps_cagr_approx = _pct(info.get("earningsGrowth"))
+
+        result = {
+            "pe":               pe,
+            "revenue_growth":   rev_growth,
+            "ebitda_margin":    ebitda_margin,
+            "debt_equity":      debt_equity,
+            "roce":             roce,
+            "roe":              roe,
+            "promoter_holding": promoter_holding,
+            "promoter_pledging": None,          # not available in yfinance
+            "revenue_growth_qoq": None,         # not in yfinance.info
+            "revenue_cagr_3y":  None,           # not in yfinance.info
+            "revenue_cagr_5y":  None,
+            "eps_cagr_3y":      eps_cagr_approx,  # YoY as rough proxy
+            "eps_cagr_5y":      None,
+            "interest_coverage": None,          # not in yfinance.info
+            "fii_holding_pct":  fii_est,        # estimated (inst × 0.60)
+            "dii_holding_pct":  dii_est,        # estimated (inst × 0.40)
+            "ocf_margin":       ocf_margin,
+            # Extra context fields
+            "sector":           info.get("sector") or info.get("industry"),
+            "market_cap":       info.get("marketCap"),
+            "data_source":      "yfinance_fallback",
+        }
+
+        # Validate: at least pe or roe or revenue_growth must be non-None
+        if all(result.get(k) is None for k in ("pe", "roe", "revenue_growth", "ebitda_margin")):
+            log.warning(
+                "_get_yfinance_fundamentals(%s): all key fields None — info incomplete",
+                yf_symbol,
+            )
+            return None
+
+        log.info(
+            "_get_yfinance_fundamentals(%s): pe=%.1f roe=%.1f revg=%.1f%% (fallback)",
+            display_symbol,
+            pe or 0, roe or 0, rev_growth or 0,
+        )
+        return result
+
+    except Exception as exc:
+        log.warning("_get_yfinance_fundamentals(%s): %s", yf_symbol, exc)
         return None
 
 
