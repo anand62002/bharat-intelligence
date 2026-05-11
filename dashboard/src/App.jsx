@@ -876,7 +876,7 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
 }
 
 // ─── RESEARCH DISCOVERY TAB ───────────────────────────────────────────────────
-function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discoveryUniverse: _du, discoveryRuns: _dr, apiLoaded}){
+function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discoveryUniverse: _du, discoveryRuns: _dr, apiLoaded, valuationCache, setValuationCache}){
   const _universe = Array.isArray(_du) ? _du : [];
   const _runs     = Array.isArray(_dr) ? _dr : [];
   const [selectedId, setSelectedId] = useState(_universe[0]?.id || null);
@@ -1873,7 +1873,7 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
         .replace(/<portfolio_action>[\s\S]*?<\/portfolio_action>/g,"")
         .replace(/<fetch_warren_bot>[^<]+<\/fetch_warren_bot>/gi,"")
         .trim();
-      if(actionMatch){try{onPortfolioUpdate(JSON.parse(actionMatch[1].trim()));}catch(e){}}
+      if(actionMatch){try{onPortfolioUpdate(JSON.parse(actionMatch[1].trim()));}catch(e){console.error("portfolio_action parse failed:",e,actionMatch[1]);}}
       setMessages(p=>[...p,{role:"assistant",text:displayText,hasAction:!!actionMatch}]);
     }catch(e){setMessages(p=>[...p,{role:"assistant",text:"Connection error — check API configuration."}]);}
     setLoading(false);
@@ -2275,9 +2275,29 @@ export default function App(){
         });
       }
     } else if(action.action==="exit"){
+      // Optimistic local update
       setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="holding"
-        ?{...h,status:"exited",currentPrice:Number(action.exitPrice)||h.currentPrice,notes:action.notes||"Exited"}
+        ?{...h,status:"exited",currentPrice:Number(action.exitPrice)||h.currentPrice,notes:action.notes||"Exited via ARIA",_saving:true}
         :h));
+      // Persist exit to backend — POST with status CLOSED
+      if(API_URL){
+        apiFetch("/api/portfolio",{
+          method:"POST",
+          body:JSON.stringify({
+            symbol:        action.symbol,
+            status:        "CLOSED",
+            current_price: Number(action.exitPrice)||undefined,
+            notes:         action.notes||"Exited via ARIA",
+          }),
+        }).then(()=>{
+          setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="exited"
+            ?{...h,_saving:false}:h));
+        }).catch(err=>{
+          console.error("Portfolio exit save failed:", err);
+          setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="exited"
+            ?{...h,_saving:false,_error:true,notes:"⚠️ Exit not saved — check connection"}:h));
+        });
+      }
     }
   },[]);
 
@@ -2380,6 +2400,8 @@ export default function App(){
                 discoveryUniverse={discoveryUniverse}
                 discoveryRuns={discoveryRuns}
                 apiLoaded={apiLoaded}
+                valuationCache={valuationCache}
+                setValuationCache={setValuationCache}
                 onAddToPortfolio={(stock)=>{
                   setAriaContext({type:"discovery",id:stock.id});
                   setSelDiscoveryId(stock.id);
