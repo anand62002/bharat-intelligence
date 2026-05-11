@@ -1077,27 +1077,41 @@ async def upsert_portfolio(
                   .execute()
                   .data or [])
 
-    row: dict[str, Any] = {
-        "symbol":         display_symbol,
-        "yf_symbol":      yf_symbol,          # stored for future price refreshes
-        "name":           payload.get("name")           or display_symbol,
-        "sector":         payload.get("sector")         or "—",
-        "qty":            int(payload.get("qty") or 1),
-        "avg_buy":        float(payload.get("avg_buy") or 0),
-        "current_price":  current_price,
-        "target_price":   float(payload.get("target_price")  or 0) or None,
-        "stoploss_price": float(payload.get("stoploss_price") or 0) or None,
-        "notes":          payload.get("notes")          or "",
-        "linked_rec_id":  payload.get("linked_rec_id"),
-        "status":         payload.get("status")         or "OPEN",
-    }
-
     if existing:
+        # ── UPDATE: only touch fields explicitly present in the payload ─────────
+        # This is critical for partial-sell and status-only updates — we must NOT
+        # clobber qty/avg_buy/sector/name with defaults when only status is sent.
+        update_row: dict[str, Any] = {"yf_symbol": yf_symbol}
+        if "name"          in payload and payload["name"]:          update_row["name"]          = payload["name"]
+        if "sector"        in payload and payload["sector"]:        update_row["sector"]        = payload["sector"]
+        if "qty"           in payload and payload["qty"] is not None: update_row["qty"]         = int(payload["qty"])
+        if "avg_buy"       in payload and payload["avg_buy"]:       update_row["avg_buy"]       = float(payload["avg_buy"])
+        if current_price is not None:                               update_row["current_price"] = current_price
+        if "target_price"  in payload:                              update_row["target_price"]  = float(payload["target_price"]  or 0) or None
+        if "stoploss_price" in payload:                             update_row["stoploss_price"]= float(payload["stoploss_price"] or 0) or None
+        if "notes"         in payload:                              update_row["notes"]         = payload["notes"] or ""
+        if "linked_rec_id" in payload:                              update_row["linked_rec_id"] = payload["linked_rec_id"]
+        if "status"        in payload:                              update_row["status"]        = payload["status"]
         result = (db.table("portfolio_holdings")
-                    .update(row)
+                    .update(update_row)
                     .eq("id", existing[0]["id"])
                     .execute())
     else:
+        # ── INSERT: require all fields, use sensible defaults for optional ones ──
+        row: dict[str, Any] = {
+            "symbol":         display_symbol,
+            "yf_symbol":      yf_symbol,
+            "name":           payload.get("name")           or display_symbol,
+            "sector":         payload.get("sector")         or "—",
+            "qty":            int(payload.get("qty") or 1),
+            "avg_buy":        float(payload.get("avg_buy") or 0),
+            "current_price":  current_price,
+            "target_price":   float(payload.get("target_price")  or 0) or None,
+            "stoploss_price": float(payload.get("stoploss_price") or 0) or None,
+            "notes":          payload.get("notes")          or "",
+            "linked_rec_id":  payload.get("linked_rec_id"),
+            "status":         payload.get("status")         or "OPEN",
+        }
         result = db.table("portfolio_holdings").insert(row).execute()
 
     if result.data:

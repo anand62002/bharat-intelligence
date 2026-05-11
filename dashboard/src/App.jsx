@@ -1781,9 +1781,12 @@ BUY action JSON shape (use when user mentions buying/adding a position):
 {"action":"add","symbol":"DIXON","qty":20,"avgBuy":15800,"targetPrice":19500,"stoplossPrice":13800,"sector":"Electronics/PLI","name":"Dixon Technologies","notes":"Added via ARIA","linkedRecId":null}
 
 SELL / EXIT action JSON shape (use when user says they sold, exited, booked profit, or squared off):
-{"action":"exit","symbol":"DIXON","exitPrice":18500,"notes":"Booked profit at target"}
+{"action":"exit","symbol":"DIXON","exitPrice":18500,"qty":20,"notes":"Booked profit at target"}
   • exitPrice = the price they sold at (required)
+  • qty = number of shares sold (required). Ask the user if unclear how many shares they sold.
   • symbol = plain NSE code of the stock they exited
+  • PARTIAL SELL: if user sold FEWER shares than their full holding (e.g. "sold 125 of my 140 Voltas"), set qty to the number they sold (125). The remaining shares (15) will stay in portfolio automatically.
+  • FULL EXIT: if user sold all shares or says "exited", set qty to their full holding size.
   • Only output exit action when user clearly states they have already sold (past tense). Do NOT output exit for "should I sell?" questions.
 
 IMPORTANT: Output ONLY ONE <portfolio_action> tag per response, at the very end.
@@ -2285,29 +2288,61 @@ export default function App(){
         });
       }
     } else if(action.action==="exit"){
-      // Optimistic local update
-      setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="holding"
-        ?{...h,status:"exited",currentPrice:Number(action.exitPrice)||h.currentPrice,notes:action.notes||"Exited via ARIA",_saving:true}
-        :h));
-      // Persist exit to backend — POST with status CLOSED
-      if(API_URL){
-        apiFetch("/api/portfolio",{
-          method:"POST",
-          body:JSON.stringify({
-            symbol:        action.symbol,
-            status:        "CLOSED",
-            current_price: Number(action.exitPrice)||undefined,
-            notes:         action.notes||"Exited via ARIA",
-          }),
-        }).then(()=>{
-          setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="exited"
-            ?{...h,_saving:false}:h));
-        }).catch(err=>{
-          console.error("Portfolio exit save failed:", err);
-          setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="exited"
-            ?{...h,_saving:false,_error:true,notes:"⚠️ Exit not saved — check connection"}:h));
-        });
-      }
+      const soldQty   = action.qty ? Number(action.qty) : null;
+      const exitPrice = Number(action.exitPrice) || null;
+      // Find the live holding to determine partial vs full exit
+      setPortfolio(prev=>{
+        const holding = prev.find(h=>h.symbol===action.symbol&&h.status==="holding");
+        const isPartial = holding && soldQty && soldQty < holding.qty;
+        if(isPartial){
+          // PARTIAL SELL — reduce qty, keep holding status
+          const newQty = holding.qty - soldQty;
+          const note   = action.notes||`Partial sell: ${soldQty} shares at ₹${exitPrice||"?"}`;
+          if(API_URL){
+            apiFetch("/api/portfolio",{
+              method:"POST",
+              body:JSON.stringify({
+                symbol:   action.symbol,
+                qty:      newQty,
+                notes:    note,
+                // status omitted → backend keeps OPEN
+              }),
+            }).then(()=>{
+              setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="holding"
+                ?{...h,_saving:false}:h));
+            }).catch(err=>{
+              console.error("Partial sell save failed:",err);
+              setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="holding"
+                ?{...h,_saving:false,_error:true}:h));
+            });
+          }
+          return prev.map(h=>h.symbol===action.symbol&&h.status==="holding"
+            ?{...h,qty:newQty,notes:note,_saving:!!API_URL}:h);
+        } else {
+          // FULL EXIT — close position
+          const note = action.notes||"Exited via ARIA";
+          if(API_URL){
+            apiFetch("/api/portfolio",{
+              method:"POST",
+              body:JSON.stringify({
+                symbol:        action.symbol,
+                status:        "CLOSED",
+                current_price: exitPrice||undefined,
+                notes:         note,
+              }),
+            }).then(()=>{
+              setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="exited"
+                ?{...h,_saving:false}:h));
+            }).catch(err=>{
+              console.error("Portfolio exit save failed:",err);
+              setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="exited"
+                ?{...h,_saving:false,_error:true,notes:"⚠️ Exit not saved — check connection"}:h));
+            });
+          }
+          return prev.map(h=>h.symbol===action.symbol&&h.status==="holding"
+            ?{...h,status:"exited",currentPrice:exitPrice||h.currentPrice,notes:note,_saving:!!API_URL}:h);
+        }
+      });
     }
   },[]);
 
