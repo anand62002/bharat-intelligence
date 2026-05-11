@@ -32,7 +32,7 @@
 | BF-5 | Historical events embeddings backfill (98→150/150) | Data | ✅ **DONE** | 2026-05-12 |
 | BF-6 | ARIA partial sell support + backend field-clobber fix | Enhancement | ✅ **DONE** | 2026-05-12 |
 | BF-7 | Symbol resolution: SHAKTIPUMPS, GEVERNOVA, ELFORGE | Bug Fix | ✅ **DONE** | 2026-05-12 |
-| P2-A | Data provider diversification (Trendlyne fallback) | Phase 2 | ⬜ TODO | — |
+| P2-A | Data provider diversification (yfinance fallback) | Phase 2 | ✅ **DONE** | 2026-05-12 |
 | P2-B | RAG corpus auto-refresh monthly job | Phase 2 | ⬜ TODO | — |
 | P2-C | Portfolio-level concentration alerts | Phase 2 | ⬜ TODO | — |
 | P2-D | Earnings calendar auto-population job | Phase 2 | ⬜ TODO | — |
@@ -46,7 +46,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 20 / 33 items complete (61%)**
+**Progress: 21 / 33 items complete (64%)**
 
 ---
 
@@ -394,16 +394,40 @@ Added to both `data/symbol_map.py::YF_SYMBOL_MAP` and `api/main.py::_NSE_OVERRID
 
 ---
 
-### ⬜ P2-A: Data Provider Diversification
-**Problem:** 100% dependency on screener.in. One IP block = all fundamental agents down.  
-**Fix:** Add Trendlyne as fallback in `data/fetchers.py`. Primary = screener.in → fallback = Trendlyne.
+### ✅ P2-A: Data Provider Diversification — yfinance Fallback
+**Status:** Done 2026-05-12  
+**Files changed:** `data/fetchers.py`, `agents/fundamental.py`, `agents/discovery_screener.py`
 
-**Manual setup:**
-1. Sign up at https://trendlyne.com/developers → get API key
-2. Add `TRENDLYNE_API_KEY` to Railway env vars
-3. **Cost:** ₹999/month
+**What was built:**
 
-**Files:** `data/fetchers.py` (add `_get_trendlyne_data()` fallback)
+#### `data/fetchers.py` — `_get_yfinance_fundamentals()`
+New function extracts fundamentals from `yfinance Ticker.info` — completely free, no API key, already in stack. Maps to the same output schema as `get_screener_data()`:
+- `pe` (trailingPE), `revenue_growth` (revenueGrowth ×100), `ebitda_margin` (operatingMargins ×100)
+- `debt_equity` (debtToEquity ÷100), `roce` (returnOnAssets ×100 as proxy), `roe` (returnOnEquity ×100)
+- `fii_holding_pct` + `dii_holding_pct` estimated from `heldPercentInstitutions` (60/40 split)
+- `ocf_margin` (operatingCashflow ÷ totalRevenue ×100), `sector`, `market_cap`
+- Returns `data_source: "yfinance_fallback"` so agents know which path was taken
+
+`get_screener_data()`: when all screener.in URL variants fail (IP block on Railway), calls yfinance fallback. Returns None only if both fail.
+
+#### `agents/fundamental.py` — data quality tracking
+- Detects fallback via `raw.get("data_source") == "yfinance_fallback"`
+- `data_sources` gets `"yfinance_fundamentals"` instead of `"screener_in"`
+- Result now includes `data_quality` key: `"FULL"` for screener.in, `"FALLBACK"` for yfinance
+- `data_quality` was previously missing entirely — discovery screener gate never fired
+
+#### `agents/discovery_screener.py` — FALLBACK ≠ ESTIMATED
+- `"FALLBACK"` is NOT in the `is_estimated` blocked list — CRITICAL tier still allowed
+- yfinance data is real market data, just less complete (no CAGR, no promoter pledging split)
+- Logs when CRITICAL promotion uses fallback data
+
+**Decision: yfinance over Trendlyne (₹999/month)**
+yfinance provides the most critical fields (P/E, ROE, operating margin, revenue growth, D/E, institutional %) and is already in the stack with zero cost. Trendlyne would add CAGR series and promoter pledging but requires manual API signup + monthly cost. Can add Trendlyne as a second fallback later if needed.
+
+**Fields NOT available in yfinance fallback (returned as None):**
+`revenue_cagr_3y`, `revenue_cagr_5y`, `eps_cagr_5y`, `promoter_pledging`, `interest_coverage`, exact FII/DII split
+
+**Verified:** RELIANCE.NS → pe=23.3, roe=9.1, revg=12.5%, ebitda=9.98%, de=0.37
 
 ---
 
@@ -548,7 +572,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P1-B** | Options real data feed (ICICI Breeze) | Code + Service | ₹0 | L | ✅ Done |
 | **P1-C** | GPT-4o-mini as 3rd validation judge + Anthropic lazy-init | Code | OpenAI API (existing) | S | ✅ Done |
 | **P1-D** | Calibrate composite score thresholds | Code | None | XS | ✅ Done |
-| **P2-A** | Data provider diversification (Trendlyne) | Code + Service | ₹999/mo | L | ⬜ TODO |
+| **P2-A** | Data provider diversification (yfinance fallback) | Code | ₹0 | L | ✅ Done |
 | **P2-B** | RAG corpus auto-refresh monthly job | Code | None (OpenAI existing) | M | ⬜ TODO |
 | **P2-C** | Portfolio-level concentration alerts | Code | None | M | ⬜ TODO |
 | **P2-D** | Earnings calendar auto-population | Code | None | M | ⬜ TODO |
@@ -573,7 +597,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 |---|---|---|
 | Quantsapp Pro (options) | ₹2,499 (~$30) | P1-B — if no Upstox demat |
 | Upstox API (options) | ₹0 | P1-B — if opening free demat |
-| Trendlyne API (fundamentals fallback) | ₹999 (~$12) | P2-A |
+| Trendlyne API (optional 2nd fallback) | ₹999 (~$12) | P2-A optional — yfinance fallback already deployed |
 | OpenAI API (GPT-4o-mini judges) | ~₹40-80/mo | P1-C — marginal (key already in stack) |
 | **Total new monthly** | **₹1,039–3,498** | |
 
@@ -590,5 +614,5 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.0 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session complete)*  
-*Next milestone: P2-A (data provider diversification)*
+*Document version: 3.1 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session + P2-A complete)*  
+*Next milestone: P2-B (RAG corpus auto-refresh)*
