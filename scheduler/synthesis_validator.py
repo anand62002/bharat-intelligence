@@ -354,11 +354,37 @@ async def _call_anthropic_judge(
     prompt:      str,
     ant_client:  Any,
 ) -> tuple[int, str]:
-    """Call a Claude model via Anthropic SDK. Returns (score 1-5, rationale)."""
+    """
+    Call a Claude model via Anthropic SDK.  Returns (score 1-5, rationale).
+
+    Lazy-init: if ant_client is None (e.g. called from tests that don't
+    pre-build the client), falls back to reading ANTHROPIC_API_KEY from env
+    and constructing its own client — mirrors the self-healing pattern in
+    _call_openai_judge.
+    """
+    # ── Resolve client ────────────────────────────────────────────────────────
+    _client = ant_client
+    if _client is None:
+        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                f"{judge_name}/{rubric_name}: Anthropic client not provided and "
+                "ANTHROPIC_API_KEY env var is not set — Claude judge unavailable; "
+                "set ANTHROPIC_API_KEY in Railway env vars"
+            )
+        try:
+            import anthropic as _anthropic  # type: ignore[import]
+            _client = _anthropic.Anthropic(api_key=api_key)
+        except ImportError:
+            raise RuntimeError(
+                f"{judge_name}/{rubric_name}: anthropic package not installed — "
+                "run: pip install anthropic"
+            )
+    # ── API call ──────────────────────────────────────────────────────────────
     try:
         response = await asyncio.wait_for(
             asyncio.to_thread(
-                ant_client.messages.create,
+                _client.messages.create,
                 model      = model_id,
                 max_tokens = JUDGE_MAX_TOKENS,
                 messages   = [{"role": "user", "content": prompt}],
