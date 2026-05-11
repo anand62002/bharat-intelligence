@@ -260,7 +260,7 @@ def main() -> None:
             if ok:
                 succeeded += 1
                 log.info(
-                    "[%d/%d] id=%d embedded OK (dim=%d)",
+                    "[%s/%s] id=%s embedded OK (dim=%s)",
                     processed, min(counts["without_embedding"], max_rows),
                     row_id, len(embedding),
                 )
