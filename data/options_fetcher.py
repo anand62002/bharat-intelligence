@@ -284,6 +284,51 @@ def _build_strike_range(spot: float, step: int, pct: float = 0.08) -> list[int]:
     return list(range(lo, hi + step, step))
 
 
+def _breeze_call_with_retry(fn, *args, max_retries: int = 3, **kwargs) -> dict:
+    """
+    Call a Breeze SDK method through the proxy with automatic retry.
+
+    Fixie has two outbound IPs but ICICI may only have one whitelisted yet.
+    Each retry gets a fresh proxy connection which may land on the other IP.
+    Also handles transient network errors.
+
+    Returns the raw Breeze response dict, or {"Success": None, "Status": 500}.
+    """
+    from data.breeze_auth import breeze_proxy
+    import time as _time
+
+    _IP_ERRORS = {"ip restriction", "ip not whitelisted", "invalid ip", "access denied"}
+
+    last_resp: dict = {"Success": None, "Status": 500, "Error": "max_retries_exceeded"}
+    for attempt in range(1, max_retries + 1):
+        try:
+            with breeze_proxy():
+                resp = fn(*args, **kwargs)
+            last_resp = resp or last_resp
+
+            # Success
+            if (resp or {}).get("Status") == 200 or (resp or {}).get("Success"):
+                return resp
+
+            # IP-related rejection — retry immediately (different proxy route)
+            err = str((resp or {}).get("Error", "")).lower()
+            if any(e in err for e in _IP_ERRORS):
+                log.debug("Breeze IP rejection on attempt %d/%d — retrying", attempt, max_retries)
+                _time.sleep(0.2)
+                continue
+
+            # Non-IP error (e.g. No Data Found) — don't retry
+            return resp
+
+        except Exception as exc:
+            log.debug("Breeze call exception attempt %d/%d: %s", attempt, max_retries, exc)
+            last_resp = {"Success": None, "Status": 500, "Error": str(exc)}
+            if attempt < max_retries:
+                _time.sleep(0.3)
+
+    return last_resp
+
+
 def _fetch_one_breeze_strike(
     breeze,
     stock_code: str,
@@ -292,18 +337,17 @@ def _fetch_one_breeze_strike(
     strike: int,
     right: str,
 ) -> Optional[dict]:
-    """Fetch a single strike/right pair from Breeze API."""
+    """Fetch a single strike/right pair from Breeze API (with IP-retry)."""
     try:
-        from data.breeze_auth import breeze_proxy
-        with breeze_proxy():
-            resp = breeze.get_option_chain_quotes(
-                stock_code=stock_code,
-                exchange_code=exchange_code,
-                product_type="options",
-                expiry_date=expiry_date,
-                right=right.lower(),
-                strike_price=str(strike),
-            )
+        resp = _breeze_call_with_retry(
+            breeze.get_option_chain_quotes,
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product_type="options",
+            expiry_date=expiry_date,
+            right=right.lower(),
+            strike_price=str(strike),
+        )
         rows = (resp or {}).get("Success") or []
         return rows[0] if rows else None
     except Exception as exc:
@@ -345,19 +389,18 @@ def _fetch_breeze_option_chain(symbol: str) -> Optional[list[dict]]:
     step       = _STRIKE_STEP.get(sym, _DEFAULT_STRIKE_STEP)
 
     # ── Strategy 1: bulk call with empty strike_price ──────────────────────
-    from data.breeze_auth import breeze_proxy
     rows_bulk: list[dict] = []
     for right in ("call", "put"):
         try:
-            with breeze_proxy():
-                resp = breeze.get_option_chain_quotes(
-                    stock_code=stock_code,
-                    exchange_code=exchange,
-                    product_type="options",
-                    expiry_date=expiry,
-                    right=right,
-                    strike_price="",
-                )
+            resp = _breeze_call_with_retry(
+                breeze.get_option_chain_quotes,
+                stock_code=stock_code,
+                exchange_code=exchange,
+                product_type="options",
+                expiry_date=expiry,
+                right=right,
+                strike_price="",
+            )
             success = (resp or {}).get("Success") or []
             rows_bulk.extend(success)
         except Exception as exc:
