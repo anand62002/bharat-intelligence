@@ -181,6 +181,12 @@ _NSE_OVERRIDES: dict[str, str] = {
     "LNT":                   "LT.NS",
     "M&M":                   "M&M.NS",
     "MAHINDRA":              "M&M.NS",
+    # ── BSE-only / wrong-suffix fixes ─────────────────────────────────────────
+    "SHAKTIPUMPS":           "SHAKTIPUMP.NS", # Shakti Pumps — NSE ticker is SHAKTIPUMP (no S)
+    "GEVERNOVA":             "522275.BO",     # GE Vernova T&D India Ltd — BSE code only in YF
+    "GE VERNOVA":            "522275.BO",     # space alias
+    "GETDINDIA":             "522275.BO",     # legacy GE T&D India alias
+    "ELFORGE":               "ELFORGE.BO",   # E L Forge Ltd — BSE listed; .NS returns no data
 }
 
 # Cache for resolved symbols so we don't hit yfinance on every request

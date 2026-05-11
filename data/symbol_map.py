@@ -83,6 +83,14 @@ YF_SYMBOL_MAP: dict[str, Optional[str]] = {
     "MUTHOOT":          "MUTHOOTFIN.NS",      # Muthoot Finance (common short alias)
     "BAJAJ FINANCE":    "BAJFINANCE.NS",      # space alias
     "BAJAJFINANCE":     "BAJFINANCE.NS",      # no-space alias
+
+    # ── BSE-only / wrong-suffix fixes ─────────────────────────────────────────
+    "SHAKTIPUMPS":      "SHAKTIPUMP.NS",      # Shakti Pumps — NSE ticker is SHAKTIPUMP (no S)
+    "GEVERNOVA":        "522275.BO",          # GE Vernova T&D India Ltd — NSE ticker absent in YF;
+                                              # BSE code 522275 is the only working YF handle
+    "GE VERNOVA":       "522275.BO",          # space-variant alias
+    "GETDINDIA":        "522275.BO",          # legacy GE T&D India alias
+    "ELFORGE":          "ELFORGE.BO",         # E L Forge Ltd — BSE listed; ELFORGE.NS returns no data
     "HDFCFIN":          "HDFCBANK.NS",        # HDFC Bank (post-merger)
     "L&T":              "LT.NS",              # Larsen & Toubro
     "LNT":              "LT.NS",              # another L&T alias
