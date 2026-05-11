@@ -23,7 +23,7 @@
 | P0-F | Replace index-level FII filter → institutional_holding_pct | Phase 0 | ✅ **DONE** | 2026-05-04 |
 | P1-A | Historical backtest framework | Phase 1 | ✅ **DONE** | 2026-05-09 |
 | P1-B | Options real data feed (ICICI Breeze Connect) | Phase 1 | ✅ **DONE** | 2026-05-11 |
-| P1-C | GPT-4o as independent 3rd validation judge | Phase 1 | ⬜ TODO | — |
+| P1-C | GPT-4o-mini as independent 3rd validation judge | Phase 1 | ✅ **DONE** | 2026-05-11 |
 | P1-D | Calibrate composite score thresholds (75/58/30) | Phase 1 | ✅ **DONE** | 2026-05-04 |
 | P2-A | Data provider diversification (Trendlyne fallback) | Phase 2 | ⬜ TODO | — |
 | P2-B | RAG corpus auto-refresh monthly job | Phase 2 | ⬜ TODO | — |
@@ -39,7 +39,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 12 / 26 items complete (46%)**
+**Progress: 13 / 26 items complete (50%)**
 
 ---
 
@@ -462,7 +462,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P0-F** | Replace FII filter with institutional_holding_pct | Code | None | S | ✅ Done |
 | **P1-A** | Historical backtest framework | Code + SQL | None | XL | ✅ Done |
 | **P1-B** | Options real data feed (ICICI Breeze) | Code + Service | ₹0 | L | ✅ Done |
-| **P1-C** | GPT-4o as 3rd validation judge | Code | OpenAI API (existing) | S | ⬜ TODO |
+| **P1-C** | GPT-4o-mini as 3rd validation judge | Code | OpenAI API (existing) | S | ✅ Done |
 | **P1-D** | Calibrate composite score thresholds | Code | None | XS | ✅ Done |
 | **P2-A** | Data provider diversification (Trendlyne) | Code + Service | ₹999/mo | L | ⬜ TODO |
 | **P2-B** | RAG corpus auto-refresh monthly job | Code | None (OpenAI existing) | M | ⬜ TODO |

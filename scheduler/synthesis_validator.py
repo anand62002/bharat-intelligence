@@ -1,8 +1,16 @@
 """
 scheduler/synthesis_validator.py — Pre-publication Agreement-Gated Validation
 ==============================================================================
-Three independent LLM judges (Claude Haiku, Sonnet, Opus) score a synthesised
-recommendation across 5 rubrics before it is published to the database.
+Three independent LLM judges (GPT-4o-mini, Claude Sonnet, Claude Opus) score a
+synthesised recommendation across 5 rubrics before it is published to the database.
+
+Judge diversity (P1-C):
+  Judge 1 — GPT-4o-mini   (OpenAI)    — independent provider, different training
+  Judge 2 — Claude Sonnet (Anthropic) — primary synthesis model
+  Judge 3 — Claude Opus   (Anthropic) — highest-quality Anthropic judge
+
+Using three Claude variants was a known gap (correlated sampling — all three could
+agree on the same hallucination).  GPT-4o-mini as judge 1 breaks this correlation.
 
 A quality-weighted inter-rater kappa is computed per dimension and in aggregate:
 
@@ -44,13 +52,22 @@ from typing import Any, Optional
 log = logging.getLogger(__name__)
 
 # ── Model identifiers (overridable via env vars) ──────────────────────────────
+# Judge 1: GPT-4o-mini — independent provider (requires OPENAI_API_KEY)
+#   Falls back to claude-haiku if OPENAI_API_KEY is not set.
+# Judge 2: Claude Sonnet — mid-tier Anthropic
+# Judge 3: Claude Opus   — top-tier Anthropic
 JUDGE_MODELS: dict[str, str] = {
-    "haiku":  os.getenv("JUDGE_MODEL_HAIKU",  "claude-haiku-4-5"),
+    "gpt":    os.getenv("JUDGE_MODEL_GPT",    "gpt-4o-mini"),
     "sonnet": os.getenv("JUDGE_MODEL_SONNET", "claude-sonnet-4-5"),
     "opus":   os.getenv("JUDGE_MODEL_OPUS",   "claude-opus-4-5"),
 }
 JUDGE_MAX_TOKENS = 150   # JSON score + one-sentence rationale
 JUDGE_TIMEOUT    = 45    # seconds per judge call
+
+
+def _is_openai_model(model_id: str) -> bool:
+    """True when the model should be called via OpenAI SDK (not Anthropic)."""
+    return model_id.startswith(("gpt-", "o1-", "o3-", "o4-"))
 
 # ── Kappa gate thresholds ─────────────────────────────────────────────────────
 KAPPA_SUPPRESS    = 0.50   # aggregate below this  → SUPPRESSED
@@ -330,19 +347,14 @@ def _synthesis_fields(symbol: str, sd: dict) -> dict[str, str]:
 # Individual judge call
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _call_judge(
+async def _call_anthropic_judge(
     judge_name:  str,
     model_id:    str,
     rubric_name: str,
     prompt:      str,
     ant_client:  Any,
 ) -> tuple[int, str]:
-    """
-    Ask one LLM judge to score one rubric.  Returns (score: int 1-5, rationale: str).
-
-    Raises RuntimeError on timeout, non-JSON response, or API failure so the
-    caller can gracefully degrade (treat the judge as absent for this dimension).
-    """
+    """Call a Claude model via Anthropic SDK. Returns (score 1-5, rationale)."""
     try:
         response = await asyncio.wait_for(
             asyncio.to_thread(
@@ -354,11 +366,8 @@ async def _call_judge(
             timeout=JUDGE_TIMEOUT,
         )
         text = response.content[0].text.strip()
-
-        # Strip optional markdown fences
         m = re.search(r"\{.*?\}", text, re.DOTALL)
         raw_json = m.group(0) if m else text
-
         data      = json.loads(raw_json)
         score     = max(1, min(5, int(data.get("score", 3))))
         rationale = str(data.get("rationale", ""))[:200]
@@ -370,6 +379,71 @@ async def _call_judge(
         raise RuntimeError(f"{judge_name}/{rubric_name} returned non-JSON: {exc}")
     except Exception as exc:
         raise RuntimeError(f"{judge_name}/{rubric_name} failed: {exc}")
+
+
+async def _call_openai_judge(
+    judge_name:  str,
+    model_id:    str,
+    rubric_name: str,
+    prompt:      str,
+) -> tuple[int, str]:
+    """
+    Call a GPT model via OpenAI SDK.  Returns (score 1-5, rationale).
+
+    Requires OPENAI_API_KEY env var.  If not set, raises RuntimeError
+    so the caller falls back to treating this judge as absent.
+    """
+    oai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not oai_key:
+        raise RuntimeError(
+            f"{judge_name}/{rubric_name}: OPENAI_API_KEY not set — "
+            "GPT judge unavailable; set OPENAI_API_KEY in Railway env vars"
+        )
+    try:
+        import openai  # type: ignore[import]
+
+        client = openai.OpenAI(api_key=oai_key)
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                client.chat.completions.create,
+                model      = model_id,
+                max_tokens = JUDGE_MAX_TOKENS,
+                messages   = [{"role": "user", "content": prompt}],
+                temperature= 0.1,   # near-deterministic for scoring consistency
+            ),
+            timeout=JUDGE_TIMEOUT,
+        )
+        text = response.choices[0].message.content.strip()
+        m = re.search(r"\{.*?\}", text, re.DOTALL)
+        raw_json = m.group(0) if m else text
+        data      = json.loads(raw_json)
+        score     = max(1, min(5, int(data.get("score", 3))))
+        rationale = str(data.get("rationale", ""))[:200]
+        return score, rationale
+
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"{judge_name}/{rubric_name} timed out after {JUDGE_TIMEOUT}s")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{judge_name}/{rubric_name} returned non-JSON: {exc}")
+    except Exception as exc:
+        raise RuntimeError(f"{judge_name}/{rubric_name} failed: {exc}")
+
+
+async def _call_judge(
+    judge_name:  str,
+    model_id:    str,
+    rubric_name: str,
+    prompt:      str,
+    ant_client:  Any,
+) -> tuple[int, str]:
+    """
+    Route to the correct LLM provider based on model_id prefix.
+    GPT models → OpenAI SDK.  Claude models → Anthropic SDK.
+    Returns (score: int 1-5, rationale: str).
+    """
+    if _is_openai_model(model_id):
+        return await _call_openai_judge(judge_name, model_id, rubric_name, prompt)
+    return await _call_anthropic_judge(judge_name, model_id, rubric_name, prompt, ant_client)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -422,9 +496,14 @@ async def validate_synthesis(
                 _call_judge(judge_name, model_id, rubric_name, prompt, ant_client)
             )
 
+    judge_providers = {
+        name: ("openai" if _is_openai_model(mid) else "anthropic")
+        for name, mid in JUDGE_MODELS.items()
+    }
     log.info(
-        "[%s] Validation: running %d judge calls (%d rubrics × %d models)...",
+        "[%s] Validation: running %d judge calls (%d rubrics × %d models: %s)...",
         symbol, len(coroutines), len(RUBRICS), len(JUDGE_MODELS),
+        ", ".join(f"{n}={m}({p})" for (n, m), p in zip(JUDGE_MODELS.items(), judge_providers.values())),
     )
 
     gather_results = await asyncio.gather(*coroutines, return_exceptions=True)
