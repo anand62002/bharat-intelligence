@@ -93,10 +93,33 @@ def get_breeze_client():
         if isinstance(resp, dict) and resp.get("Status") == 500:
             log.warning("Breeze session rejected: %s", resp.get("Error", "unknown"))
             return None
+
+        # Verify the session is actually live by calling a lightweight endpoint.
+        # generate_session() can silently succeed even with a wrong token — the
+        # internal session_key stays empty and every data call returns
+        # "API Session cannot be empty".
+        try:
+            check = client.get_customer_details()
+            if isinstance(check, dict) and "API Session cannot be empty" in str(check.get("Error", "")):
+                log.warning(
+                    "Breeze session token appears invalid — BREEZE_SESSION_TOKEN may be "
+                    "wrong or expired.\n"
+                    "  Get a fresh token:\n"
+                    "  1. Open: https://api.icicidirect.com/apiuser/login?api_key=%s\n"
+                    "  2. Login with ICICI Direct ID + password + TOTP\n"
+                    "  3. From the redirect URL copy the ENTIRE value after `code=`\n"
+                    "     (it looks like: ?code=XXXXXXXX&state=...)\n"
+                    "  4. Set BREEZE_SESSION_TOKEN=<that value> in your .env / Railway vars",
+                    api_key[:8] + "...",
+                )
+                return None
+        except Exception:
+            pass  # If check itself fails for other reasons, proceed optimistically
+
         _cache["client"]     = client
         _cache["created_at"] = time.time()
         _cache["token"]      = token
-        log.info("Breeze session established (api_key=...%s)", api_key[-6:])
+        log.info("Breeze session established and verified (api_key=...%s)", api_key[-6:])
         return client
 
     except ImportError:
@@ -307,20 +330,29 @@ def _manual_mode_check(api_key: str, api_secret: str) -> dict:
         log.warning(msg)
         return {"mode": "manual", "success": False, "message": msg, "hours_remaining": 0}
 
-    age   = time.time() - _cache.get("created_at", 0.0)
-    remaining = max(0.0, 24 - age / 3600)
+    # Only use cache timestamp if we actually built a client with this token.
+    # If cache is cold (created_at==0), we have no idea how old the token is —
+    # assume it's fresh (user just pasted it) rather than treating it as expired.
+    cache_ts = _cache.get("created_at", 0.0)
+    if cache_ts > 0 and _cache.get("token") == token:
+        age       = time.time() - cache_ts
+        remaining = max(0.0, 24 - age / 3600)
+    else:
+        # Token not yet used in this process — assume fresh
+        remaining = 24.0
+
     if remaining < 2:
         log.warning(
-            "Breeze session token is expiring soon (%.1f hours left). "
-            "Update BREEZE_SESSION_TOKEN in Railway env vars.", remaining
+            "Breeze session token may be expiring soon. "
+            "Update BREEZE_SESSION_TOKEN in Railway env vars if calls start failing."
         )
     else:
-        log.info("Breeze session token valid — ~%.1f hours remaining", remaining)
+        log.info("Breeze session token present — ~%.1f hours remaining (estimate)", remaining)
 
     return {
         "mode":            "manual",
         "success":         True,
-        "message":         f"Token present, ~{remaining:.1f}h remaining",
+        "message":         f"Token present, ~{remaining:.1f}h remaining (estimate)",
         "hours_remaining": round(remaining, 1),
     }
 

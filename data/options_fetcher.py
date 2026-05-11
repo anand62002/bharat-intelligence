@@ -546,17 +546,26 @@ def _fallback_metrics(symbol: str) -> dict:
         return {"source": "fallback", "error": str(exc)}
 
 
+_INDEX_YF_MAP = {
+    "NIFTY":      "^NSEI",
+    "BANKNIFTY":  "^NSEBANK",
+    "FINNIFTY":   "^NSEI",       # closest proxy
+    "MIDCPNIFTY": "^NSEI",       # closest proxy
+    "NIFTYIT":    "^CNXIT",
+}
+
+
 def _resolve_yf_sym(symbol: str) -> str:
-    """Quick resolution: use symbol_map if available, else append .NS."""
+    """Quick resolution: index overrides first, then YF_SYMBOL_MAP, then .NS suffix."""
+    sym = symbol.upper()
+    # Index symbols must be resolved before YF_SYMBOL_MAP (which would return NIFTY.NS)
+    if sym in _INDEX_YF_MAP:
+        return _INDEX_YF_MAP[sym]
     try:
         from data.symbol_map import YF_SYMBOL_MAP
-        return YF_SYMBOL_MAP.get(symbol.upper(), symbol.upper() + ".NS")
+        return YF_SYMBOL_MAP.get(sym, sym + ".NS")
     except ImportError:
-        pass
-    sym = symbol.upper()
-    if sym in _NSE_INDEX_SYMBOLS:
-        return "^NSEI" if sym == "NIFTY" else "^NSEBANK"
-    return sym + ".NS"
+        return sym + ".NS"
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
