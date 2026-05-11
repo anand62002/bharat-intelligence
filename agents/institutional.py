@@ -252,6 +252,13 @@ def _fetch_historical_flows(sessions: int = 10) -> list[dict]:
     unconfigured — callers handle missing history gracefully.
 
     Returns list of {date, fii_net, dii_net} sorted oldest-first.
+
+    Zero-filter: rows where BOTH fii_net=0.0 AND dii_net=0.0 are treated as
+    missing-data placeholders (not real zero-flow trading days).  Real zero-flow
+    days (market holidays, rare genuine flat days) are extremely uncommon and
+    would have at least one non-zero field.  Storing 0.0 has been the system's
+    default when the NSE API was blocked and no live data was available.
+    Excluding these prevents stale zeros from masking a NO_DATA state.
     """
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -259,16 +266,31 @@ def _fetch_historical_flows(sessions: int = 10) -> list[dict]:
         return []
     try:
         from supabase import create_client
+        # Fetch more rows than needed so we still have enough after zero-filtering
         client = create_client(url, key)
         resp = (
             client.table("institutional_flows")
-            .select("session_date, fii_net, dii_net")
+            .select("session_date, fii_net, dii_net, fii_buy, fii_sell")
             .order("session_date", desc=True)
-            .limit(sessions)
+            .limit(sessions * 3)       # over-fetch to survive zero filtering
             .execute()
         )
         rows = resp.data or []
-        return sorted(rows, key=lambda r: r.get("session_date", ""))
+        # Filter: skip rows where both fii_net and dii_net are 0 or None
+        # (treat as data-unavailable placeholders, not real zero-flow days)
+        valid = [
+            r for r in rows
+            if (r.get("fii_net") or 0.0) != 0.0 or (r.get("dii_net") or 0.0) != 0.0
+        ]
+        if not valid:
+            log.warning(
+                "_fetch_historical_flows: all %d DB rows have fii_net=dii_net=0 "
+                "(stale placeholders). Treating as no data available.",
+                len(rows),
+            )
+        # Sort oldest-first and keep only the requested number of sessions
+        valid_sorted = sorted(valid, key=lambda r: r.get("session_date", ""))
+        return valid_sorted[-sessions:]
     except Exception as exc:
         log.debug("Supabase flow fetch failed (non-critical): %s", exc)
         return []

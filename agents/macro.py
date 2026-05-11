@@ -14,7 +14,7 @@ import sys
 from datetime import date, datetime, timedelta
 from typing import Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote_plus, urlencode
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
@@ -220,6 +220,200 @@ def _score_rbi_rate(repo: Optional[float]) -> tuple[int, str]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# India macro news monitoring  (catches PM/RBI/Budget announcements)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Google News RSS — India-specific macro queries (no API key needed)
+_MACRO_NEWS_QUERIES = [
+    "India economy RBI",
+    "India budget fiscal policy",
+    "Modi India economic policy",
+    "India GDP inflation",
+]
+
+# NewsAPI query (if NEWSAPI_KEY set) — broader coverage
+_NEWSAPI_MACRO_QUERY = "India economy OR RBI OR Modi economic OR India budget OR India market"
+
+# Keywords that indicate POSITIVE macro events
+_MACRO_POSITIVE_KW = [
+    "rate cut", "repo cut", "rate reduction", "repo rate reduced",
+    "gdp growth", "growth beats", "economic surplus", "trade surplus",
+    "stimulus package", "tax relief", "tax cut", "reform package",
+    "trade deal", "ceasefire", "peace deal", "foreign investment inflow",
+    "rating upgrade", "credit upgrade", "current account surplus",
+    "record gst", "gst collection record",
+]
+
+# Keywords that indicate NEGATIVE macro events
+_MACRO_NEGATIVE_KW = [
+    "rate hike", "repo rate hike", "inflation spike", "inflation surge",
+    "war declared", "military strike", "border conflict", "sanctions imposed",
+    "economic default", "currency crisis", "capital flight", "credit downgrade",
+    "gdp miss", "gdp contraction", "recession", "tariff hike", "trade war",
+    "geopolitical tension", "cross-border tension", "crude oil spike",
+    "rupee crash", "rupee falls sharply", "foreign outflow", "fpi outflow record",
+    "economic slowdown", "growth downgrade",
+]
+
+# Keywords that signal a major announcement (neutral score but must be flagged)
+_MACRO_WATCHLIST_KW = [
+    "union budget", "budget 2025", "budget 2026", "rbi policy", "rbi mpc",
+    "monetary policy committee", "rbi governor", "repo rate decision",
+    "federal reserve", "fed rate", "us fed", "msci rebalance",
+    "crude oil", "oil prices", "global recession", "us tariff",
+]
+
+
+def _fetch_india_macro_news(hours: int = 36) -> list[dict]:
+    """
+    Fetch recent India macro/policy news headlines via Google News RSS.
+
+    Uses multiple macro query terms to cast a wide net.  No API key required.
+    Returns list of {title, source, published, url} deduplicated by title.
+    Returns [] on complete failure (non-fatal).
+    """
+    import feedparser
+
+    seen_titles: set[str] = set()
+    results: list[dict] = []
+
+    google_tmpl = (
+        "https://news.google.com/rss/search"
+        "?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+    )
+
+    for query in _MACRO_NEWS_QUERIES:
+        url = google_tmpl.format(query=quote_plus(query))
+        try:
+            feed = feedparser.parse(url)
+            if feed.bozo and not feed.entries:
+                continue
+            for entry in feed.entries[:8]:          # max 8 per query term
+                title = (entry.get("title") or "").strip()
+                if not title or title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                published = entry.get("published", "")
+                try:
+                    if entry.get("published_parsed"):
+                        published = str(
+                            datetime(*entry.published_parsed[:6]).date()
+                        )
+                except Exception:
+                    pass
+                results.append({
+                    "title":     title,
+                    "source":    "Google News",
+                    "published": published,
+                    "url":       entry.get("link", ""),
+                })
+        except Exception as exc:
+            log.debug("macro news RSS fetch failed (query=%r): %s", query, exc)
+
+    # Also try NewsAPI if key is available
+    newsapi_key = os.environ.get("NEWSAPI_KEY") or os.environ.get("NEWS_API_KEY")
+    if newsapi_key:
+        try:
+            from datetime import timezone
+            from urllib.request import Request, urlopen
+            from_dt = (
+                datetime.now(timezone.utc) - timedelta(hours=hours)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            params = urlencode({
+                "q":        _NEWSAPI_MACRO_QUERY,
+                "from":     from_dt,
+                "sortBy":   "publishedAt",
+                "language": "en",
+                "pageSize": 20,
+                "apiKey":   newsapi_key,
+            })
+            req = Request(
+                f"https://newsapi.org/v2/everything?{params}",
+                headers={"User-Agent": "BharatIntelligence/1.0"},
+            )
+            with urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            for art in data.get("articles") or []:
+                title = ((art.get("title") or "")).strip()
+                if not title or title == "[Removed]" or title in seen_titles:
+                    continue
+                seen_titles.add(title)
+                src = (art.get("source") or {}).get("name") or "NewsAPI"
+                results.append({
+                    "title":     title,
+                    "source":    src,
+                    "published": (art.get("publishedAt") or "")[:10],
+                    "url":       art.get("url") or "",
+                })
+        except Exception as exc:
+            log.debug("macro NewsAPI fetch failed: %s", exc)
+
+    return results
+
+
+def _score_macro_news(headlines: list[dict]) -> tuple[int, str, list[str]]:
+    """
+    Score macro news headlines for market impact.
+
+    Returns:
+        (score_adjustment, signal, key_events)
+
+        score_adjustment: int in [-10, +10] — added to the base macro total
+        signal: "POSITIVE_SHOCK" | "NEGATIVE_SHOCK" | "MAJOR_EVENT" | "ROUTINE"
+        key_events: list of short headline excerpts that triggered scoring
+    """
+    if not headlines:
+        return 0, "ROUTINE", []
+
+    pos_count   = 0
+    neg_count   = 0
+    watch_count = 0
+    key_events: list[str] = []
+
+    for h in headlines:
+        title_lc = h.get("title", "").lower()
+
+        matched_pos = [kw for kw in _MACRO_POSITIVE_KW if kw in title_lc]
+        matched_neg = [kw for kw in _MACRO_NEGATIVE_KW if kw in title_lc]
+        matched_wl  = [kw for kw in _MACRO_WATCHLIST_KW if kw in title_lc]
+
+        if matched_neg:
+            neg_count += len(matched_neg)
+            key_events.append(h["title"][:120])
+        elif matched_pos:
+            pos_count += len(matched_pos)
+            key_events.append(h["title"][:120])
+        elif matched_wl:
+            watch_count += 1
+            key_events.append(h["title"][:120])
+
+    # Deduplicate key events
+    seen: set[str] = set()
+    unique_events: list[str] = []
+    for e in key_events:
+        if e not in seen:
+            seen.add(e)
+            unique_events.append(e)
+    key_events = unique_events[:8]           # top 8 only
+
+    # Score: +5 per positive event (cap +10), -5 per negative (cap -10)
+    adj = max(-10, min(10, pos_count * 5 - neg_count * 5))
+
+    if neg_count >= 2:
+        signal = "NEGATIVE_SHOCK"
+    elif pos_count >= 2:
+        signal = "POSITIVE_SHOCK"
+    elif neg_count == 1 or pos_count == 1:
+        signal = "POSITIVE_SHOCK" if pos_count >= neg_count else "NEGATIVE_SHOCK"
+    elif watch_count >= 1:
+        signal = "MAJOR_EVENT"
+    else:
+        signal = "ROUTINE"
+
+    return adj, signal, key_events
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Sector impact mapping
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -391,8 +585,19 @@ def analyse() -> dict:
                                         data_sources=data_sources,
                                         sector_impacts={})
 
+    # ── 1c. India macro news (catches PM/RBI/Budget announcements) ───────────
+    macro_headlines = _fetch_india_macro_news(hours=36)
+    news_adj, news_signal, key_news_events = _score_macro_news(macro_headlines)
+    if macro_headlines:
+        data_sources.append("google_news_macro")
+    log.info(
+        "macro news: signal=%s adj=%+d events=%d",
+        news_signal, news_adj, len(key_news_events),
+    )
+
     # ── 2. Score each component ───────────────────────────────────────────────
-    # Max possible: 25 + 25 + 15 + 10 + 15 + 10 = 100
+    # Indicator max: 25 + 25 + 15 + 10 + 15 + 10 = 100
+    # News adjustment: ±10 (only applied if a genuine shock detected)
     s_us10y, n_us10y   = _score_us10y(us10y)
     s_dxy,   n_dxy     = _score_dxy(dxy)
     s_vix,   n_vix     = _score_vix(vix)
@@ -400,8 +605,8 @@ def analyse() -> dict:
     s_inr,   n_inr     = _score_inr(inr_usd)
     s_rbi,   n_rbi     = _score_rbi_rate(repo)
 
-    total = s_us10y + s_dxy + s_vix + s_ivix + s_inr + s_rbi
-    total = max(0, min(100, total))
+    base_total = s_us10y + s_dxy + s_vix + s_ivix + s_inr + s_rbi
+    total = max(0, min(100, base_total + news_adj))
 
     # ── 3. Signal ─────────────────────────────────────────────────────────────
     if total >= 65:
@@ -422,15 +627,27 @@ def analyse() -> dict:
         "inr_usd":    {"value": inr_usd,   "score": s_inr,  "note": n_inr},
         "rbi_repo":   {"value": repo,      "score": s_rbi,  "note": n_rbi},
         "max_possible": 100,
+        # ── News signal (new) ─────────────────────────────────────────────────
+        # macro_news_signal flags major India macro events (PM announcements,
+        # RBI policy surprises, budget, geopolitical shocks) that pure
+        # quantitative indicators miss until they show up in VIX/INR/yields.
+        "macro_news": {
+            "signal":       news_signal,
+            "score_adj":    news_adj,
+            "key_events":   key_news_events,
+            "headlines_scanned": len(macro_headlines),
+        },
     }
 
     result = {
-        "signal":         signal,
-        "score":          total,
-        "detail":         detail,
-        "sector_impacts": sector_impacts,
-        "data_sources":   list(dict.fromkeys(data_sources)),
-        "agent_name":     AGENT_NAME,
+        "signal":               signal,
+        "score":                total,
+        "macro_news_signal":    news_signal,     # top-level shortcut for synthesiser
+        "macro_news_events":    key_news_events, # top-level shortcut for synthesiser
+        "detail":               detail,
+        "sector_impacts":       sector_impacts,
+        "data_sources":         list(dict.fromkeys(data_sources)),
+        "agent_name":           AGENT_NAME,
     }
 
     try:
