@@ -14,6 +14,11 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 websockets>=12.0
 PyGithub>=2.3.0
+# ── Options data — ICICI Breeze Connect (P1-B) ────────────────────────────────
+# Optional: only needed when BREEZE_API_KEY / BREEZE_SESSION_TOKEN are configured.
+# Install manually: pip install breeze-connect pyotp
+breeze-connect>=1.0.59
+pyotp>=2.9.0
 # ── CI / testing ───────────────────────────────────────────────────────────────
 pytest>=8.0.0
 pytest-json-report>=1.5.0

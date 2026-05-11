@@ -1,14 +1,13 @@
 """
-data/options_fetcher.py — NSE Option Chain Fetcher
-====================================================
-Fetches option chain data for Indian indices and equities from NSE.
-Falls back to yfinance-derived estimates (India VIX + realized vol) when
-NSE blocks server-side requests.
+data/options_fetcher.py — Option Chain Fetcher (Breeze + NSE + Fallback)
+=========================================================================
+Fetches option chain data for Indian indices and equities.
 
-Data sources
-------------
-Primary   : NSE Open API  (requires browser-like cookie dance)
-Fallback  : India VIX (^INDIAVIX) + NIFTY realized vol via yfinance
+Data source priority
+--------------------
+1. ICICI Breeze Connect  (real option chain OI + IV — requires BREEZE_* env vars)
+2. NSE Open API          (requires browser-like cookie dance; blocked on Railway)
+3. Fallback              (India VIX + realized vol estimates via yfinance)
 
 Key metrics returned
 --------------------
@@ -19,7 +18,7 @@ Key metrics returned
   india_vix       — Current India VIX value
   hv20            — 20-day historical/realized volatility (annualised %)
   iv_hv_ratio     — India VIX / HV20 (>1.2 → fear; <0.8 → complacency)
-  source          — "nse" | "fallback"
+  source          — "breeze" | "nse" | "fallback"
 
 SQL (run once in Supabase)
 --------------------------
@@ -29,16 +28,21 @@ Usage
 -----
     from data.options_fetcher import get_option_metrics
     m = get_option_metrics("NIFTY")          # index
-    m = get_option_metrics("RELIANCE")       # equity (NSE only; fallback if blocked)
+    m = get_option_metrics("RELIANCE")       # equity
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 from typing import Optional
 
 log = logging.getLogger(__name__)
+
+# ── Breeze option-chain result cache (15-min TTL per symbol) ─────────────────
+_breeze_cache: dict[str, dict] = {}   # symbol → {"data": [...], "ts": float}
 
 # ─── NSE session constants ────────────────────────────────────────────────────
 _NSE_BASE      = "https://www.nseindia.com"
@@ -216,6 +220,265 @@ def _compute_atm_iv_and_skew(records: dict, underlying: float) -> tuple[Optional
         return None, None
 
 
+# ─── Breeze Connect option chain (primary source) ────────────────────────────
+
+# Stock codes Breeze uses for indices (NFO exchange, product_type = "options")
+_BREEZE_INDEX_CODES = {
+    "NIFTY":      "NIFTY",
+    "BANKNIFTY":  "BANKNIFTY",
+    "FINNIFTY":   "FINNIFTY",
+    "MIDCPNIFTY": "MIDCPNIFTY",
+}
+
+# Strike step (points) per index / equity
+_STRIKE_STEP = {
+    "NIFTY":      50,
+    "BANKNIFTY":  100,
+    "FINNIFTY":   50,
+    "MIDCPNIFTY": 25,
+}
+_DEFAULT_STRIKE_STEP = 5   # for single-stock options
+
+
+def _get_near_expiry_date() -> str:
+    """
+    Return the nearest upcoming Thursday as ISO-8601 string used by Breeze.
+    NSE weekly options (NIFTY/BANKNIFTY) expire every Thursday.
+    If today is Thursday, return next Thursday (avoid same-day expiry artefacts).
+    Format: "YYYY-MM-DDT06:00:00.000Z"  (matches Breeze SDK examples)
+    """
+    today = date.today()
+    # 3 = Thursday in Python's weekday() (Mon=0 … Sun=6)
+    days_ahead = (3 - today.weekday()) % 7
+    if days_ahead == 0:          # today is Thursday — roll to next week
+        days_ahead = 7
+    expiry = today + timedelta(days=days_ahead)
+    return f"{expiry.isoformat()}T06:00:00.000Z"
+
+
+def _get_underlying_price(symbol: str) -> Optional[float]:
+    """Fetch current spot price via yfinance (fast — 1-bar query)."""
+    try:
+        import yfinance as yf
+        yf_sym = _resolve_yf_sym(symbol)
+        t = yf.Ticker(yf_sym)
+        price = t.fast_info.last_price
+        if price and price > 0:
+            return float(price)
+        # Fallback to 1-day history
+        hist = yf.download(yf_sym, period="2d", progress=False, auto_adjust=True)
+        if not hist.empty:
+            return float(hist["Close"].squeeze().iloc[-1])
+    except Exception as exc:
+        log.debug("_get_underlying_price(%s): %s", symbol, exc)
+    return None
+
+
+def _build_strike_range(spot: float, step: int, pct: float = 0.08) -> list[int]:
+    """
+    Return strikes from (spot − pct%) to (spot + pct%) aligned to `step`.
+    Covers ~80–85% of open interest for indices.
+    """
+    lo = int((spot * (1 - pct)) // step) * step
+    hi = int((spot * (1 + pct)) // step + 1) * step
+    return list(range(lo, hi + step, step))
+
+
+def _fetch_one_breeze_strike(
+    breeze,
+    stock_code: str,
+    exchange_code: str,
+    expiry_date: str,
+    strike: int,
+    right: str,
+) -> Optional[dict]:
+    """Fetch a single strike/right pair from Breeze API."""
+    try:
+        resp = breeze.get_option_chain_quotes(
+            stock_code=stock_code,
+            exchange_code=exchange_code,
+            product_type="options",
+            expiry_date=expiry_date,
+            right=right.lower(),
+            strike_price=str(strike),
+        )
+        rows = (resp or {}).get("Success") or []
+        return rows[0] if rows else None
+    except Exception as exc:
+        log.debug("Breeze strike fetch failed [%s %s %s]: %s", stock_code, strike, right, exc)
+        return None
+
+
+def _fetch_breeze_option_chain(symbol: str) -> Optional[list[dict]]:
+    """
+    Fetch the near-month option chain via Breeze Connect.
+
+    Strategy:
+      1. Try bulk call with strike_price="" — Breeze API may return all strikes.
+      2. If that returns nothing, fan out individual strike calls in parallel
+         (ThreadPoolExecutor, 10 workers, ±8% from spot).
+
+    Returns list of dicts, each with keys:
+        strike_price, right, open_interest, implied_volatility_of_ltp
+
+    Returns None if Breeze is not configured or all attempts fail.
+    """
+    from data.breeze_auth import get_breeze_client  # lazy import to avoid circular
+
+    # Check 15-min cache
+    cached = _breeze_cache.get(symbol)
+    if cached and time.time() - cached["ts"] < 900:
+        log.debug("Breeze option chain [%s]: serving from cache", symbol)
+        return cached["data"]
+
+    breeze = get_breeze_client()
+    if breeze is None:
+        return None
+
+    sym        = symbol.upper()
+    is_index   = sym in _BREEZE_INDEX_CODES
+    stock_code = _BREEZE_INDEX_CODES.get(sym, sym)
+    exchange   = "NFO" if is_index else "NFO"
+    expiry     = _get_near_expiry_date()
+    step       = _STRIKE_STEP.get(sym, _DEFAULT_STRIKE_STEP)
+
+    # ── Strategy 1: bulk call with empty strike_price ──────────────────────
+    rows_bulk: list[dict] = []
+    for right in ("call", "put"):
+        try:
+            resp = breeze.get_option_chain_quotes(
+                stock_code=stock_code,
+                exchange_code=exchange,
+                product_type="options",
+                expiry_date=expiry,
+                right=right,
+                strike_price="",
+            )
+            success = (resp or {}).get("Success") or []
+            rows_bulk.extend(success)
+        except Exception as exc:
+            log.debug("Breeze bulk fetch failed [%s %s]: %s", sym, right, exc)
+
+    if rows_bulk:
+        _breeze_cache[symbol] = {"data": rows_bulk, "ts": time.time()}
+        log.info("Breeze option chain [%s]: bulk fetch — %d rows (source=breeze)", sym, len(rows_bulk))
+        return rows_bulk
+
+    # ── Strategy 2: parallel individual strike calls ───────────────────────
+    spot = _get_underlying_price(sym)
+    if spot is None:
+        log.warning("Breeze option chain [%s]: can't determine spot price", sym)
+        return None
+
+    strikes = _build_strike_range(spot, step, pct=0.08)
+    log.debug("Breeze option chain [%s]: individual calls — spot=%.0f, strikes=%d", sym, spot, len(strikes))
+
+    tasks = []
+    for strike in strikes:
+        for right in ("call", "put"):
+            tasks.append((strike, right))
+
+    rows_parallel: list[dict] = []
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {
+            pool.submit(
+                _fetch_one_breeze_strike,
+                breeze, stock_code, exchange, expiry, strike, right,
+            ): (strike, right)
+            for strike, right in tasks
+        }
+        for fut in as_completed(futures):
+            row = fut.result()
+            if row:
+                rows_parallel.append(row)
+
+    if rows_parallel:
+        _breeze_cache[symbol] = {"data": rows_parallel, "ts": time.time()}
+        log.info(
+            "Breeze option chain [%s]: parallel fetch — %d/%d rows returned (source=breeze)",
+            sym, len(rows_parallel), len(tasks),
+        )
+        return rows_parallel
+
+    log.warning("Breeze option chain [%s]: all strategies returned empty", sym)
+    return None
+
+
+def _parse_breeze_chain(rows: list[dict], spot: float) -> dict:
+    """
+    Convert Breeze option chain rows into the same metrics as the NSE parser.
+    Breeze row keys: strike_price, right, open_interest, implied_volatility_of_ltp
+    """
+    call_oi: dict[float, float] = {}
+    put_oi:  dict[float, float] = {}
+    call_iv: dict[float, float] = {}
+    put_iv:  dict[float, float] = {}
+
+    for row in rows:
+        try:
+            k    = float(row.get("strike_price") or 0)
+            oi   = float(row.get("open_interest") or 0)
+            iv   = float(row.get("implied_volatility_of_ltp") or 0)
+            side = str(row.get("right") or "").lower()
+            if k <= 0:
+                continue
+            if "call" in side or side == "ce":
+                call_oi[k] = oi
+                if iv > 0:
+                    call_iv[k] = iv
+            elif "put" in side or side == "pe":
+                put_oi[k] = oi
+                if iv > 0:
+                    put_iv[k] = iv
+        except Exception:
+            continue
+
+    total_call = sum(call_oi.values())
+    total_put  = sum(put_oi.values())
+    pcr        = round(total_put / total_call, 3) if total_call > 0 else None
+
+    # Max pain
+    strikes = sorted(set(call_oi) | set(put_oi))
+    max_pain = None
+    if strikes:
+        best, min_pain = strikes[0], float("inf")
+        for cand in strikes:
+            pain = (
+                sum(max(0.0, cand - k) * call_oi.get(k, 0) for k in strikes) +
+                sum(max(0.0, k - cand) * put_oi.get(k, 0) for k in strikes)
+            )
+            if pain < min_pain:
+                min_pain = pain
+                best     = cand
+        max_pain = float(best)
+
+    # ATM IV (nearest strike to spot)
+    atm_iv = None
+    if spot > 0 and strikes:
+        nearest_k = min(strikes, key=lambda k: abs(k - spot))
+        ivs = []
+        if call_iv.get(nearest_k, 0) > 0:
+            ivs.append(call_iv[nearest_k])
+        if put_iv.get(nearest_k, 0) > 0:
+            ivs.append(put_iv[nearest_k])
+        atm_iv = round(sum(ivs) / len(ivs), 2) if ivs else None
+
+    # IV skew: OTM put IV (−2% strike) − OTM call IV (+2% strike)
+    iv_skew = None
+    if spot > 0:
+        otm_put_k  = min(strikes, key=lambda k: abs(k - spot * 0.98)) if strikes else None
+        otm_call_k = min(strikes, key=lambda k: abs(k - spot * 1.02)) if strikes else None
+        if otm_put_k and otm_call_k and put_iv.get(otm_put_k) and call_iv.get(otm_call_k):
+            iv_skew = round(put_iv[otm_put_k] - call_iv[otm_call_k], 2)
+
+    return {
+        "pcr":      pcr,
+        "max_pain": max_pain,
+        "atm_iv":   atm_iv,
+        "iv_skew":  iv_skew,
+    }
+
+
 # ─── yfinance-based fallback metrics ─────────────────────────────────────────
 
 def _fallback_metrics(symbol: str) -> dict:
@@ -318,7 +581,28 @@ def get_option_metrics(symbol: str) -> dict:
     """
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
 
-    # --- Attempt NSE option chain ---
+    # ── Priority 1: ICICI Breeze Connect (real option chain) ──────────────────
+    breeze_rows = _fetch_breeze_option_chain(sym)
+    if breeze_rows:
+        spot     = _get_underlying_price(sym) or 0.0
+        metrics  = _parse_breeze_chain(breeze_rows, spot)
+        # Enrich with India VIX + HV20 (cheap yfinance call — always useful)
+        fb_extra = _fallback_metrics(sym)
+        log.debug("option_metrics(%s): Breeze source", sym)
+        return {
+            "symbol":           sym,
+            "pcr":              metrics["pcr"],
+            "max_pain":         metrics["max_pain"],
+            "atm_iv":           metrics["atm_iv"],
+            "iv_skew":          metrics["iv_skew"],
+            "india_vix":        fb_extra.get("india_vix"),
+            "hv20":             fb_extra.get("hv20"),
+            "iv_hv_ratio":      fb_extra.get("iv_hv_ratio"),
+            "underlying_price": spot or fb_extra.get("underlying_price"),
+            "source":           "breeze",
+        }
+
+    # ── Priority 2: NSE Open API ───────────────────────────────────────────────
     records = _fetch_nse_option_chain(sym)
     if records:
         underlying = float(records.get("underlyingValue") or 0)
@@ -339,8 +623,8 @@ def get_option_metrics(symbol: str) -> dict:
             "source":           "nse",
         }
 
-    # --- Fallback ---
-    log.debug("option_metrics(%s): NSE unavailable, using fallback", sym)
+    # ── Priority 3: India VIX + realized vol fallback ─────────────────────────
+    log.debug("option_metrics(%s): Breeze+NSE unavailable, using VIX fallback", sym)
     fb = _fallback_metrics(sym)
     fb["symbol"] = sym
     return fb

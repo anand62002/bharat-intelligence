@@ -55,15 +55,22 @@ Stock analysis/
 │   #    06:00 — orchestrator (all agents + discovery)
 │   #    07:00 — performance tracker
 │   #    07:30 — research agent
+│   #    08:00 — earnings calendar refresh
+│   #    08:30 — Breeze token refresh (P1-B)
 │   #    09:15, 11:30, 13:30, 15:15 — portfolio monitor
+│   #    15:45 — options snapshot (uses Breeze if configured)
 │   #    07:45 (1st of month) — historical backtest (agents/backtester.py)
 │
 ├── data/
 │   ├── fetchers.py             # India market data fetchers (NSE, BSE, RBI, SEBI)
 │   │                           # + get_screener_history() — 10yr annual time series
-│   └── symbol_map.py           # NSE → yfinance symbol resolution (YF_SYMBOL_MAP)
-│   #                             Single source of truth for all agents.
-│   #                             Also has SCREENER_SLUG_MAP for screener.in slugs.
+│   ├── symbol_map.py           # NSE → yfinance symbol resolution (YF_SYMBOL_MAP)
+│   │                           # Single source of truth for all agents.
+│   │                           # Also has SCREENER_SLUG_MAP for screener.in slugs.
+│   ├── options_fetcher.py      # Option chain: Breeze → NSE → VIX fallback (P1-B)
+│   │                           # get_option_metrics(symbol) → pcr, max_pain, atm_iv, iv_skew
+│   └── breeze_auth.py          # ICICI Breeze Connect session manager (P1-B)
+│   #                             get_breeze_client() with 23h cache + auto/manual refresh
 │
 ├── api/
 │   ├── __init__.py
@@ -270,6 +277,12 @@ Uses `ANTHROPIC_API_KEY` env var server-side (never exposed to browser).
 | `SUPABASE_SERVICE_KEY` | service_role key (bypasses RLS) |
 | `DASHBOARD_API_KEY` | Secret shared with Vercel frontend |
 | `VERCEL_DASHBOARD_URL` | Exact Vercel URL for CORS (e.g. `https://bharat-intelligence-two.vercel.app`) |
+| `BREEZE_API_KEY` | ICICI Breeze Connect API key (from ICICI Direct API portal) — P1-B |
+| `BREEZE_API_SECRET` | ICICI Breeze Connect API secret — P1-B |
+| `BREEZE_SESSION_TOKEN` | Daily session token (get from login redirect URL, rotate every 24h) — P1-B |
+| `ICICI_USER_ID` | *(Optional)* ICICI Direct login ID — enables auto-token refresh at 08:30 IST |
+| `ICICI_PASSWORD` | *(Optional)* ICICI Direct password — enables auto-token refresh |
+| `BREEZE_TOTP_SECRET` | *(Optional)* Base32 TOTP secret — enables fully automated daily refresh |
 
 ### Vercel (frontend)
 | Variable | Description |
@@ -442,7 +455,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | Issue | Severity | File | Status |
 |---|---|---|---|
 | `warren_bot._log_to_supabase()` notes column issue | LOW | `agents/warren_bot.py` | ✅ Already correct — no issue |
-| Options signal is India VIX proxy, not real option chain (NSE blocks server-side) | HIGH | `data/options_fetcher.py` | 🔲 P1-B |
+| Options signal is India VIX proxy, not real option chain (NSE blocks server-side) | HIGH | `data/options_fetcher.py` | ✅ Fixed (P1-B) — Breeze Connect as primary source |
 | WACC hardcoded 12% for all stocks | HIGH | `agents/valuation_scenarios.py`, `agents/warren_bot.py` | ✅ Fixed (P0-A) — sector WACC table added |
 | Macro score identical for all stocks in same pipeline run | HIGH | `scheduler/orchestrator.py` | ✅ Fixed (P0-B) — `get_sector_adjusted_macro_score()` wired |
 | DCF owner earnings uses full capex (not 0.6× maintenance) in `valuation_scenarios.py` | MEDIUM | `agents/valuation_scenarios.py` | ✅ Fixed (P0-D) — `0.6 * capex` |

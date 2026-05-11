@@ -22,7 +22,7 @@
 | P0-E | Discovery CRITICAL tier data quality gate | Phase 0 | ✅ **DONE** | 2026-05-04 |
 | P0-F | Replace index-level FII filter → institutional_holding_pct | Phase 0 | ✅ **DONE** | 2026-05-04 |
 | P1-A | Historical backtest framework | Phase 1 | ✅ **DONE** | 2026-05-09 |
-| P1-B | Options paid data feed (Quantsapp / Upstox) | Phase 1 | ⬜ TODO | — |
+| P1-B | Options real data feed (ICICI Breeze Connect) | Phase 1 | ✅ **DONE** | 2026-05-11 |
 | P1-C | GPT-4o as independent 3rd validation judge | Phase 1 | ⬜ TODO | — |
 | P1-D | Calibrate composite score thresholds (75/58/30) | Phase 1 | ✅ **DONE** | 2026-05-04 |
 | P2-A | Data provider diversification (Trendlyne fallback) | Phase 2 | ⬜ TODO | — |
@@ -39,7 +39,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 11 / 26 items complete (42%)**
+**Progress: 12 / 26 items complete (46%)**
 
 ---
 
@@ -217,31 +217,77 @@ The table must exist before the first backtest run or job save will fail silentl
 
 ---
 
-### ⬜ P1-B: Options Data Paid Feed Integration
+### ✅ P1-B: Options Real Data Feed — ICICI Breeze Connect
+**Status:** Done 2026-05-11  
+**Provider chosen:** ICICI Breeze Connect (free — user has ICICI Direct demat account)  
+**New files:** `data/breeze_auth.py`  
+**Modified:** `data/options_fetcher.py`, `worker.py`, `requirements.txt`
 
-**Provider Evaluation:**
+**What was built:**
 
-| Provider | Monthly Cost | Data Type | Server-Side | Pre-computed Analytics | Recommendation |
-|---|---|---|---|---|---|
-| **Quantsapp Pro** | ₹2,499 | PCR, max pain, IV percentile, IV skew | ✅ REST API | ✅ Yes | ⭐ **Best fit** |
-| Truedata | ₹1,500–2,000 | Raw option chain | ✅ REST + WS | ❌ DIY | Good but more work |
-| NSE Data Products | ₹5,000+ | Official option chain | ✅ API | ❌ DIY | Too expensive |
-| Upstox API | Free (needs demat) | Raw option chain | ✅ REST | ❌ DIY | Free if demat account |
+#### `data/breeze_auth.py` — Session manager
+- `get_breeze_client()` — returns a configured `BreezeConnect` instance with 23-hour in-memory cache
+- `refresh_session()` — supports two modes:
+  - **Auto**: Uses `ICICI_USER_ID + ICICI_PASSWORD + BREEZE_TOTP_SECRET` to POST to ICICI login, parse redirect URL for session token — fully hands-off
+  - **Manual**: Validates `BREEZE_SESSION_TOKEN` env var, logs hours remaining + reminder when expiring
+- CLI: `python data/breeze_auth.py` / `--dry-run`
 
-**Recommendation: Quantsapp Pro (₹2,499/month)**
+#### `data/options_fetcher.py` — Breeze as primary source (priority 1 of 3)
+New functions added:
+- `_get_near_expiry_date()` — computes next Thursday as Breeze-format expiry (`YYYY-MM-DDT06:00:00.000Z`)
+- `_get_underlying_price(symbol)` — fast yfinance spot price lookup
+- `_build_strike_range(spot, step, pct=0.08)` — generates ±8% strike range aligned to step
+- `_fetch_breeze_option_chain(symbol)` — two-strategy fetch:
+  1. **Bulk**: `get_option_chain_quotes(strike_price="")` for full chain in 2 calls (CE + PE)
+  2. **Parallel**: Individual strikes via `ThreadPoolExecutor(10)` as fallback (~10s for 40 strikes)
+  - 15-minute in-process cache per symbol
+- `_parse_breeze_chain(rows, spot)` — converts Breeze rows → PCR, max pain, ATM IV, IV skew
+- Source priority in `get_option_metrics()`: **breeze → nse → fallback** (was nse → fallback)
+- Breeze result enriched with India VIX + HV20 from yfinance (for iv_hv_ratio)
 
-**Manual Setup Steps (Quantsapp):**
-1. Sign up at https://quantsapp.com → subscribe to Pro plan
-2. Get API key from Settings → API Access
-3. Add `QUANTSAPP_API_KEY=xxx` to Railway env vars (web + worker)
+#### `worker.py` — Daily token refresh job
+- `job_breeze_token_refresh()` added
+- Scheduled at **08:30 IST** (after earnings calendar 08:00, before first options snapshot 09:15)
+- Auto-refreshes if `ICICI_USER_ID/PASSWORD/BREEZE_TOTP_SECRET` set; else logs manual reminder
 
-**Manual Setup Steps (Upstox free alternative):**
-1. Open free Upstox demat at https://upstox.com
-2. Go to https://upstox.com/developer/apps → create app
-3. Add `UPSTOX_API_KEY`, `UPSTOX_API_SECRET`, `UPSTOX_ACCESS_TOKEN` to Railway
-4. ⚠️ Note: access token expires daily — daily token refresh job also needed
+#### `agents/options_sentiment.py` — No changes needed
+Existing scoring logic (PCR, max pain, VIX, IV skew, IV/HV) works unchanged with any source.
 
-**Files to modify:** `data/options_fetcher.py`, `agents/options_sentiment.py`
+**What improves when Breeze is active:**
+- `source` changes from `"fallback"` → `"breeze"` in all `options_snapshot` logs
+- PCR: real strike-level OI ratios instead of VIX-linear estimate
+- Max pain: exact computation from actual OI vs heuristic σ estimate
+- ATM IV: real implied vol from live option quote vs India VIX proxy
+- IV skew: real put/call IV differential vs `None` (previously always missing)
+
+**⚠️ Manual setup required on Railway:**
+
+**Minimum (manual token, daily rotation):**
+```
+BREEZE_API_KEY=<from ICICI Direct API portal>
+BREEZE_API_SECRET=<from ICICI Direct API portal>
+BREEZE_SESSION_TOKEN=<fresh token, see steps below>
+```
+
+**How to get BREEZE_SESSION_TOKEN daily:**
+1. Visit: `https://api.icicidirect.com/apiuser/login?api_key=<BREEZE_API_KEY>`
+2. Login with ICICI Direct credentials + TOTP from your authenticator app
+3. Copy the `code=` value from the redirect URL
+4. Set `BREEZE_SESSION_TOKEN=<code>` in Railway worker + web env vars
+
+**Optional (fully automated daily refresh — recommended):**
+```
+ICICI_USER_ID=<your ICICI login ID>
+ICICI_PASSWORD=<your ICICI password>
+BREEZE_TOTP_SECRET=<base32 secret from 2FA setup>
+```
+To find your TOTP secret: scan the QR code in your ICICI 2FA setup with a TOTP secret extractor app (or your authenticator app's export feature).
+
+**Install dependency:**
+```powershell
+pip install breeze-connect pyotp
+```
+(Already added to `requirements.txt` — Railway deploys automatically)
 
 ---
 
@@ -407,15 +453,15 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 |---|---|---|---|---|---|
 | **Pre-work** | Run `earnings_calendar` migration | Manual SQL | None | 2 min | ✅ Done |
 | **Pre-work** | Seed 150 RAG events | CLI command | None | 5 min | ✅ Done |
-| **Step 9** | Railway + Vercel log analysis | Manual + AI review | None | 15 min | ⬜ TODO |
+| **Step 9** | Railway + Vercel log analysis | Manual + AI review | None | 15 min | ✅ Done |
 | **P0-A** | Sector-specific WACC | Code | None | M | ✅ Done |
 | **P0-B** | Stock-specific macro sensitivities | Code | None | M | ✅ Done |
 | **P0-C** | warren_bot notes column fix | Code | None | XS | ✅ Done |
 | **P0-D** | DCF owner earnings maintenance capex | Code | None | XS | ✅ Done |
 | **P0-E** | Discovery CRITICAL tier + new threshold | Code | None | S | ✅ Done |
 | **P0-F** | Replace FII filter with institutional_holding_pct | Code | None | S | ✅ Done |
-| **P1-A** | Historical backtest framework | Code + SQL | None | XL | ⬜ TODO |
-| **P1-B** | Options paid feed (Quantsapp/Upstox) | Code + Service | ₹0–2,499/mo | L | ⬜ TODO |
+| **P1-A** | Historical backtest framework | Code + SQL | None | XL | ✅ Done |
+| **P1-B** | Options real data feed (ICICI Breeze) | Code + Service | ₹0 | L | ✅ Done |
 | **P1-C** | GPT-4o as 3rd validation judge | Code | OpenAI API (existing) | S | ⬜ TODO |
 | **P1-D** | Calibrate composite score thresholds | Code | None | XS | ✅ Done |
 | **P2-A** | Data provider diversification (Trendlyne) | Code + Service | ₹999/mo | L | ⬜ TODO |

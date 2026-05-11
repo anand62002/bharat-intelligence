@@ -207,6 +207,29 @@ def job_options_snapshot() -> None:
         log.error("Options snapshot job failed: %s", exc, exc_info=True)
 
 
+def job_breeze_token_refresh() -> None:
+    """08:30 IST — refresh ICICI Breeze session token before market open."""
+    log.info("-" * 50)
+    log.info("  JOB START: Breeze Token Refresh (08:30 IST)")
+    log.info("-" * 50)
+    try:
+        from data.breeze_auth import refresh_session
+        result = refresh_session(dry_run=False)
+        mode = result.get("mode", "?")
+        if result.get("success"):
+            log.info(
+                "Breeze token refresh OK — mode=%s hours_remaining=%s",
+                mode, result.get("hours_remaining"),
+            )
+        else:
+            log.warning(
+                "Breeze token refresh FAILED — mode=%s: %s",
+                mode, result.get("message"),
+            )
+    except Exception as exc:
+        log.error("Breeze token refresh job failed: %s", exc, exc_info=True)
+
+
 def job_portfolio_monitor() -> None:
     """Every 2h during market hours — danger / stoploss / target alerts."""
     log.info("-" * 50)
@@ -283,6 +306,20 @@ def build_scheduler():
         CronTrigger(hour=7, minute=30, timezone=IST),
         id="research_agent",
         name="Research Agent",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+    )
+
+    # ── Breeze token refresh — before market open ─────────────────────────────
+    # Runs at 08:30 IST: after earnings calendar (08:00), before first options
+    # snapshot at 09:15.  Auto-refreshes if ICICI_USER_ID/PASSWORD/TOTP_SECRET
+    # are set; otherwise logs a reminder to rotate BREEZE_SESSION_TOKEN manually.
+    scheduler.add_job(
+        job_breeze_token_refresh,
+        CronTrigger(hour=8, minute=30, timezone=IST),
+        id="breeze_token_refresh",
+        name="Breeze Token Refresh",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=1800,
@@ -410,6 +447,7 @@ def main() -> None:
     log.info("    06:00  Daily Orchestrator")
     log.info("    06:30  Regime Detector")
     log.info("    08:00  Earnings Calendar")
+    log.info("    08:30  Breeze Token Refresh")
     log.info("    07:00  Performance Tracker")
     log.info("    07:30  Research Agent")
     log.info("    09:15  Portfolio Monitor")
