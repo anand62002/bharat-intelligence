@@ -60,6 +60,7 @@ Stock analysis/
 │   #    09:15, 11:30, 13:30, 15:15 — portfolio monitor
 │   #    15:45 — options snapshot (uses Breeze if configured)
 │   #    07:45 (1st of month) — historical backtest (agents/backtester.py)
+│   #    08:15 (1st of month) — RAG corpus auto-refresh (db/auto_seed_rag.py)
 │
 ├── data/
 │   ├── fetchers.py             # India market data fetchers (NSE, BSE, RBI, SEBI)
@@ -92,6 +93,11 @@ Stock analysis/
 │   ├── backfill_embeddings.py  # One-time: generate OpenAI embeddings for historical_events rows
 │   │                           # python -m db.backfill_embeddings [--run] [--batch N] [--limit N]
 │   │                           # All 150/150 rows now have embeddings (run 2026-05-12)
+│   ├── auto_seed_rag.py        # Monthly: fetch India macro news → classify → embed → insert
+│   │                           # Sources: Google News RSS (8 queries, 35-day window)
+│   │                           # Classification: gpt-4o-mini (LLM) or keyword fallback (no key)
+│   │                           # Deduplication: ±7-day window per event_type vs existing DB rows
+│   │                           # CLI: python -m db.auto_seed_rag [--run] [--days N] [--max N]
 │   └── migrations/
 │       ├── grant_service_role_rls.sql          # RLS policies for service_role
 │       ├── create_research_proposals.sql
@@ -449,6 +455,8 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (P2-B)   | P2-B: RAG corpus auto-refresh — db/auto_seed_rag.py + worker.py monthly job |
+| `414ed30` | docs: add P3-C Comprehensive Trendlyne Integration plan to EXECUTION_PLAN.md |
 | `51fa452` | Fix partial sell: ARIA qty field, partial vs full exit logic, backend field-clobber fix |
 | `77d5775` | Fix log format string in backfill_embeddings (UUID id, not int) |
 | `4472416` | Fix FII stale zeros, add India macro news monitoring, add embedding backfill script |
@@ -531,7 +539,7 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 0 (P0)** ✅: Zero-cost code fixes — WACC, macro sensitivity, DCF fix, discovery thresholds
 - **Phase 1 (P1)** ✅: Historical backtest framework, options paid feed, GPT-4o 3rd judge, score calibration
 - **Bug Fix Session** ✅: yfinance 1.2.0 fix, discovery screener 0-pass bugs, FII stale zeros, macro news, embeddings, partial sell, symbol aliases
-- **Phase 2 (P2)** ← CURRENT: Data diversification, RAG auto-refresh, portfolio concentration alerts, earnings calendar auto-populate
+- **Phase 2 (P2)** ← CURRENT: P2-A ✅ (yfinance fallback), P2-B ✅ (RAG auto-refresh), P2-C (concentration alerts), P2-D (earnings calendar — superseded by P3-C)
 - **Phase 3 (P3)**: Position sizing, correlation alerts
 - **Phase 4 (P4)**: Commentary grounding, symbol cache persistence, governance numerical check
 - **Phase 5 (P5)**: Robust forward paper portfolio tracker + attribution analysis

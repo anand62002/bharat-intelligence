@@ -243,6 +243,28 @@ def job_portfolio_monitor() -> None:
         log.error("Portfolio monitor job failed: %s", exc, exc_info=True)
 
 
+def job_rag_refresh() -> None:
+    """1st of every month, 08:15 IST — fetch new India market events and append to RAG corpus."""
+    log.info("-" * 50)
+    log.info("  JOB START: RAG Corpus Auto-Refresh (08:15 IST, 1st of month)")
+    log.info("-" * 50)
+    try:
+        from db.auto_seed_rag import run as rag_run
+        result = rag_run(days=35, max_new=30, dry_run=False)
+        log.info(
+            "RAG refresh done — added=%d skipped_dup=%d skipped_irrel=%d errors=%d articles_checked=%d",
+            result.get("added", 0),
+            result.get("skipped_duplicate", 0),
+            result.get("skipped_irrelevant", 0),
+            result.get("errors", 0),
+            result.get("articles_checked", 0),
+        )
+        if result.get("errors", 0) > 0:
+            log.warning("RAG refresh had %d errors — check logs above", result["errors"])
+    except Exception as exc:
+        log.error("RAG corpus refresh job failed: %s", exc, exc_info=True)
+
+
 def job_backtest() -> None:
     """1st of every month, 07:45 IST — walk-forward backtest on NIFTY 500 quality universe."""
     log.info("=" * 60)
@@ -406,6 +428,20 @@ def build_scheduler():
         misfire_grace_time=7200,  # 2-hour grace (long job)
     )
 
+    # ── Monthly RAG corpus refresh — 1st of month, 08:15 IST ─────────────────
+    # After backtest (07:45) and earnings calendar (08:00). Fetches India macro
+    # market events from Google News RSS, classifies them, and appends novel
+    # events with embeddings to historical_events table.
+    scheduler.add_job(
+        job_rag_refresh,
+        CronTrigger(day=1, hour=8, minute=15, timezone=IST),
+        id="rag_refresh_monthly",
+        name="Monthly RAG Corpus Refresh (08:15 IST, 1st)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+
     return scheduler
 
 
@@ -431,6 +467,7 @@ def main() -> None:
         job_portfolio_monitor()
         job_outcome_tracker()
         job_options_snapshot()
+        job_rag_refresh()
         log.info("--now run complete. Starting scheduler...")
 
     try:
@@ -458,6 +495,7 @@ def main() -> None:
     log.info("    16:00  Portfolio Risk")
     log.info("    18:30  Outcome Tracker")
     log.info("    07:45 (1st/month)  Monthly Backtest")
+    log.info("    08:15 (1st/month)  RAG Corpus Auto-Refresh")
     log.info("  Press Ctrl+C to stop")
     log.info("=" * 60)
 

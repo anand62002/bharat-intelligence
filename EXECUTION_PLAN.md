@@ -33,7 +33,7 @@
 | BF-6 | ARIA partial sell support + backend field-clobber fix | Enhancement | ✅ **DONE** | 2026-05-12 |
 | BF-7 | Symbol resolution: SHAKTIPUMPS, GEVERNOVA, ELFORGE | Bug Fix | ✅ **DONE** | 2026-05-12 |
 | P2-A | Data provider diversification (yfinance fallback) | Phase 2 | ✅ **DONE** | 2026-05-12 |
-| P2-B | RAG corpus auto-refresh monthly job | Phase 2 | ⬜ TODO | — |
+| P2-B | RAG corpus auto-refresh monthly job | Phase 2 | ✅ **DONE** | 2026-05-12 |
 | P2-C | Portfolio-level concentration alerts | Phase 2 | ⬜ TODO | — |
 | P2-D | Earnings calendar auto-population job | Phase 2 | ⬜ TODO | — |
 | P3-A | Position sizing output in recommendations | Phase 3 | ⬜ TODO | — |
@@ -47,7 +47,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 21 / 34 items complete (62%)**
+**Progress: 22 / 34 items complete (65%)**
 
 ---
 
@@ -432,11 +432,38 @@ yfinance provides the most critical fields (P/E, ROE, operating margin, revenue 
 
 ---
 
-### ⬜ P2-B: Historical RAG Corpus Auto-Refresh
-**Current state:** 150 manually-curated events — static, not updated.  
-**Fix:** Monthly job that scans NSE circulars, RBI policy releases, major corporate events → auto-appends to `historical_events` with OpenAI embeddings.  
-**Files:** `db/auto_seed_rag.py` (new), `worker.py` (monthly job at 08:00 IST on 1st)  
-**Manual step:** None after initial seed.
+### ✅ P2-B: Historical RAG Corpus Auto-Refresh
+**Status:** Done 2026-05-12  
+**Files:** `db/auto_seed_rag.py` (new), `worker.py` (monthly job added), `tests/test_auto_seed_rag.py` (74 tests, all passing)
+
+**What was built:**
+
+#### `db/auto_seed_rag.py` — monthly RAG event seeder
+- Fetches India macro/market news from **8 Google News RSS queries** (no API key needed) for the last 35 days
+- **Keyword relevance pre-filter** (`_is_relevant`) — 40+ keywords gate articles before any LLM call; eliminates company-specific micro news and irrelevant articles
+- **Classification** — two-tier:
+  - *Primary*: `gpt-4o-mini` structured JSON with enum-constrained output (event_type + market_impact + sectors + outcome + is_significant) — used when `OPENAI_API_KEY` set
+  - *Fallback*: Pure keyword-rule classifier (`_classify_keyword_fallback`) — always available, zero cost; covers 18 event types, uses `re.search` word-boundary matching to avoid substring false positives (e.g. "flows" ≠ "low")
+- **Deduplication** (`_deduplicate_articles`) — fetches existing events from DB, skips any article whose `event_type` already has an entry within ±7 days (prevents duplicate RBI / Budget / FII entries for same real event)
+- **Embedding generation** — `text-embedding-3-small` when OpenAI key available; otherwise inserts with `embedding=NULL` for `backfill_embeddings.py` to handle later
+- **Cap** — max 30 new events per run (configurable via `--max`)
+- **Returns** `{added, skipped_duplicate, skipped_irrelevant, errors, articles_checked, dry_run}`
+
+#### CLI
+```powershell
+python -m db.auto_seed_rag                  # dry-run: show what would be added
+python -m db.auto_seed_rag --run            # actually insert + embed
+python -m db.auto_seed_rag --run --days 60  # look back 60 days
+python -m db.auto_seed_rag --run --max 20   # cap at 20 events
+```
+
+#### `worker.py` — monthly job
+- `job_rag_refresh()` added
+- Scheduled at **08:15 IST on 1st of each month** (after backtest 07:45 + earnings calendar 08:00)
+- Logs: `added / skipped_dup / skipped_irrel / errors / articles_checked`
+
+#### Bug caught during testing
+- Python substring trap: `"low" in "flows"` is `True` — "capital flows" was triggering CURRENCY_CRISIS. Fixed with `re.search(r"\b(fall|fallen|low|weak|...)\b", text)` word-boundary matching in `_classify_keyword_fallback`.
 
 ---
 
@@ -735,7 +762,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P1-C** | GPT-4o-mini as 3rd validation judge + Anthropic lazy-init | Code | OpenAI API (existing) | S | ✅ Done |
 | **P1-D** | Calibrate composite score thresholds | Code | None | XS | ✅ Done |
 | **P2-A** | Data provider diversification (yfinance fallback) | Code | ₹0 | L | ✅ Done |
-| **P2-B** | RAG corpus auto-refresh monthly job | Code | None (OpenAI existing) | M | ⬜ TODO |
+| **P2-B** | RAG corpus auto-refresh monthly job | Code | None (OpenAI existing) | M | ✅ Done |
 | **P2-C** | Portfolio-level concentration alerts | Code | None | M | ⬜ TODO |
 | **P2-D** | Earnings calendar auto-population | Code | None | M | ⬜ TODO |
 | **P3-A** | Position sizing output in recs | Code | None | S | ⬜ TODO |
@@ -779,5 +806,5 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.2 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session + P2-A complete + P3-C Trendlyne plan added)*  
-*Next milestone: P2-B (RAG corpus auto-refresh) or P3-C Pillar 1 (Trendlyne fundamentals — highest immediate ROI)*
+*Document version: 3.3 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session + P2-A + P2-B complete + P3-C Trendlyne plan added)*  
+*Next milestone: P2-C (portfolio concentration alerts) or P3-C Pillar 1 (Trendlyne fundamentals)*
