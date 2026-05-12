@@ -71,6 +71,10 @@ _TARGET_PROXIMITY_PCT       = 12.0   # price within 12% below target
 _MILESTONE_GAIN_PCT         = 15.0   # holding gained >15% vs avg_buy
 _DEDUP_WINDOW_HOURS         = 24     # suppress duplicate alert within this window
 
+# ── Concentration thresholds ──────────────────────────────────────────────────
+_SECTOR_CONC_THRESHOLD  = 40.0   # % — alert when one sector > this share of portfolio
+_MACRO_CLUSTER_MIN      = 3      # alert when this many holdings share macro sensitivity
+
 # ── Market hours (IST, 24h) ───────────────────────────────────────────────────
 _MARKET_OPEN_H  = 9
 _MARKET_OPEN_M  = 0
@@ -124,6 +128,255 @@ def _fetch_current_price(symbol: str) -> Optional[float]:
     except Exception as exc:
         log.warning("Price fetch failed for %s: %s", symbol, exc)
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Concentration helpers (P2-C)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maps a macro sensitivity category → list of sector keywords (lowercase).
+# Order matters: first matching category wins.
+_MACRO_SENSITIVITY_MAP: dict[str, list[str]] = {
+    "Rate-Sensitive":   [
+        "banking", "bank", "financial services", "nbfc", "real estate",
+        "realty", "housing", "auto", "automobile", "vehicle",
+    ],
+    "USD-Sensitive":    [
+        "it", "information technology", "software", "tech", "pharma",
+        "pharmaceutical", "healthcare", "health care", "export",
+    ],
+    "Domestic Demand":  [
+        "fmcg", "consumer", "retail", "food", "beverage", "tobacco",
+        "staple", "discretionary", "apparel",
+    ],
+    "Commodity-Linked": [
+        "metal", "mining", "steel", "aluminium", "oil", "gas", "energy",
+        "material", "chemical", "fertiliser", "fertilizer",
+    ],
+    "Infra / Capex":    [
+        "infrastructure", "infra", "construction", "power", "utility",
+        "utilities", "defence", "defense", "capital goods", "engineering",
+    ],
+}
+
+
+def _get_macro_sensitivity(sector: str) -> str:
+    """
+    Map a sector string to a macro sensitivity category.
+
+    Returns one of the _MACRO_SENSITIVITY_MAP keys, or "Other" when the
+    sector is missing / doesn't match any known category.
+
+    Uses word-boundary regex matching so short keywords like "it" don't
+    false-positively match as substrings of longer words (e.g. "cap**it**al").
+
+    >>> _get_macro_sensitivity("Banking")
+    'Rate-Sensitive'
+    >>> _get_macro_sensitivity("Information Technology")
+    'USD-Sensitive'
+    >>> _get_macro_sensitivity("Capital Goods")
+    'Infra / Capex'
+    >>> _get_macro_sensitivity("")
+    'Other'
+    """
+    import re as _re
+    if not sector:
+        return "Other"
+    s = sector.strip().lower()
+    for category, keywords in _MACRO_SENSITIVITY_MAP.items():
+        if any(_re.search(r"\b" + _re.escape(kw) + r"\b", s) for kw in keywords):
+            return category
+    return "Other"
+
+
+def _portfolio_alert_exists(
+    client,
+    alert_type: str,
+    symbol:     str,
+    window_hours: int = _DEDUP_WINDOW_HOURS,
+) -> bool:
+    """
+    Deduplication check for portfolio-level (non-holding-specific) alerts.
+    Checks by alert_type + symbol instead of holding_id + alert_type so that
+    SECTOR_CONCENTRATION alerts for *different* sectors are independent.
+
+    Returns True if a matching unresolved alert exists in the last window_hours.
+    Returns False on any DB error (fail-open: let the alert through).
+    """
+    try:
+        since = (
+            datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        ).isoformat()
+        resp = (
+            client.table("portfolio_alerts")
+            .select("id")
+            .eq("alert_type", alert_type)
+            .eq("symbol",     symbol)
+            .eq("resolved",   False)
+            .gte("created_at", since)
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data)
+    except Exception as exc:
+        log.debug("Portfolio alert dedup check failed: %s", exc)
+        return False
+
+
+def _check_concentration(
+    holdings: list[dict],
+    client,
+    dry_run: bool = False,
+) -> list[str]:
+    """
+    Analyse portfolio-level concentration risk across all open holdings.
+
+    Checks
+    ------
+    1. Sector concentration   — any sector > 40% of total portfolio value
+                                (WARNING: SECTOR_CONCENTRATION)
+    2. Macro sensitivity cluster — 3+ holdings share the same macro sensitivity
+                                   category (WARNING: MACRO_CLUSTER)
+
+    Parameters
+    ----------
+    holdings : list of portfolio_holdings rows (already enriched with fresh
+               current_price values from _analyse_holding, where available)
+    client   : Supabase client (may be None in dry_run with no DB)
+    dry_run  : when True, prints alerts instead of inserting
+
+    Returns
+    -------
+    list of alert_type strings that were created (or "would create" in dry_run)
+    """
+    alerts_created: list[str] = []
+
+    if not holdings or len(holdings) < 2:
+        # Concentration risk needs at least 2 holdings to be meaningful
+        return alerts_created
+
+    # ── Build per-holding value map ───────────────────────────────────────────
+    # value = current_price × qty;  fall back to avg_buy × qty if price missing
+    enriched: list[dict] = []
+    for h in holdings:
+        qty   = float(h.get("qty")   or 0)
+        if qty <= 0:
+            continue
+        price = float(h.get("current_price") or 0) or float(h.get("avg_buy") or 0)
+        if price <= 0:
+            continue
+        sector = (h.get("sector") or "Other").strip() or "Other"
+        enriched.append({
+            "symbol": h.get("symbol", "?"),
+            "sector": sector,
+            "value":  round(qty * price, 2),
+            "macro":  _get_macro_sensitivity(sector),
+        })
+
+    if len(enriched) < 2:
+        # After filtering zero-qty / zero-price holdings, fewer than 2 valid
+        # holdings remain — concentration risk is not meaningful.
+        return alerts_created
+
+    total_value = sum(e["value"] for e in enriched)
+    if total_value <= 0:
+        return alerts_created
+
+    # ── 1. Sector concentration ───────────────────────────────────────────────
+    sector_value:    dict[str, float]      = {}
+    sector_symbols:  dict[str, list[str]]  = {}
+    for e in enriched:
+        s = e["sector"]
+        sector_value[s]   = sector_value.get(s, 0.0) + e["value"]
+        sector_symbols.setdefault(s, []).append(e["symbol"])
+
+    for sector, sv in sorted(sector_value.items(), key=lambda x: -x[1]):
+        if sector == "Other":
+            # Skip uncategorised holdings — "Other" is a catch-all and should
+            # not trigger a concentration alert on its own.
+            continue
+        pct = sv / total_value * 100
+        if pct <= _SECTOR_CONC_THRESHOLD:
+            continue
+        symbols_str = ", ".join(sector_symbols[sector])
+        if client and _portfolio_alert_exists(client, "SECTOR_CONCENTRATION", sector):
+            log.info(
+                "SECTOR_CONCENTRATION (%s %.1f%%) already open — suppressed (dedup)",
+                sector, pct,
+            )
+            continue
+        alert_id = _create_alert(
+            client,
+            holding_id = None,        # portfolio-level — no specific holding
+            symbol     = sector,
+            severity   = "WARNING",
+            alert_type = "SECTOR_CONCENTRATION",
+            title      = (
+                f"Sector concentration: {sector} is {pct:.1f}% of portfolio"
+            ),
+            detail     = (
+                f"Holdings in {sector}: {symbols_str}. "
+                f"Portfolio value: ₹{total_value/1e5:.1f}L  "
+                f"Sector value: ₹{sv/1e5:.1f}L  "
+                f"Threshold: {_SECTOR_CONC_THRESHOLD:.0f}%. "
+                f"Consider diversifying to reduce single-sector risk."
+            ),
+            dry_run    = dry_run,
+        )
+        if alert_id:
+            alerts_created.append("SECTOR_CONCENTRATION")
+            log.warning(
+                "SECTOR_CONCENTRATION: %s = %.1f%% of portfolio (holdings: %s)",
+                sector, pct, symbols_str,
+            )
+
+    # ── 2. Macro sensitivity cluster ──────────────────────────────────────────
+    macro_symbols: dict[str, list[str]] = {}
+    macro_value:   dict[str, float]     = {}
+    for e in enriched:
+        cat = e["macro"]
+        if cat == "Other":
+            continue
+        macro_symbols.setdefault(cat, []).append(e["symbol"])
+        macro_value[cat] = macro_value.get(cat, 0.0) + e["value"]
+
+    for category, sym_list in sorted(macro_symbols.items(), key=lambda x: -len(x[1])):
+        if len(sym_list) < _MACRO_CLUSTER_MIN:
+            continue
+        cat_pct     = macro_value[category] / total_value * 100
+        symbols_str = ", ".join(sym_list)
+        if client and _portfolio_alert_exists(client, "MACRO_CLUSTER", category):
+            log.info(
+                "MACRO_CLUSTER (%s, %d holdings) already open — suppressed (dedup)",
+                category, len(sym_list),
+            )
+            continue
+        alert_id = _create_alert(
+            client,
+            holding_id = None,
+            symbol     = category,
+            severity   = "WARNING",
+            alert_type = "MACRO_CLUSTER",
+            title      = (
+                f"Macro cluster: {len(sym_list)} holdings are "
+                f"{category} ({cat_pct:.1f}% of portfolio)"
+            ),
+            detail     = (
+                f"Holdings: {symbols_str}. "
+                f"All are correlated to the same macro factor ({category}). "
+                f"A single macro shock (rate change, currency move, commodity swing) "
+                f"could impact all simultaneously."
+            ),
+            dry_run    = dry_run,
+        )
+        if alert_id:
+            alerts_created.append("MACRO_CLUSTER")
+            log.warning(
+                "MACRO_CLUSTER: %d %s holdings = %.1f%% portfolio (symbols: %s)",
+                len(sym_list), category, cat_pct, symbols_str,
+            )
+
+    return alerts_created
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -637,8 +890,9 @@ def run(dry_run: bool = False) -> dict:
         print("-" * 65)
 
     # ── Analyse each holding ──────────────────────────────────────────────────
-    total_alerts   = 0
-    prices_updated = 0
+    total_alerts    = 0
+    prices_updated  = 0
+    enriched_holdings: list[dict] = []   # holdings with fresh prices for concentration check
 
     for holding in holdings:
         symbol = holding.get("symbol", "?")
@@ -653,9 +907,32 @@ def run(dry_run: bool = False) -> dict:
                 prices_updated += 1
             total_alerts += len(result["alerts_created"])
 
+            # Build enriched holding with fresh price for concentration check
+            fresh = dict(holding)
+            if result.get("current_price") is not None:
+                fresh["current_price"] = result["current_price"]
+            enriched_holdings.append(fresh)
+
         except Exception as exc:
             log.error("[%s] analyse_holding failed: %s", symbol, exc)
             errors.append(f"{symbol}: {exc}")
+            enriched_holdings.append(holding)   # use original on failure
+
+    # ── Portfolio-level concentration check (P2-C) ────────────────────────────
+    if len(enriched_holdings) >= 2:
+        try:
+            conc_alerts = _check_concentration(
+                enriched_holdings, client, dry_run=dry_run
+            )
+            total_alerts += len(conc_alerts)
+            if conc_alerts:
+                log.info(
+                    "Concentration alerts: %d created (%s)",
+                    len(conc_alerts), ", ".join(conc_alerts),
+                )
+        except Exception as exc:
+            log.error("Concentration check failed: %s", exc)
+            errors.append(f"concentration: {exc}")
 
     duration = round(time.time() - t0, 2)
 

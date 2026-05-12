@@ -34,7 +34,7 @@
 | BF-7 | Symbol resolution: SHAKTIPUMPS, GEVERNOVA, ELFORGE | Bug Fix | ✅ **DONE** | 2026-05-12 |
 | P2-A | Data provider diversification (yfinance fallback) | Phase 2 | ✅ **DONE** | 2026-05-12 |
 | P2-B | RAG corpus auto-refresh monthly job | Phase 2 | ✅ **DONE** | 2026-05-12 |
-| P2-C | Portfolio-level concentration alerts | Phase 2 | ⬜ TODO | — |
+| P2-C | Portfolio-level concentration alerts | Phase 2 | ✅ **DONE** | 2026-05-12 |
 | P2-D | Earnings calendar auto-population job | Phase 2 | ⬜ TODO | — |
 | P3-A | Position sizing output in recommendations | Phase 3 | ⬜ TODO | — |
 | P3-B | Correlation-aware portfolio alerts | Phase 3 | ⬜ TODO | — |
@@ -47,7 +47,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 22 / 34 items complete (65%)**
+**Progress: 23 / 34 items complete (68%)**
 
 ---
 
@@ -467,10 +467,17 @@ python -m db.auto_seed_rag --run --max 20   # cap at 20 events
 
 ---
 
-### ⬜ P2-C: Portfolio-Level Concentration Alerts
+### ✅ P2-C: Portfolio-Level Concentration Alerts *(completed 2026-05-12)*
 **Problem:** Individual holdings monitored but no portfolio-level concentration flagging.  
 **Fix:** Alerts when >40% portfolio value in one sector, or 3+ holdings with same macro sensitivity.  
-**Files:** `scheduler/portfolio_monitor.py` (`_check_concentration()`)
+**Files:** `scheduler/portfolio_monitor.py` (`_check_concentration()`, `_get_macro_sensitivity()`, `_portfolio_alert_exists()`)  
+**Tests:** `tests/test_portfolio_concentration.py` — 54 tests, all passing  
+**Key details:**
+- `_MACRO_SENSITIVITY_MAP` — 5 macro categories (Rate-Sensitive, USD-Sensitive, Domestic Demand, Commodity-Linked, Infra/Capex) with word-boundary regex matching
+- SECTOR_CONCENTRATION: severity=WARNING, alert_type fires when any known sector > 40% of portfolio value; "Other"/uncategorised excluded
+- MACRO_CLUSTER: severity=WARNING fires when ≥ 3 holdings share same macro sensitivity category
+- `_portfolio_alert_exists()` deduplicates by alert_type + symbol (not holding_id) with 24h window
+- `holding_id=None` on portfolio-level alerts (no specific holding); enriched holdings with fresh prices fed in from `run()`
 
 ---
 
@@ -763,7 +770,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P1-D** | Calibrate composite score thresholds | Code | None | XS | ✅ Done |
 | **P2-A** | Data provider diversification (yfinance fallback) | Code | ₹0 | L | ✅ Done |
 | **P2-B** | RAG corpus auto-refresh monthly job | Code | None (OpenAI existing) | M | ✅ Done |
-| **P2-C** | Portfolio-level concentration alerts | Code | None | M | ⬜ TODO |
+| **P2-C** | Portfolio-level concentration alerts | Code | None | M | ✅ Done |
 | **P2-D** | Earnings calendar auto-population | Code | None | M | ⬜ TODO |
 | **P3-A** | Position sizing output in recs | Code | None | S | ⬜ TODO |
 | **P3-B** | Correlation-aware portfolio alerts | Code | None | M | ⬜ TODO |
@@ -806,5 +813,5 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.3 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session + P2-A + P2-B complete + P3-C Trendlyne plan added)*  
-*Next milestone: P2-C (portfolio concentration alerts) or P3-C Pillar 1 (Trendlyne fundamentals)*
+*Document version: 3.4 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session + P2-A + P2-B + P2-C complete + P3-C Trendlyne plan added)*  
+*Next milestone: P2-D (earnings calendar auto-population) or P3-C Pillar 1 (Trendlyne fundamentals)*
