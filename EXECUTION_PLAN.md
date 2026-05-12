@@ -38,6 +38,7 @@
 | P2-D | Earnings calendar auto-population job | Phase 2 | ⬜ TODO | — |
 | P3-A | Position sizing output in recommendations | Phase 3 | ⬜ TODO | — |
 | P3-B | Correlation-aware portfolio alerts | Phase 3 | ⬜ TODO | — |
+| P3-C | Comprehensive Trendlyne integration (DVM, news, filings, estimates, insider) | Phase 3 | ⬜ TODO | — |
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ⬜ TODO | — |
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ⬜ TODO | — |
 | P4-C | Governance numerical grounding check | Phase 4 | ⬜ TODO | — |
@@ -46,7 +47,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 21 / 33 items complete (64%)**
+**Progress: 21 / 34 items complete (62%)**
 
 ---
 
@@ -451,6 +452,8 @@ yfinance provides the most critical fields (P/E, ROE, operating margin, revenue 
 **Fix:** `data/earnings_fetcher.py` populates from NSE bulletin + yfinance for portfolio + watchlist symbols. Daily at 08:30 IST.  
 **Files:** `data/earnings_fetcher.py`, `worker.py`
 
+> ⚠️ **Note:** P2-D will be superseded by P3-C Pillar 2 (Trendlyne corporate actions → earnings_calendar). Implement P2-D only if P3-C is not prioritised first — avoid duplicating the earnings calendar pipeline.
+
 ---
 
 ## ⬜ PHASE 3 — Portfolio Intelligence
@@ -474,6 +477,165 @@ yfinance provides the most critical fields (P/E, ROE, operating margin, revenue 
 ### ⬜ P3-B: Correlation-Aware Portfolio Alerts
 **Fix:** Weekly pairwise sector/theme overlap check across OPEN holdings.  
 **Files:** `scheduler/portfolio_monitor.py`
+
+---
+
+### ⬜ P3-C: Comprehensive Trendlyne Integration
+**Status:** TODO  
+**Why:** Trendlyne is not just a data fallback — it is a complete India equity intelligence platform offering signals not available anywhere else for free. Six distinct integration pillars make this the highest-ROI paid subscription in the stack.
+
+---
+
+#### What Trendlyne offers (evaluation summary)
+
+| Module | What it provides | Current gap it fills |
+|---|---|---|
+| **DVM scores** | Pre-computed Durability (0–100) + Valuation (0–100) + Momentum (0–100) composite per stock | Discovery pre-screen has no quality-vs-price composite signal |
+| **Fundamentals** | Full 10-yr annual series: revenue, PAT, EPS, CAGR, ROCE, promoter pledging, debt | warren_bot + discovery severely limited when screener.in blocked |
+| **Analyst consensus** | Price target, EPS estimate, revenue estimate from 2–15 brokers per stock | No independent cross-check on our upside_pct |
+| **Corporate filings / news** | BSE XML filings feed + earnings call transcripts + management commentary | Sentiment agent uses only Google News RSS — misses filings |
+| **Insider/SAST trades** | Promoter buying/selling + SAST acquirer disclosures | No insider signal anywhere in current stack |
+| **Corporate actions** | Dividends, splits, rights, bonus — calendar with dates | earnings_calendar auto-population (P2-D becomes part of this) |
+
+---
+
+#### Recommended subscription tier
+
+| Tier | Price | Key unlocks |
+|---|---|---|
+| GuruQ | ₹310/month | 1,758 screener params, 75 alerts |
+| **StratQ** *(recommended)* | **₹492/month** *(₹5,900/year)* | 3,500+ params, 300 real-time alerts, **unlimited data downloads**, full historical series |
+
+> StratQ annual = ₹492/month ≈ $6/month. One alpha trade pays for multiple years.
+
+---
+
+#### Access method (no official API)
+Trendlyne has **no public API**. Access via JSON endpoint scraping with session cookies — same pattern as `get_screener_data()` in `data/fetchers.py`.
+
+```python
+# Pattern (same as screener.in):
+import requests
+session = requests.Session()
+session.cookies.set("sessionid", TRENDLYNE_SESSION_COOKIE)
+session.cookies.set("csrftoken",  TRENDLYNE_CSRF_TOKEN)
+
+# DVM scores:
+r = session.get(f"https://trendlyne.com/equity/dvm-score/{symbol}/")
+# Fundamental data:
+r = session.get(f"https://trendlyne.com/equity/fundamental/{symbol}/ajax/")
+# Analyst estimates:
+r = session.get(f"https://trendlyne.com/equity/analyst-estimate/{symbol}/ajax/")
+# Insider trades:
+r = session.get(f"https://trendlyne.com/equity/insider-trades/{symbol}/ajax/")
+# Corporate filings (BSE XML):
+r = session.get(f"https://trendlyne.com/equity/bse-filings/{symbol}/ajax/")
+```
+
+Session cookie obtained from browser DevTools after manual login. Set as `TRENDLYNE_SESSION_COOKIE` + `TRENDLYNE_CSRF_TOKEN` env vars on Railway.
+
+---
+
+#### Integration architecture — 6 pillars in priority order
+
+**Pillar 1 — Fundamental data (primary extension, not just fallback)**  
+`data/trendlyne_fetcher.py` → `get_trendlyne_fundamentals(symbol)`:
+- 10-yr annual revenue/PAT/EPS/CAGR series (replaces screener.in as primary for warren_bot historical series)
+- Promoter pledging % (actual figure, not scraper estimate)
+- ROCE consistency over 10 years (needed for moat_score)
+- Returns `data_source: "trendlyne"`, `data_quality: "FULL"`
+
+Integration: `data/fetchers.py::get_screener_data()` fallback chain becomes:
+`screener.in → trendlyne → yfinance → None`
+
+**Pillar 2 — Corporate actions → earnings_calendar (supersedes P2-D)**  
+`data/trendlyne_fetcher.py` → `get_corporate_actions(symbols)`:
+- Earnings result dates + board meeting dates from Trendlyne's BSE feed
+- Daily refresh at 08:00 IST in `worker.py`
+- Upserts to `earnings_calendar` table (already exists)
+- Replaces P2-D (NSE bulletin + yfinance approach) — this is cleaner + richer
+
+> **Note:** P2-D should be implemented as part of P3-C, not separately.
+
+**Pillar 3 — DVM scores in discovery pre-screen**  
+`agents/discovery_screener.py::prescreen()`:
+- Add Filter 6 (optional, bonus): `dvm_momentum_score ≥ 45` (momentum not overheated)
+- Add `valuation_score` to metadata — surfaced in discovery card on dashboard
+- DVM Durability score enriches `data_quality` assessment
+
+DVM score thresholds (Trendlyne's own scale):
+- Durability: ≥ 60 = quality business, ≥ 80 = exceptional
+- Valuation: 40–70 = reasonably priced, < 40 = cheap/deep-value, > 80 = expensive
+- Momentum: 45–70 = constructive, > 80 = overheated/overbought
+
+**Pillar 4 — Analyst consensus cross-validation**  
+`agents/fundamental.py` enrichment (post-analysis):
+- If `analyst_target_price` available AND our `intrinsic_value` differs by >30% → flag `valuation_divergence: true` in result
+- Add `analyst_consensus_target` + `analyst_count` to recommendation metadata
+- Synthesiser uses divergence flag as a confidence moderator (reduces confidence if analysts disagree by >30%)
+
+**Pillar 5 — News + BSE filings in sentiment agent**  
+`agents/sentiment.py`:
+- Replace / augment current Google News RSS call with Trendlyne BSE filings feed
+- Earnings call transcript NLP: extract management tone (capex guidance, revenue outlook, margin commentary) as structured sentiment signals
+- Insider trades signal: `promoter_buying_3m` > 0 → +5 sentiment pts; `promoter_selling_3m > 2%` → -10 pts
+
+**Pillar 6 — Insider/SAST signal in institutional agent**  
+`agents/institutional.py`:
+- New function `_get_insider_signal(symbol)` — fetches Trendlyne SAST disclosures
+- SAST acquisition (bulk deal, open market buy by promoter) → `smart_money_signal: ACCUMULATING`
+- Weighted +8 pts to institutional score when active promoter buying detected
+
+---
+
+#### New files / changes required
+
+| File | Change |
+|---|---|
+| `data/trendlyne_fetcher.py` | New module — all 6 fetch functions + session management |
+| `data/fetchers.py` | Add trendlyne to fallback chain in `get_screener_data()` |
+| `agents/fundamental.py` | Analyst consensus cross-check + valuation_divergence flag |
+| `agents/sentiment.py` | BSE filings feed + transcript NLP + insider sentiment signal |
+| `agents/institutional.py` | `_get_insider_signal()` from Trendlyne SAST |
+| `agents/discovery_screener.py` | DVM Momentum filter + valuation_score to metadata |
+| `agents/warren_bot.py` | Use trendlyne 10-yr series when screener.in unavailable |
+| `scheduler/worker.py` | Daily corporate actions job at 08:00 IST |
+| `db/migrations/` | No new tables needed — `earnings_calendar` already exists |
+
+---
+
+#### New environment variables
+
+| Variable | Description |
+|---|---|
+| `TRENDLYNE_SESSION_COOKIE` | Browser session cookie (rotate every ~30 days) |
+| `TRENDLYNE_CSRF_TOKEN` | CSRF token paired with session cookie |
+
+Add both to Railway `worker` + `web` services.
+
+---
+
+#### What this supersedes / absorbs
+
+| Existing item | Disposition after P3-C |
+|---|---|
+| P2-A yfinance fallback | Remains as tier-3 fallback (screener.in → trendlyne → yfinance) |
+| P2-D earnings calendar auto-populate | Absorbed into P3-C Pillar 2 — do not implement P2-D separately |
+| Google News RSS in macro.py (BF-4) | Augmented — macro agent keeps RSS, sentiment agent gets Trendlyne filings |
+
+---
+
+#### Implementation order (within P3-C)
+
+1. Set up `data/trendlyne_fetcher.py` with session management + test DVM endpoint
+2. Wire Pillar 1 (fundamentals) into fallback chain — highest immediate ROI
+3. Wire Pillar 2 (corporate actions → earnings_calendar) to replace P2-D
+4. Wire Pillar 3 (DVM scores) into discovery pre-screen
+5. Wire Pillar 4 (analyst consensus) into fundamental.py
+6. Wire Pillar 5 (filings/transcripts) into sentiment.py
+7. Wire Pillar 6 (insider/SAST) into institutional.py
+
+**Effort estimate:** L-XL (8–16 hours). Can be done in pillars independently — Pillar 1 alone is a partial win.
 
 ---
 
@@ -578,6 +740,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P2-D** | Earnings calendar auto-population | Code | None | M | ⬜ TODO |
 | **P3-A** | Position sizing output in recs | Code | None | S | ⬜ TODO |
 | **P3-B** | Correlation-aware portfolio alerts | Code | None | M | ⬜ TODO |
+| **P3-C** | Comprehensive Trendlyne integration (6 pillars) | Code + Service | ₹492/mo (StratQ annual) | L–XL | ⬜ TODO |
 | **P4-A** | Warren bot commentary grounding | Code | None | S | ⬜ TODO |
 | **P4-B** | Symbol resolution cache persistence | Code | None | S | ⬜ TODO |
 | **P4-C** | Governance numerical grounding check | Code | None | M | ⬜ TODO |
@@ -597,9 +760,11 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 |---|---|---|
 | Quantsapp Pro (options) | ₹2,499 (~$30) | P1-B — if no Upstox demat |
 | Upstox API (options) | ₹0 | P1-B — if opening free demat |
-| Trendlyne API (optional 2nd fallback) | ₹999 (~$12) | P2-A optional — yfinance fallback already deployed |
-| OpenAI API (GPT-4o-mini judges) | ~₹40-80/mo | P1-C — marginal (key already in stack) |
-| **Total new monthly** | **₹1,039–3,498** | |
+| Trendlyne StratQ (annual) | ₹492/mo (~$6) | P3-C — DVM scores, fundamentals, filings, insider, analyst estimates |
+| ~~Trendlyne GuruQ (monthly)~~ | ~~₹310/mo~~ | *(not recommended — limited downloads, no historical series)* |
+| OpenAI API (GPT-4o-mini judges + embeddings) | ~₹40-80/mo | P1-C + RAG (key already in stack) |
+| **Total new monthly (Breeze + Trendlyne + OpenAI)** | **₹532–3,071** | |
+| **Total new monthly (Breeze + Trendlyne + Quantsapp + OpenAI)** | **₹3,031–3,071** | *(if Quantsapp instead of ICICI Breeze)* |
 
 ---
 
@@ -614,5 +779,5 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.1 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session + P2-A complete)*  
-*Next milestone: P2-B (RAG corpus auto-refresh)*
+*Document version: 3.2 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session + P2-A complete + P3-C Trendlyne plan added)*  
+*Next milestone: P2-B (RAG corpus auto-refresh) or P3-C Pillar 1 (Trendlyne fundamentals — highest immediate ROI)*
