@@ -499,20 +499,28 @@ def analyse(symbol: str) -> dict:
     # ── 6. Rolling 7-day trend ────────────────────────────────────────────────
     trend = _rolling_trend(scored)
 
-    # ── 7. FII data for danger detection ─────────────────────────────────────
+    # ── 7. FII data for danger detection (optional — news-only fallback) ──────
     fii_net: Optional[float] = None
+    fii_available = False
     try:
         fii_data = get_nse_fii_dii()
         if fii_data:
-            fii_net = fii_data.get("fii_net")
-            data_sources.append("nse_fii_dii")
-    except Exception:
-        pass
+            fii_net_raw = fii_data.get("fii_net")
+            # Guard: skip zero values (holiday data or stale parse)
+            if fii_net_raw is not None and fii_net_raw != 0.0:
+                fii_net = float(fii_net_raw)
+                fii_available = True
+                data_sources.append("nse_fii_dii")
+            else:
+                log.debug("FII net = 0 or None — treating as unavailable")
+    except Exception as exc:
+        log.debug("FII fetch failed (non-critical): %s", exc)
 
     # ── 7b. Data completeness check ──────────────────────────────────────────
+    # FII is now non-critical: sentiment proceeds as news-only when FII absent.
     _snapshot = {
         "headline_count": len(unique_headlines),
-        "fii_net":        fii_net,
+        "fii_net":        fii_net,      # None is tolerated (non-critical field)
         "min_headlines":  len(unique_headlines),
     }
     _chk = _dcv.validate(_snapshot, "sentiment")
@@ -567,9 +575,13 @@ def analyse(symbol: str) -> dict:
                 }
                 for s in scored
             ],
-            "rolling_trend":       trend,
+            "rolling_trend":        trend,
             "misinformation_flags": misinfo_flags,
-            "haiku_calls_used":    haiku_calls,
+            "haiku_calls_used":     haiku_calls,
+            # Surface FII availability so downstream / dashboard can show context
+            "fii_net":              fii_net,
+            "fii_available":        fii_available,
+            "news_only_mode":       not fii_available,
         },
         "danger_signals": danger_signals,
         "data_sources":   list(dict.fromkeys(data_sources)),  # dedup, preserve order

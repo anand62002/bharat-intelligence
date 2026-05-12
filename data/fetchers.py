@@ -294,7 +294,10 @@ def _try_nse_fii_dii() -> dict | None:
     headers  = {
         **_HEADERS,
         "Accept":          "application/json, text/plain, */*",
-        "Accept-Encoding": "gzip, deflate, br",
+        # Omit "Accept-Encoding: br" — NSE honours brotli but requests lacks
+        # brotlicffi by default → garbled bytes → silent parse failure.
+        # Let requests choose gzip/deflate which it can always decompress.
+        "Accept-Encoding": "gzip, deflate",
         "Referer":         warm_url,
         "Cache-Control":   "no-cache",
         "Pragma":          "no-cache",
@@ -310,9 +313,50 @@ def _try_nse_fii_dii() -> dict | None:
         data = json.loads(text)
         if not data:
             return None
-        latest  = data[0]
+
+        fii_net: Optional[float] = None
+        dii_net: Optional[float] = None
+        date_str = ""
+
+        # ── New format (May 2026+) ───────────────────────────────────────────
+        # NSE changed the API response schema: instead of a single object with
+        # fiiNet/diiNet keys, it now returns an array of category objects:
+        #   [{"category": "DII",     "date": "12-May-2026",
+        #     "buyValue": "20684.82", "sellValue": "12694.5", "netValue": "7990.32"},
+        #    {"category": "FII/FPI", "date": "12-May-2026",
+        #     "buyValue": "16555.27", "sellValue": "18514.66", "netValue": "-1959.39"}]
+        if isinstance(data, list) and data and "category" in data[0]:
+            for item in data:
+                cat     = (item.get("category") or "").lower()
+                net_raw = item.get("netValue")
+                date_str = item.get("date", date_str)
+                try:
+                    net_val: Optional[float] = float(net_raw) if net_raw is not None else None
+                except (TypeError, ValueError):
+                    net_val = None
+                if any(k in cat for k in ("fii", "fpi", "foreign")):
+                    fii_net = net_val
+                elif "dii" in cat:
+                    dii_net = net_val
+            # Both-zero guard: a holiday or failed parse returns 0/0 — skip it
+            # so the next source (BSE, Trendlyne …) gets a chance.
+            if fii_net is None or (fii_net == 0.0 and dii_net == 0.0):
+                return None
+            return {
+                "date":    date_str,
+                "fii_net": fii_net,
+                "dii_net": dii_net if dii_net is not None else 0.0,
+                "source":  "nse",
+            }
+
+        # ── Legacy format ────────────────────────────────────────────────────
+        # Single object (or array[0]) with fiiNet / diiNet keys.
+        latest  = data[0] if isinstance(data, list) else data
         fii_net = float(latest.get("fiiNet") or latest.get("FII_NET") or 0)
         dii_net = float(latest.get("diiNet") or latest.get("DII_NET") or 0)
+        # Guard against stale zero-filled responses
+        if fii_net == 0.0 and dii_net == 0.0:
+            return None
         return {
             "date":    latest.get("date") or latest.get("DATE") or "",
             "fii_net": fii_net,

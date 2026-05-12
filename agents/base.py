@@ -239,14 +239,17 @@ AGENT_FIELD_SPECS: dict[str, list[FieldSpec]] = {
     ],
 
     # ── sentiment ─────────────────────────────────────────────────────────────
-    # Needs news headlines + FII/DII flow.
+    # Primary signal: news headlines (critical).
+    # FII data enriches danger detection but is NOT critical — NSE/BSE scraping
+    # can fail on holidays or after API changes.  Sentiment falls back gracefully
+    # to a news-only signal when FII is unavailable.
     "sentiment": [
         FieldSpec("headline_count",  "News headline count",  critical=True,
                   check=_min_int(1),
                   description="At least 1 headline required for sentiment"),
-        FieldSpec("fii_net",         "FII net flow (₹Cr)",   critical=True,
+        FieldSpec("fii_net",         "FII net flow (₹Cr)",   critical=False,
                   check=_is_not_none,
-                  description="Institutional sentiment anchor"),
+                  description="Institutional flow enrichment (optional — news-only fallback when absent)"),
         FieldSpec("min_headlines",   "Sufficient headlines", critical=False,
                   check=_min_int(3),
                   description="≥3 headlines for a robust average score"),
