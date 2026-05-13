@@ -75,6 +75,13 @@ _DEDUP_WINDOW_HOURS         = 24     # suppress duplicate alert within this wind
 _SECTOR_CONC_THRESHOLD  = 40.0   # % — alert when one sector > this share of portfolio
 _MACRO_CLUSTER_MIN      = 3      # alert when this many holdings share macro sensitivity
 
+# ── Correlation thresholds (P3-B) ─────────────────────────────────────────────
+_CORR_THRESHOLD      = 0.75   # Pearson r — pairs above this are "highly correlated"
+_CORR_MIN_PAIRS      = 2      # minimum qualifying pairs to fire CORR_CLUSTER alert
+_CORR_LOOKBACK_DAYS  = 60     # days of price history used for correlation
+_CORR_MIN_OVERLAP    = 20     # minimum overlapping data-points required per pair
+_CORR_DEDUP_HOURS    = 168    # 7-day dedup window (correlation changes slowly)
+
 # ── Market hours (IST, 24h) ───────────────────────────────────────────────────
 _MARKET_OPEN_H  = 9
 _MARKET_OPEN_M  = 0
@@ -375,6 +382,176 @@ def _check_concentration(
                 "MACRO_CLUSTER: %d %s holdings = %.1f%% portfolio (symbols: %s)",
                 len(sym_list), category, cat_pct, symbols_str,
             )
+
+    return alerts_created
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P3-B: Correlation-aware portfolio alerts
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _compute_correlation_pairs(
+    holdings: list[dict],
+) -> list[tuple[str, str, float]]:
+    """
+    Download 60-day daily closing prices for all eligible holdings in one
+    batched yfinance call and return pairwise Pearson correlations that
+    exceed _CORR_THRESHOLD.
+
+    Parameters
+    ----------
+    holdings : list of holding dicts with keys 'symbol' and 'yf_symbol'
+
+    Returns
+    -------
+    List of (symbol_a, symbol_b, correlation) tuples, sorted by correlation desc.
+    Empty list on any failure or when fewer than 2 eligible symbols exist.
+    """
+    import pandas as pd
+
+    # Only holdings that have a resolved yf_symbol and positive qty
+    eligible = [
+        h for h in holdings
+        if h.get("yf_symbol") and float(h.get("qty") or 0) > 0
+    ]
+    if len(eligible) < 2:
+        return []
+
+    yf_syms    = [h["yf_symbol"] for h in eligible]
+    disp_names = {h["yf_symbol"]: h["symbol"] for h in eligible}
+
+    try:
+        raw = yf.download(
+            yf_syms,
+            period=f"{_CORR_LOOKBACK_DAYS}d",
+            auto_adjust=True,
+            progress=False,
+        )
+        if raw.empty:
+            return []
+
+        # Flatten MultiIndex → plain symbol columns
+        if isinstance(raw.columns, pd.MultiIndex):
+            closes = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw
+        else:
+            closes = raw[["Close"]] if "Close" in raw.columns else raw
+
+        # Single-symbol download returns a Series — wrap it
+        if isinstance(closes, pd.Series):
+            closes = closes.to_frame(name=yf_syms[0])
+
+        returns = closes.pct_change().dropna(how="all")
+
+    except Exception as exc:
+        log.debug("Correlation: price download failed: %s", exc)
+        return []
+
+    pairs: list[tuple[str, str, float]] = []
+    syms_in_data = [s for s in yf_syms if s in returns.columns]
+
+    for i, sym_a in enumerate(syms_in_data):
+        for sym_b in syms_in_data[i + 1:]:
+            paired = returns[[sym_a, sym_b]].dropna()
+            if len(paired) < _CORR_MIN_OVERLAP:
+                continue
+            corr = float(paired.corr().iloc[0, 1])
+            if not (corr == corr):      # NaN guard
+                continue
+            if corr >= _CORR_THRESHOLD:
+                pairs.append((
+                    disp_names.get(sym_a, sym_a),
+                    disp_names.get(sym_b, sym_b),
+                    round(corr, 3),
+                ))
+
+    pairs.sort(key=lambda x: -x[2])
+    return pairs
+
+
+def _check_correlation(
+    holdings: list[dict],
+    client,
+    dry_run: bool = False,
+) -> list[str]:
+    """
+    Detect highly correlated holding pairs and fire a CORR_CLUSTER alert.
+
+    A CORR_CLUSTER alert fires when ≥ _CORR_MIN_PAIRS holding pairs share a
+    60-day Pearson return correlation > _CORR_THRESHOLD (default 0.75).
+
+    High correlation means the holdings tend to rise and fall together —
+    providing less real diversification than the number of positions implies.
+
+    Dedup window: 7 days (_CORR_DEDUP_HOURS) — correlation changes slowly so
+    re-alerting daily would be noise.
+
+    Returns list of alert_type strings created (max 1 element: "CORR_CLUSTER").
+    """
+    alerts_created: list[str] = []
+
+    # Need at least 3 holdings to have ≥ 2 meaningful pairs
+    eligible = [
+        h for h in holdings
+        if h.get("yf_symbol") and float(h.get("qty") or 0) > 0
+    ]
+    if len(eligible) < 3:
+        return alerts_created
+
+    pairs = _compute_correlation_pairs(eligible)
+
+    if len(pairs) < _CORR_MIN_PAIRS:
+        log.debug(
+            "CORR_CLUSTER: only %d pair(s) above %.2f threshold — no alert",
+            len(pairs), _CORR_THRESHOLD,
+        )
+        return alerts_created
+
+    # Dedup: one CORR_CLUSTER alert per 7-day window (portfolio-level)
+    if client and _portfolio_alert_exists(
+        client, "CORR_CLUSTER", "PORTFOLIO", window_hours=_CORR_DEDUP_HOURS
+    ):
+        log.debug("CORR_CLUSTER already open (7-day dedup) — suppressed")
+        return alerts_created
+
+    # Build human-readable pair summary (show top 5 pairs)
+    top_pairs = pairs[:5]
+    pair_str = "  |  ".join(
+        f"{a} & {b} (r={c:.2f})" for a, b, c in top_pairs
+    )
+    overflow = f" (+{len(pairs) - 5} more)" if len(pairs) > 5 else ""
+
+    title  = f"Correlated holdings: {len(pairs)} pair(s) move together (r>{_CORR_THRESHOLD})"
+    detail = (
+        f"{len(pairs)} holding pair(s) show 60-day return correlation above "
+        f"{_CORR_THRESHOLD:.0%}: {pair_str}{overflow}. "
+        f"These positions amplify each other on large market moves — "
+        f"portfolio diversification is lower than the number of holdings implies. "
+        f"Consider trimming one leg of the most-correlated pairs."
+    )
+
+    if dry_run:
+        print(f"\n  [DRY RUN] CORR_CLUSTER alert:")
+        print(f"    {title}")
+        print(f"    {detail[:120]}...")
+    elif client:
+        try:
+            client.table("portfolio_alerts").insert({
+                "severity":   "WARNING",
+                "alert_type": "CORR_CLUSTER",
+                "title":      title,
+                "detail":     detail,
+                "symbol":     "PORTFOLIO",
+                "holding_id": None,
+                "resolved":   False,
+            }).execute()
+            alerts_created.append("CORR_CLUSTER")
+            log.warning(
+                "CORR_CLUSTER: %d pair(s) above r=%.2f threshold. Top pair: %s & %s (r=%.3f)",
+                len(pairs), _CORR_THRESHOLD,
+                pairs[0][0], pairs[0][1], pairs[0][2],
+            )
+        except Exception as exc:
+            log.error("CORR_CLUSTER insert failed: %s", exc)
 
     return alerts_created
 
@@ -933,6 +1110,22 @@ def run(dry_run: bool = False) -> dict:
         except Exception as exc:
             log.error("Concentration check failed: %s", exc)
             errors.append(f"concentration: {exc}")
+
+    # ── Correlation-aware portfolio check (P3-B) ──────────────────────────────
+    if len(enriched_holdings) >= 3:
+        try:
+            corr_alerts = _check_correlation(
+                enriched_holdings, client, dry_run=dry_run
+            )
+            total_alerts += len(corr_alerts)
+            if corr_alerts:
+                log.info(
+                    "Correlation alerts: %d created (%s)",
+                    len(corr_alerts), ", ".join(corr_alerts),
+                )
+        except Exception as exc:
+            log.error("Correlation check failed: %s", exc)
+            errors.append(f"correlation: {exc}")
 
     duration = round(time.time() - t0, 2)
 
