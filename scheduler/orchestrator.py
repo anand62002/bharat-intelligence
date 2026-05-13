@@ -1030,10 +1030,35 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 log.warning("[%s] warren_bot attachment failed: %s", symbol, wb_exc)
                 rec["warren_bot"] = None
 
+            # ── P3-A: Position sizing ─────────────────────────────────────────
+            try:
+                from agents.position_sizer import calc_position_size
+                wb_attached = rec.get("warren_bot") or {}
+                sizing = calc_position_size(
+                    upside_pct   = rec.get("upside_pct", 0),
+                    confidence   = rec.get("confidence", 0),
+                    action       = rec.get("action", "HOLD"),
+                    mos_pct      = wb_attached.get("margin_of_safety_pct") if wb_attached else None,
+                    warren_score = wb_attached.get("score") if wb_attached else None,
+                )
+                rec["suggested_position_pct"] = sizing["suggested_position_pct"]
+                rec["position_label"]         = sizing["position_label"]
+                log.info(
+                    "[%s] position sizing → %s (%.2f%%)  MOS=%.1f%% [%s]",
+                    symbol, sizing["position_tier"],
+                    sizing["suggested_position_pct"],
+                    sizing["mos_used"], sizing["mos_source"],
+                )
+            except Exception as ps_exc:
+                log.warning("[%s] position_sizer failed (non-blocking): %s", symbol, ps_exc)
+                rec["suggested_position_pct"] = None
+                rec["position_label"]         = None
+
             recommendations.append(rec)
             log.info(
-                "[%s] → %s  confidence=%.0f%%  upside=%.1f%%  risk=%.0f",
+                "[%s] → %s  confidence=%.0f%%  upside=%.1f%%  risk=%.0f  pos=%.2f%%",
                 symbol, rec["action"], rec["confidence"], rec["upside_pct"], rec["risk_score"],
+                rec.get("suggested_position_pct") or 0,
             )
 
         except Exception as exc:
@@ -1177,6 +1202,7 @@ async def save_recs_node(state: OrchestratorState) -> dict:
         "danger_drop_pct", "danger_confidence",
         "headline", "summary", "agent_signals", "is_discovery",
         "valid_till", "gov_check",
+        "suggested_position_pct", "position_label",   # P3-A position sizing
     }
 
     saved_ids: list[str] = []

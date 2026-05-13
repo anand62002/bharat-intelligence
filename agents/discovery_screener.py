@@ -981,24 +981,40 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
         tier = result.opportunity_tier
         action = "BUY" if tier == "STANDARD" else "BUY"     # CRITICAL also BUY
 
+        # ── P3-A: Position sizing ─────────────────────────────────────────────
+        try:
+            from agents.position_sizer import calc_position_size
+            _sizing = calc_position_size(
+                upside_pct   = result.upside_pct,
+                confidence   = result.upside_confidence,
+                action       = action,
+            )
+            _pos_pct   = _sizing["suggested_position_pct"]
+            _pos_label = _sizing["position_label"]
+        except Exception:
+            _pos_pct   = None
+            _pos_label = None
+
         row = {
-            "symbol":           result.symbol,
-            "action":           action,
-            "confidence":       result.upside_confidence,
-            "upside_pct":       result.upside_pct,
-            "upside_confidence": result.upside_confidence,
-            "horizon_days":     _horizon_to_days(result.upside_horizon),
-            "headline":         (
+            "symbol":                 result.symbol,
+            "action":                 action,
+            "confidence":             result.upside_confidence,
+            "upside_pct":             result.upside_pct,
+            "upside_confidence":      result.upside_confidence,
+            "horizon_days":           _horizon_to_days(result.upside_horizon),
+            "headline":               (
                 f"{'⚡ CRITICAL' if tier == 'CRITICAL' else '✅ STANDARD'} DISCOVERY: "
                 f"{result.symbol} — {result.upside_pct:.0f}% upside potential"
             ),
-            "summary":          result.upside_basis,
-            "agent_signals":    {
+            "summary":                result.upside_basis,
+            "agent_signals":          {
                 k: {"signal": v.get("signal"), "score": v.get("score")}
                 for k, v in result.agent_signals.items()
             },
-            "is_discovery":     True,
-            "valid_till":       _valid_till(result.upside_horizon),
+            "is_discovery":           True,
+            "valid_till":             _valid_till(result.upside_horizon),
+            "suggested_position_pct": _pos_pct,
+            "position_label":         _pos_label,
             # metadata persists price snapshot + discovery context so
             # GET /api/discovery can serve a baseline price even when the
             # live yfinance refresh fails (weekend / holiday / network issue).

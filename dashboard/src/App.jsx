@@ -811,6 +811,11 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
             {stock.govCheck.flags.length>0&&<Tag color={C.accent} small>⚠ flagged</Tag>}
             {stock.liquidityTier==="ILLIQUID"&&<Tag color={C.red} small>🚫 ILLIQUID</Tag>}
             {stock.liquidityTier==="LOW"&&<Tag color="#f59e0b" small>⚡ LOW LIQ</Tag>}
+            {stock.suggestedPositionPct!=null&&stock.suggestedPositionPct>0&&(
+              <span style={{background:C.green+"18",color:C.green,border:`1px solid ${C.green}44`,borderRadius:3,padding:"1px 5px",fontSize:9,fontWeight:700}}>
+                📐 {stock.suggestedPositionPct}% alloc
+              </span>
+            )}
           </div>
           <div style={{fontSize:11,color:C.textDim,marginBottom:2}}>{stock.name} · {stock.sector}</div>
           <div style={{fontSize:10,color:isCritical?C.green:C.cyan,lineHeight:1.5}}>💡 {stock.discoveryReason}</div>
@@ -2481,9 +2486,14 @@ export default function App(){
                                 <Tag color={ac}>{r.action}</Tag>
                                 {inPort&&<Tag color={C.teal} small>📌 held</Tag>}
                                 <span style={{fontSize:9,color:C.muted}}>conf <b style={{color:C.accent}}>{r.confidence}%</b></span>
+                                {r.suggestedPositionPct!=null&&r.suggestedPositionPct>0&&(
+                                  <span style={{background:C.green+"18",color:C.green,border:`1px solid ${C.green}44`,borderRadius:3,padding:"1px 5px",fontSize:9,fontWeight:700}}>
+                                    📐 {r.suggestedPositionPct}%
+                                  </span>
+                                )}
                               </div>
                               <div style={{fontSize:9,color:C.textDim}}>{r.headline}</div>
-                              <div style={{fontSize:8,color:C.muted,marginTop:1}}>Till {r.validTill} · {r.horizon}</div>
+                              <div style={{fontSize:8,color:C.muted,marginTop:1}}>Till {r.validTill} · {r.horizon}{r.positionLabel?` · ${r.positionLabel}`:""}</div>
                             </div>
                             <RiskGauge score={r.riskScore}/>
                           </div>

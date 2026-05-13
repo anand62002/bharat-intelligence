@@ -32,7 +32,11 @@ Stock analysis/
 │   ├── historical_rag.py       # pgvector semantic similarity on past events
 │   ├── discovery_screener.py   # Proactive stock discovery — full NSE EQ universe
 │   │                           # daily slice rotation (200/day → 9-day full cycle)
-│   └── warren_bot.py           # Long-term business quality (Buffett+Jhunjhunwala)
+│   ├── warren_bot.py           # Long-term business quality (Buffett+Jhunjhunwala)
+│   └── position_sizer.py       # P3-A: 4-tier Kelly position sizing (FULL 5%/HALF 2.5%/QUARTER 1.25%/AVOID 0%)
+│   #                             calc_position_size(upside_pct, confidence, action, mos_pct, warren_score)
+│   #                             MOS source: warren_bot DCF (primary) → upside_pct proxy (fallback)
+│   #                             FULL tier requires DCF MOS — proxy cannot qualify (quality gate)
 │
 ├── governance/                 # Agent oversight & self-improvement
 │   ├── fact_checker.py         # Cross-agent claim verification
@@ -455,6 +459,8 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (P3-A)   | P3-A: Position sizing — agents/position_sizer.py, 4-tier model, wired into orchestrator + discovery + API + dashboard (45 tests) |
+| (fix)    | fix: restore FII live data (NSE schema change + brotli encoding) + sentiment news-only fallback |
 | (P2-C)   | P2-C: Portfolio concentration alerts — SECTOR_CONCENTRATION + MACRO_CLUSTER (54 tests) |
 | (P2-B)   | P2-B: RAG corpus auto-refresh — db/auto_seed_rag.py + worker.py monthly job |
 | `414ed30` | docs: add P3-C Comprehensive Trendlyne Integration plan to EXECUTION_PLAN.md |
@@ -541,8 +547,8 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 0 (P0)** ✅: Zero-cost code fixes — WACC, macro sensitivity, DCF fix, discovery thresholds
 - **Phase 1 (P1)** ✅: Historical backtest framework, options paid feed, GPT-4o 3rd judge, score calibration
 - **Bug Fix Session** ✅: yfinance 1.2.0 fix, discovery screener 0-pass bugs, FII stale zeros, macro news, embeddings, partial sell, symbol aliases
-- **Phase 2 (P2)** ← CURRENT: P2-A ✅ (yfinance fallback), P2-B ✅ (RAG auto-refresh), P2-C ✅ (concentration alerts), P2-D (earnings calendar — superseded by P3-C)
-- **Phase 3 (P3)**: Position sizing, correlation alerts
+- **Phase 2 (P2)** ✅: P2-A (yfinance fallback), P2-B (RAG auto-refresh), P2-C (concentration alerts), P2-D (superseded by P3-C)
+- **Phase 3 (P3)** ← CURRENT: P3-A ✅ (position sizing), P3-B (correlation alerts), P3-C (Trendlyne)
 - **Phase 4 (P4)**: Commentary grounding, symbol cache persistence, governance numerical check
 - **Phase 5 (P5)**: Robust forward paper portfolio tracker + attribution analysis
 - **Phase 6 (P6)**: Dashboard performance tab (hit rate, alpha, backtest results)

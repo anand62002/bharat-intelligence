@@ -36,7 +36,7 @@
 | P2-B | RAG corpus auto-refresh monthly job | Phase 2 | ✅ **DONE** | 2026-05-12 |
 | P2-C | Portfolio-level concentration alerts | Phase 2 | ✅ **DONE** | 2026-05-12 |
 | P2-D | Earnings calendar auto-population job | Phase 2 | ⬜ TODO | — |
-| P3-A | Position sizing output in recommendations | Phase 3 | ⬜ TODO | — |
+| P3-A | Position sizing output in recommendations | Phase 3 | ✅ **DONE** | 2026-05-13 |
 | P3-B | Correlation-aware portfolio alerts | Phase 3 | ⬜ TODO | — |
 | P3-C | Comprehensive Trendlyne integration (DVM, news, filings, estimates, insider) | Phase 3 | ⬜ TODO | — |
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ⬜ TODO | — |
@@ -47,7 +47,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 23 / 34 items complete (68%)**
+**Progress: 24 / 34 items complete (71%)**
 
 ---
 
@@ -494,7 +494,7 @@ python -m db.auto_seed_rag --run --max 20   # cap at 20 events
 
 ---
 
-### ⬜ P3-A: Position Sizing Output in Recommendations
+### ✅ P3-A: Position Sizing Output in Recommendations *(completed 2026-05-13)*
 **What it is:** `suggested_position_pct` field on every recommendation — how much % of portfolio to allocate.
 
 | Condition | Suggested Size |
@@ -504,7 +504,16 @@ python -m db.auto_seed_rag --run --max 20   # cap at 20 events
 | MOS > 0% AND confidence ≥ 55% | Quarter position (1.25%) |
 | MOS < 0% or confidence < 55% | Avoid (0%) |
 
-**Files:** `scheduler/orchestrator.py` (`_build_recommendation()`), `agents/valuation_scenarios.py`
+**Files:** `agents/position_sizer.py` (new), `scheduler/orchestrator.py`, `agents/discovery_screener.py`, `api/main.py`, `dashboard/src/App.jsx`  
+**DB migration:** `db/migrations/add_position_size_to_recommendations.sql` — adds `suggested_position_pct NUMERIC(5,2)` + `position_label TEXT`  
+**Tests:** `tests/test_position_sizer.py` — 45 tests, all passing  
+**Key details:**
+- MOS source priority: warren_bot DCF `margin_of_safety_pct` → `upside_pct` proxy fallback
+- FULL tier (5%) requires DCF-backed MOS — proxy cannot qualify (quality gate prevents false positives)
+- AVOID/SELL actions always return 0% regardless of scores
+- Wired into orchestrator after warren_bot attachment; also applied to discovery screener saves
+- API: `suggestedPositionPct` + `positionLabel` in `_transform_recommendation()`
+- Dashboard: 📐 position badge on both recommendation cards and discovery cards
 
 ---
 
@@ -772,7 +781,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P2-B** | RAG corpus auto-refresh monthly job | Code | None (OpenAI existing) | M | ✅ Done |
 | **P2-C** | Portfolio-level concentration alerts | Code | None | M | ✅ Done |
 | **P2-D** | Earnings calendar auto-population | Code | None | M | ⬜ TODO |
-| **P3-A** | Position sizing output in recs | Code | None | S | ⬜ TODO |
+| **P3-A** | Position sizing output in recs | Code | None | S | ✅ Done |
 | **P3-B** | Correlation-aware portfolio alerts | Code | None | M | ⬜ TODO |
 | **P3-C** | Comprehensive Trendlyne integration (6 pillars) | Code + Service | ₹492/mo (StratQ annual) | L–XL | ⬜ TODO |
 | **P4-A** | Warren bot commentary grounding | Code | None | S | ⬜ TODO |
@@ -813,5 +822,5 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.4 — 2026-05-12 (Phase 0 + Phase 1 + bug-fix session + P2-A + P2-B + P2-C complete + P3-C Trendlyne plan added)*  
-*Next milestone: P2-D (earnings calendar auto-population) or P3-C Pillar 1 (Trendlyne fundamentals)*
+*Document version: 3.5 — 2026-05-13 (Phase 0 + Phase 1 + bug-fix session + P2-A/B/C + P3-A complete + FII data fix)*  
+*Next milestone: P3-B (correlation-aware portfolio alerts) or P3-C Pillar 1 (Trendlyne fundamentals)*

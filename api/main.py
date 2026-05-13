@@ -650,6 +650,9 @@ def _transform_recommendation(row: dict) -> dict:
         "forwardPe":        meta.get("forward_pe")        or None,
         "pegRatio":         meta.get("peg_ratio_fwd") or meta.get("peg_ratio") or None,
         "epsGrowthPct":     meta.get("eps_growth_pct")    or None,
+        # P3-A: Position sizing (top-level DB columns, None for legacy recs)
+        "suggestedPositionPct": row.get("suggested_position_pct"),
+        "positionLabel":        row.get("position_label") or "",
     }
 
 
