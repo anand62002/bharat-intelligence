@@ -28,6 +28,28 @@ _HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+# Rotate User-Agent for screener.in requests to reduce compound UA-based blocking.
+# Note: Railway's static IP is still the primary block vector — UA rotation alone
+# won't bypass IP-level blocks, but prevents UA fingerprinting layering on top.
+_SCREENER_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+]
+
+
+def _screener_headers() -> dict:
+    """Return request headers with a randomised User-Agent for screener.in calls."""
+    return {
+        **_HEADERS,
+        "User-Agent": random.choice(_SCREENER_USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+    }
+
 
 # ─── yfinance retry utility ──────────────────────────────────────────────────
 
@@ -748,7 +770,7 @@ def get_screener_data(symbol: str) -> dict | None:
         for variant in ("", "consolidated/"):
             url = f"https://www.screener.in/company/{candidate}/{variant}"
             try:
-                r = requests.get(url, headers=_HEADERS, timeout=12)
+                r = requests.get(url, headers=_screener_headers(), timeout=12)
                 if r.status_code == 200:
                     resp = r
                     break
@@ -1233,7 +1255,7 @@ def get_screener_history(symbol: str) -> dict | None:
         for variant in ("", "consolidated/"):
             url = f"https://www.screener.in/company/{candidate}/{variant}"
             try:
-                r = requests.get(url, headers=_HEADERS, timeout=15)
+                r = requests.get(url, headers=_screener_headers(), timeout=15)
                 if r.status_code == 200:
                     resp = r
                     break

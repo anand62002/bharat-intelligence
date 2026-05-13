@@ -177,7 +177,19 @@ def get_breeze_client():
         )
         return None
     except Exception as exc:
-        log.warning("Breeze session setup failed: %s", exc)
+        msg = str(exc)
+        if "407" in msg or "Proxy Authentication Required" in msg:
+            log.warning(
+                "Breeze BLOCKED by Railway egress proxy (HTTP 407). "
+                "This is a Railway networking issue — NOT a token expiry. "
+                "Action: (1) Set FIXIE_URL env var on Railway to route Breeze "
+                "calls through a proxy that ICICI allows, OR (2) whitelist "
+                "api.icicidirect.com outbound in Railway networking settings. "
+                "Primary ICICI IP: 52.5.155.132 (update on ICICI Direct portal too). "
+                "Options signals will use VIX fallback until resolved."
+            )
+        else:
+            log.warning("Breeze session setup failed: Unexpected error: %s", exc)
         return None
 
 

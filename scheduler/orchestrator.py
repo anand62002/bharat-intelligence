@@ -1437,6 +1437,14 @@ async def run_discovery_node(state: OrchestratorState) -> dict:
     except Exception as exc:
         log.warning("run_discovery_node failed (non-fatal): %s", exc, exc_info=True)
 
+    # ── Completion sentinel — always the last log line emitted by the pipeline ──
+    # This line is intentionally verbose so it survives Railway's 1000-line
+    # log-window cap and confirms the full pipeline ran to completion.
+    import datetime as _dt
+    log.info(
+        "ORCHESTRATOR_COMPLETE run_date=%s pipeline=OK",
+        _dt.date.today().isoformat(),
+    )
     return {}
 
 

@@ -90,7 +90,17 @@ def _yfinance_earnings_date(symbol: str) -> date | None:
     """
     try:
         import yfinance as yf
-        yf_sym = symbol if ("." in symbol or symbol.startswith("^")) else f"{symbol}.NS"
+        # Use YF_SYMBOL_MAP to resolve correct ticker — handles BSE-only stocks
+        # (GEVERNOVA→522275.BO, ELFORGE→ELFORGE.BO) and NSE aliases
+        # (IHCL→INDHOTEL.NS, SHAKTIPUMPS→SHAKTIPUMP.NS, etc.)
+        if "." in symbol or symbol.startswith("^"):
+            yf_sym = symbol
+        else:
+            try:
+                from data.symbol_map import YF_SYMBOL_MAP
+                yf_sym = YF_SYMBOL_MAP.get(symbol.upper(), f"{symbol.upper()}.NS")
+            except ImportError:
+                yf_sym = f"{symbol.upper()}.NS"
         t      = yf.Ticker(yf_sym)
         cal    = t.calendar
         if cal is None:
