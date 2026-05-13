@@ -507,6 +507,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | `recommendation_outcomes` table empty — no forward tracking | MEDIUM | `agents/outcome_tracker.py` | 🔲 Needs seeding from historical recs |
 | ICICI Breeze primary IP update due ~May 18 | MEDIUM | Railway env | 🔲 Update primary IP to `52.5.155.132` on ICICI Direct portal |
 | No portfolio-level concentration alerts (sector overlap, macro cluster) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P2-C) — SECTOR_CONCENTRATION + MACRO_CLUSTER alerts added |
+| No correlation-aware alerts (hidden concentration in same-direction movers) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P3-B) — CORR_CLUSTER alert: 60-day Pearson r>0.75, ≥2 pairs, 7-day dedup |
 
 ---
 
@@ -548,7 +549,7 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 1 (P1)** ✅: Historical backtest framework, options paid feed, GPT-4o 3rd judge, score calibration
 - **Bug Fix Session** ✅: yfinance 1.2.0 fix, discovery screener 0-pass bugs, FII stale zeros, macro news, embeddings, partial sell, symbol aliases
 - **Phase 2 (P2)** ✅: P2-A (yfinance fallback), P2-B (RAG auto-refresh), P2-C (concentration alerts), P2-D (superseded by P3-C)
-- **Phase 3 (P3)** ← CURRENT: P3-A ✅ (position sizing), P3-B (correlation alerts), P3-C (Trendlyne)
+- **Phase 3 (P3)** ← CURRENT: P3-A ✅ (position sizing), P3-B ✅ (correlation alerts), P3-C (Trendlyne)
 - **Phase 4 (P4)**: Commentary grounding, symbol cache persistence, governance numerical check
 - **Phase 5 (P5)**: Robust forward paper portfolio tracker + attribution analysis
 - **Phase 6 (P6)**: Dashboard performance tab (hit rate, alpha, backtest results)

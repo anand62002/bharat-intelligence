@@ -37,7 +37,7 @@
 | P2-C | Portfolio-level concentration alerts | Phase 2 | ✅ **DONE** | 2026-05-12 |
 | P2-D | Earnings calendar auto-population job | Phase 2 | ⬜ TODO | — |
 | P3-A | Position sizing output in recommendations | Phase 3 | ✅ **DONE** | 2026-05-13 |
-| P3-B | Correlation-aware portfolio alerts | Phase 3 | ⬜ TODO | — |
+| P3-B | Correlation-aware portfolio alerts | Phase 3 | ✅ **DONE** | 2026-05-14 |
 | P3-C | Comprehensive Trendlyne integration (DVM, news, filings, estimates, insider) | Phase 3 | ⬜ TODO | — |
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ⬜ TODO | — |
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ⬜ TODO | — |
@@ -517,9 +517,11 @@ python -m db.auto_seed_rag --run --max 20   # cap at 20 events
 
 ---
 
-### ⬜ P3-B: Correlation-Aware Portfolio Alerts
-**Fix:** Weekly pairwise sector/theme overlap check across OPEN holdings.  
-**Files:** `scheduler/portfolio_monitor.py`
+### ✅ P3-B: Correlation-Aware Portfolio Alerts — DONE (2026-05-14)
+**Implemented:** 60-day Pearson return correlation across all OPEN holdings.
+Fires `CORR_CLUSTER` WARNING alert when ≥2 pairs exceed r=0.75, with 7-day dedup.
+**Files:** `scheduler/portfolio_monitor.py` (`_compute_correlation_pairs`, `_check_correlation`)
+**Tests:** `tests/test_portfolio_correlation.py` — 26 tests, all passing.
 
 ---
 
@@ -782,7 +784,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P2-C** | Portfolio-level concentration alerts | Code | None | M | ✅ Done |
 | **P2-D** | Earnings calendar auto-population | Code | None | M | ⬜ TODO |
 | **P3-A** | Position sizing output in recs | Code | None | S | ✅ Done |
-| **P3-B** | Correlation-aware portfolio alerts | Code | None | M | ⬜ TODO |
+| **P3-B** | Correlation-aware portfolio alerts | Code | None | M | ✅ Done |
 | **P3-C** | Comprehensive Trendlyne integration (6 pillars) | Code + Service | ₹492/mo (StratQ annual) | L–XL | ⬜ TODO |
 | **P4-A** | Warren bot commentary grounding | Code | None | S | ⬜ TODO |
 | **P4-B** | Symbol resolution cache persistence | Code | None | S | ⬜ TODO |
@@ -822,5 +824,5 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.5 — 2026-05-13 (Phase 0 + Phase 1 + bug-fix session + P2-A/B/C + P3-A complete + FII data fix)*  
-*Next milestone: P3-B (correlation-aware portfolio alerts) or P3-C Pillar 1 (Trendlyne fundamentals)*
+*Document version: 3.6 — 2026-05-14 (Phase 0 + Phase 1 + bug-fix session + P2-A/B/C + P3-A/B complete)*  
+*Next milestone: P3-C Trendlyne integration (requires StratQ subscription) or P3-D Angel One options (resume after account verification)*
