@@ -827,11 +827,12 @@ def get_screener_data(symbol: str) -> dict | None:
         # ── Top ratios bar ──────────────────────────────────────────────────
         for li in soup.select("#top-ratios li"):
             name_el = li.select_one(".name")
-            val_el = li.select_one(".value, .number")
+            # Use .number (inner span) not .value (outer span which includes ₹/Cr. text)
+            val_el  = li.select_one(".number")
             if not name_el or not val_el:
                 continue
             name_txt = name_el.get_text(strip=True).lower()
-            val_txt = val_el.get_text(strip=True).replace(",", "").replace("%", "").strip()
+            val_txt  = val_el.get_text(strip=True).replace(",", "").replace("%", "").strip()
             val = _safe_float(val_txt)
             if "stock p/e" in name_txt or "p/e" == name_txt:
                 result["pe"] = val
@@ -844,6 +845,16 @@ def get_screener_data(symbol: str) -> dict | None:
                 result["roe"] = val
             elif "interest coverage" in name_txt:
                 result["interest_coverage"] = val
+            elif "market cap" in name_txt and val:
+                # Screener shows in Crores; convert to absolute rupees (matches yfinance.marketCap)
+                result["market_cap"] = int(val * 1e7)
+
+        # ── Sector from breadcrumb ──────────────────────────────────────────────
+        for a in soup.select('a[href*="/market/"]'):
+            txt = a.get_text(strip=True)
+            if txt and len(txt) < 50:
+                result["sector"] = txt
+                break  # first link = broadest sector (e.g. "Energy")
 
         # ── Shareholding table: promoter, pledging, FII/DII ────────────────────
         # Screener's shareholding section has rows:
@@ -950,15 +961,6 @@ def get_screener_data(symbol: str) -> dict | None:
                     except Exception:
                         continue
 
-        # EBITDA margin — look for OPM in the top ratios or quarters table
-        for li in soup.select("#top-ratios li"):
-            name_el = li.select_one(".name")
-            val_el = li.select_one(".value, .number")
-            if name_el and val_el and "opm" in name_el.get_text(strip=True).lower():
-                result["ebitda_margin"] = _safe_float(
-                    val_el.get_text(strip=True).replace("%", "").replace(",", "")
-                )
-
         # ── OCF margin from annual P&L + Cash Flows sections ────────────────────
         # Scan for:
         #   (a) Annual "Profit & Loss" section → latest Sales figure (denominator)
@@ -974,24 +976,109 @@ def get_screener_data(symbol: str) -> dict | None:
                 continue
             htxt = header.get_text(strip=True).lower()
 
-            # Annual P&L card → latest Sales row (denominator for OCF margin)
+            # Annual P&L card → Sales, OPM%, EPS rows
             if "profit & loss" in htxt or "profit and loss" in htxt:
+                # screener.in embeds BOTH annual and quarterly tables in the same
+                # section.card (one hidden by CSS). We must skip quarterly tables
+                # to avoid overwriting annual revenue_growth with a QoQ figure.
+                # Annual FY headers are always "Mar YYYY"; quarterly tables
+                # contain Jun / Sep / Dec month names in their headers.
+                _QUARTERLY_MONTHS = ("jan", "feb", "apr", "may", "jun",
+                                     "jul", "aug", "sep", "oct", "nov", "dec")
+
+                def _row_vals(cells):
+                    return [v for v in (
+                        _safe_float(td.get_text(strip=True).replace(",", "").replace("%", ""))
+                        for td in cells[1:]
+                    ) if v is not None]
+
+                # Flag: stop after first sales row found (handles both "Sales" and "Sales+")
+                _found_sales_row = False
+
+                for table in section.select("table.data-table"):
+                    # Detect quarterly table by checking header column names.
+                    # Annual FY headers are "Mar YYYY" only; quarterly tables
+                    # contain Jun/Sep/Dec/Jan/Feb etc. — skip those.
+                    hdr_row = table.select_one("thead tr")
+                    if hdr_row:
+                        hdr_texts = [th.get_text(strip=True).lower()
+                                     for th in hdr_row.find_all("th")]
+                        if any(any(m in h for m in _QUARTERLY_MONTHS)
+                               for h in hdr_texts):
+                            continue  # skip quarterly table
+
+                    for row in table.select("tbody tr"):
+                        cells = row.find_all("td")
+                        if not cells:
+                            continue
+                        row_label = cells[0].get_text(strip=True).lower()
+
+                        # Match "Sales" (standalone) or "Sales+" (consolidated).
+                        # Screener.in consolidated pages show only "Sales+";
+                        # standalone pages show plain "Sales". Accept either.
+                        # Use _found_sales_row flag so we don't double-process.
+                        if row_label.startswith("sales") and not _found_sales_row:
+                            _found_sales_row = True
+                            vals = _row_vals(cells)
+                            if vals:
+                                _annual_sales = vals[-1]
+                                # YoY revenue growth
+                                if len(vals) >= 2 and vals[-2] and vals[-2] > 0:
+                                    result["revenue_growth"] = round(
+                                        (vals[-1] - vals[-2]) / vals[-2] * 100, 2
+                                    )
+                                # 3yr CAGR
+                                if len(vals) >= 4 and vals[-4] and vals[-4] > 0:
+                                    result["revenue_cagr_3y"] = round(
+                                        ((vals[-1] / vals[-4]) ** (1/3) - 1) * 100, 2
+                                    )
+                                # 5yr CAGR
+                                if len(vals) >= 6 and vals[-6] and vals[-6] > 0:
+                                    result["revenue_cagr_5y"] = round(
+                                        ((vals[-1] / vals[-6]) ** (1/5) - 1) * 100, 2
+                                    )
+                        elif "opm" in row_label:
+                            vals = _row_vals(cells)
+                            if vals:
+                                result["ebitda_margin"] = vals[-1]
+                        elif "eps" in row_label:
+                            vals = _row_vals(cells)
+                            if len(vals) >= 4 and vals[-4] and vals[-4] > 0:
+                                result["eps_cagr_3y"] = round(
+                                    ((vals[-1] / vals[-4]) ** (1/3) - 1) * 100, 2
+                                )
+                            if len(vals) >= 6 and vals[-6] and vals[-6] > 0:
+                                result["eps_cagr_5y"] = round(
+                                    ((vals[-1] / vals[-6]) ** (1/5) - 1) * 100, 2
+                                )
+                    if _annual_sales is not None:
+                        break
+
+            # Balance Sheet card → Debt/Equity (Borrowings / (Equity + Reserves))
+            elif "balance sheet" in htxt:
+                _borrowings = _equity_cap = _reserves = None
                 for table in section.select("table.data-table"):
                     for row in table.select("tbody tr"):
                         cells = row.find_all("td")
                         if not cells:
                             continue
-                        if "sales" in cells[0].get_text(strip=True).lower():
-                            vals = [
-                                _safe_float(td.get_text(strip=True).replace(",", ""))
-                                for td in cells[1:]
-                            ]
-                            vals = [v for v in vals if v is not None]
-                            if vals:
-                                _annual_sales = vals[-1]
-                            break
-                    if _annual_sales is not None:
-                        break
+                        lbl = cells[0].get_text(strip=True).lower()
+                        vals = [v for v in (
+                            _safe_float(td.get_text(strip=True).replace(",", ""))
+                            for td in cells[1:]
+                        ) if v is not None]
+                        if not vals:
+                            continue
+                        if "borrowing" in lbl:
+                            _borrowings = vals[-1]
+                        elif "equity capital" in lbl:
+                            _equity_cap = vals[-1]
+                        elif lbl.startswith("reserves"):
+                            _reserves = vals[-1]
+                if _borrowings is not None and _equity_cap is not None and _reserves is not None:
+                    equity_total = _equity_cap + _reserves
+                    if equity_total > 0:
+                        result["debt_equity"] = round(_borrowings / equity_total, 3)
 
             # Cash Flows card → row containing "operating" (Cash from Operating Activity)
             elif "cash flows" in htxt or "cash flow" in htxt:
