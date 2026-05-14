@@ -1,10 +1,12 @@
 """
-data/options_fetcher.py — Option Chain Fetcher (Breeze + NSE + Fallback)
-=========================================================================
+data/options_fetcher.py — Option Chain Fetcher (Trendlyne + Breeze + NSE + Fallback)
+======================================================================================
 Fetches option chain data for Indian indices and equities.
 
 Data source priority
 --------------------
+0. Trendlyne F&O Excel  (EOD data from daily S3 download — one file covers all 218 F&O
+                          stocks; no API call per symbol; requires TRENDLYNE_SESSION env var)
 1. ICICI Breeze Connect  (real option chain OI + IV — requires BREEZE_* env vars)
 2. NSE Open API          (requires browser-like cookie dance; blocked on Railway)
 3. Fallback              (India VIX + realized vol estimates via yfinance)
@@ -636,6 +638,42 @@ def get_option_metrics(symbol: str) -> dict:
         india_vix, hv20, iv_hv_ratio, underlying_price, source
     """
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+
+    # ── Priority 0: Trendlyne F&O EOD Excel (one download, covers all 218 stocks) ──
+    try:
+        from data.trendlyne_fno_fetcher import get_option_metrics as _tl_metrics
+        tl = _tl_metrics(sym)
+        if tl.get("error") is None and tl.get("pcr") is not None:
+            # Enrich with India VIX (cheap — needed for iv_hv_ratio)
+            fb_extra  = _fallback_metrics(sym)
+            india_vix = fb_extra.get("india_vix")
+            ann_vol   = tl.get("ann_vol")          # Trendlyne annualised vol (≈ HV)
+            iv_hv_ratio = (
+                round(tl["atm_iv"] / (ann_vol * 100), 3)
+                if tl.get("atm_iv") and ann_vol and ann_vol > 0
+                else fb_extra.get("iv_hv_ratio")
+            )
+            log.debug("option_metrics(%s): trendlyne_fno source", sym)
+            return {
+                "symbol":           sym,
+                "pcr":              tl["pcr"],
+                "max_pain":         tl["max_pain"],
+                "atm_iv":           tl["atm_iv"],
+                "iv_skew":          tl["iv_skew"],
+                "india_vix":        india_vix,
+                "hv20":             round(ann_vol * 100, 2) if ann_vol else fb_extra.get("hv20"),
+                "iv_hv_ratio":      iv_hv_ratio,
+                "underlying_price": tl.get("spot") or fb_extra.get("underlying_price"),
+                "source":           "trendlyne_fno",
+                # Trendlyne bonus fields (used by institutional + discovery agents)
+                "buildup":          tl.get("buildup"),
+                "oi_change_pct":    tl.get("oi_change_pct"),
+                "mwpl_pct":         tl.get("mwpl_pct"),
+                "lot_size":         tl.get("lot_size"),
+                "pcr_volume":       tl.get("pcr_volume"),
+            }
+    except Exception as _tl_exc:
+        log.debug("Trendlyne F&O source failed for %s: %s", sym, _tl_exc)
 
     # ── Priority 1: ICICI Breeze Connect (real option chain) ──────────────────
     breeze_rows = _fetch_breeze_option_chain(sym)
