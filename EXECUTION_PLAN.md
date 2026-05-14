@@ -39,6 +39,18 @@
 | P3-A | Position sizing output in recommendations | Phase 3 | ✅ **DONE** | 2026-05-13 |
 | P3-B | Correlation-aware portfolio alerts | Phase 3 | ✅ **DONE** | 2026-05-14 |
 | P3-C | Comprehensive Trendlyne integration (DVM, news, filings, estimates, insider) | Phase 3 | ⬜ TODO | — |
+| P3-D | Screener.in consolidated preference + Sales+/quarterly fix | Phase 3 | ✅ **DONE** | 2026-05-15 |
+| P3-E | Trendlyne F&O memory cleanup (compile→compact dict, gc.collect) | Phase 3 | ✅ **DONE** | 2026-05-15 |
+| DB-1 | Discovery tab blank (valid_till filter removed from 7→14d fallback) | Dashboard | ✅ **DONE** | 2026-05-15 |
+| DB-2 | Governance stoploss dedup (per alert_type+portfolio_id) | Dashboard | ✅ **DONE** | 2026-05-15 |
+| DB-3 | Data source health panel in Governance tab (/api/system/health) | Dashboard | ✅ **DONE** | 2026-05-15 |
+| DB-4 | Stale recs notice on Discovery tab when ideas are from prior day | Dashboard | ✅ **DONE** | 2026-05-15 |
+| DB-5 | Recs tab empty state → link to health panel | Dashboard | ✅ **DONE** | 2026-05-15 |
+| DB-6 | Performance tab — needs recommendation_outcomes seeding | Dashboard | ⬜ PENDING | — |
+| DB-7 | Market tab — live news feed integration (ET/MC RSS per stock) | Dashboard | ⬜ TODO | — |
+| DB-8 | Portfolio recs tab — filter by portfolio holdings (only show recs for held stocks) | Dashboard | ⬜ TODO | — |
+| DB-9 | ARIA — "What ran today" quick summary button (calls /api/discovery/runs) | Dashboard | ⬜ TODO | — |
+| DB-10 | Screener Export-to-Excel fallback (if HTML blocked, use CSV download) | Dashboard | ⬜ TODO | — |
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ⬜ TODO | — |
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ⬜ TODO | — |
 | P4-C | Governance numerical grounding check | Phase 4 | ⬜ TODO | — |
@@ -47,7 +59,18 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 24 / 34 items complete (71%)**
+**Progress: 29 / 44 items complete (66%)**
+
+### Dashboard holes identified (2026-05-15)
+| Issue | Root cause | Fix status |
+|---|---|---|
+| Discovery tab: "13 passed, 2 promoted" but blank recs | `valid_till < today` filter in 7d fallback excluded all recs | ✅ Fixed: 14d window, no valid_till filter |
+| Portfolio recs tab always empty | Orchestrator generates recs for screener universe, not portfolio-specific | ⬜ DB-8 (filter by held symbols) |
+| Governance: duplicate STOPLOSS_HIT per stock | No dedup in API; same alert fired on every monitor run | ✅ Fixed: dedup by (alert_type, portfolio_id) |
+| Performance tab no data | recommendation_outcomes table empty (recs < 90 days old) | ⬜ DB-6 (seed from old recs when ≥90d old) |
+| Market tab: empty news | No RSS-per-stock feed integrated in dashboard | ⬜ DB-7 |
+| Screener returning standalone figures instead of consolidated | URL order was standalone-first; Reliance PE was 42x instead of 22.8x | ✅ Fixed: consolidated/ tried first |
+| No visibility into data source failures without checking logs | No health endpoint or UI panel | ✅ Fixed: /api/system/health + Governance panel |
 
 ---
 

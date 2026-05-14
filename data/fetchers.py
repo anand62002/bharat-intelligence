@@ -758,8 +758,12 @@ def get_screener_data(symbol: str) -> dict | None:
     if slug != symbol.replace(".NS", "").replace(".BO", "").upper():
         log.debug("get_screener_data: slug resolved %s → %s", symbol, slug)
 
-    # Try standalone view first, then consolidated; also retry with original
-    # base symbol if the slug override still 404s (graceful fallback chain)
+    # Try consolidated first, then standalone; also retry with original
+    # base symbol if the slug override still 404s (graceful fallback chain).
+    # Consolidated is preferred because screener.in shows consolidated figures
+    # by default for most large-cap companies (e.g. Reliance, HDFC Bank).
+    # Standalone-only companies (no consolidated subsidiary) return 404 for
+    # the consolidated/ URL, so the fallback to standalone handles them.
     base_fallback = symbol.replace(".NS", "").replace(".BO", "").upper()
     candidates = [slug]
     if base_fallback != slug:
@@ -767,7 +771,7 @@ def get_screener_data(symbol: str) -> dict | None:
 
     resp = None
     for candidate in candidates:
-        for variant in ("", "consolidated/"):
+        for variant in ("consolidated/", ""):   # consolidated first
             url = f"https://www.screener.in/company/{candidate}/{variant}"
             try:
                 r = requests.get(url, headers=_screener_headers(), timeout=12)
@@ -1339,7 +1343,7 @@ def get_screener_history(symbol: str) -> dict | None:
 
     resp = None
     for candidate in candidates:
-        for variant in ("", "consolidated/"):
+        for variant in ("consolidated/", ""):   # consolidated first
             url = f"https://www.screener.in/company/{candidate}/{variant}"
             try:
                 r = requests.get(url, headers=_screener_headers(), timeout=15)

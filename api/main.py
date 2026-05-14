@@ -864,7 +864,11 @@ async def get_discovery(
 ):
     """
     Returns is_discovery=true recommendations created today.
-    Falls back to last 7 days when today has no rows (expired recs filtered via valid_till).
+    Falls back to last 14 days when today has no rows.
+    The valid_till filter is intentionally NOT applied in the fallback — discovery
+    ideas are still research-worthy even when technically "expired" (they have
+    fresh prices refreshed below), and removing the filter prevents the dashboard
+    from going blank when the scheduler hasn't run today yet.
     Live current_price is refreshed from yfinance for every returned symbol (same pattern
     as GET /api/portfolio) so the UI never shows stale entry prices.
     """
@@ -880,14 +884,15 @@ async def get_discovery(
               .data or [])
 
     if not rows:
-        week_ago = (date.today() - timedelta(days=7)).isoformat()
+        # 14-day fallback — no valid_till filter so expired ideas still visible.
+        # The UI shows a subtle "stale" indicator via the validTill field.
+        two_weeks_ago = (date.today() - timedelta(days=14)).isoformat()
         rows = (db.table("recommendations")
                   .select("*")
                   .eq("is_discovery", True)
-                  .gte("created_at", week_ago)
-                  .gte("valid_till", today)          # exclude expired recommendations
+                  .gte("created_at", two_weeks_ago)
                   .order("created_at", desc=True)
-                  .limit(10)
+                  .limit(20)
                   .execute()
                   .data or [])
 
@@ -1426,13 +1431,24 @@ async def get_governance_alerts(
     alerts: list[dict] = []
 
     # Source a: critical/danger portfolio_alerts (unresolved)
+    # Deduplicated: keep only the most recent alert per (alert_type, portfolio_id)
+    # so the same stock triggering STOPLOSS_HIT multiple times doesn't spam the UI.
     try:
-        for row in (db.table("portfolio_alerts")
-                      .select("*")
-                      .eq("resolved", False)
-                      .in_("severity", ["CRITICAL", "DANGER"])
-                      .execute()
-                      .data or []):
+        raw_alerts = (db.table("portfolio_alerts")
+                        .select("*")
+                        .eq("resolved", False)
+                        .in_("severity", ["CRITICAL", "DANGER"])
+                        .order("created_at", desc=True)   # newest first for dedup
+                        .execute()
+                        .data or [])
+
+        _seen_alert_keys: set[str] = set()
+        for row in raw_alerts:
+            # Dedup key: alert_type + portfolio_id (or title as fallback)
+            dedup_key = f"{row.get('alert_type','?')}::{row.get('portfolio_id') or row.get('title','?')}"
+            if dedup_key in _seen_alert_keys:
+                continue
+            _seen_alert_keys.add(dedup_key)
             alerts.append({
                 "id":       row["id"],
                 "severity": (row.get("severity") or "info").lower(),
@@ -1473,6 +1489,187 @@ async def get_governance_alerts(
     _sev_order = {"critical": 0, "danger": 1, "warning": 2, "info": 3}
     alerts.sort(key=lambda a: _sev_order.get(a["severity"], 99))
     return alerts
+
+
+# ── 6b. System / data-source health ───────────────────────────────────────────
+
+@app.get("/api/system/health", tags=["governance"])
+async def get_system_health(
+    _: None = Depends(require_api_key),
+):
+    """
+    Lightweight health check for every data source and API integration.
+    Designed to run in < 2s without making live external requests (reads DB + env only).
+    Returns a list of checks: {name, status, detail, severity, action}
+
+    Checks:
+      - Supabase: connectivity (implicit — if this endpoint returns, DB is reachable)
+      - Last daily run: date and status from daily_runs table
+      - FII data freshness: most recent row in institutional_flows
+      - Screener.in: whether Railway IP was recently blocked (inferred from daily_run errors)
+      - Breeze Connect: whether session token is configured + not expired
+      - Anthropic API: whether ANTHROPIC_API_KEY is set
+      - OpenAI (GPT-4o-mini judge): whether OPENAI_API_KEY is set
+      - Trendlyne F&O: whether session cookies are configured
+    """
+    checks: list[dict] = []
+    db = _db()
+
+    def _ok(name: str, detail: str) -> dict:
+        return {"name": name, "status": "ok", "detail": detail, "severity": "ok", "action": None}
+
+    def _warn(name: str, detail: str, action: str) -> dict:
+        return {"name": name, "status": "warning", "detail": detail, "severity": "warning", "action": action}
+
+    def _err(name: str, detail: str, action: str) -> dict:
+        return {"name": name, "status": "error", "detail": detail, "severity": "error", "action": action}
+
+    # ── Supabase ──────────────────────────────────────────────────────────────
+    checks.append(_ok("Supabase", "Connection active — this response proves it"))
+
+    # ── Last daily pipeline run ───────────────────────────────────────────────
+    try:
+        run_rows = (db.table("daily_runs")
+                      .select("run_date, status, errors")
+                      .order("run_date", desc=True)
+                      .limit(1)
+                      .execute()
+                      .data or [])
+        if run_rows:
+            run = run_rows[0]
+            run_date = str(run.get("run_date", "?"))
+            run_status = str(run.get("status", "?"))
+            errors = run.get("errors") or []
+            days_ago = (date.today() - date.fromisoformat(run_date)).days if run_date != "?" else 99
+
+            if days_ago == 0 and run_status == "success":
+                checks.append(_ok("Daily Pipeline", f"Ran today ({run_date}) — status: {run_status}"))
+            elif days_ago <= 1:
+                checks.append(_warn(
+                    "Daily Pipeline",
+                    f"Last run: {run_date} ({days_ago}d ago) — status: {run_status}" +
+                    (f" — {len(errors)} error(s)" if errors else ""),
+                    "Check Railway worker logs if status is not 'success'"
+                ))
+            else:
+                checks.append(_err(
+                    "Daily Pipeline",
+                    f"Last run: {run_date} ({days_ago} days ago) — pipeline may not be running",
+                    "Check Railway worker dyno is running. Run: python worker.py --now"
+                ))
+
+            # Surface any screener-related errors from the run
+            if errors:
+                for e in (errors if isinstance(errors, list) else [errors])[:3]:
+                    if any(k in str(e).lower() for k in ("screener", "403", "blocked")):
+                        checks.append(_warn(
+                            "Screener.in",
+                            f"Screener error in last run: {str(e)[:120]}",
+                            "Railway static IP may be blocked by screener.in — yfinance fallback active"
+                        ))
+                        break
+                else:
+                    checks.append(_ok("Screener.in", "No screener errors in last run"))
+        else:
+            checks.append(_warn("Daily Pipeline", "No daily_runs rows found — scheduler may not have run yet", "Deploy worker.py to Railway and verify it starts"))
+    except Exception as exc:
+        checks.append(_warn("Daily Pipeline", f"Could not read daily_runs: {exc}", "Verify Supabase schema has daily_runs table"))
+
+    # ── FII data freshness ────────────────────────────────────────────────────
+    try:
+        fii_rows = (db.table("institutional_flows")
+                      .select("session_date, fii_net")
+                      .order("session_date", desc=True)
+                      .limit(1)
+                      .execute()
+                      .data or [])
+        if fii_rows:
+            fii_date = str(fii_rows[0].get("session_date", "?"))
+            fii_net  = fii_rows[0].get("fii_net")
+            try:
+                days_stale = (date.today() - date.fromisoformat(fii_date)).days
+            except Exception:
+                days_stale = 99
+            if days_stale <= 1:
+                checks.append(_ok("FII/DII Data", f"Fresh — {fii_date}, FII net: ₹{fii_net:,.0f} Cr" if fii_net else f"Fresh — {fii_date}"))
+            elif days_stale <= 3:
+                checks.append(_warn("FII/DII Data", f"Stale — last row: {fii_date} ({days_stale}d ago)", "Likely NSE/BSE API temporarily blocked — will auto-recover"))
+            else:
+                checks.append(_err("FII/DII Data", f"Very stale — last row: {fii_date} ({days_stale}d ago)", "NSE FII source may be down. Check _try_nse_fii_dii / _try_bse_fii_dii in fetchers.py"))
+        else:
+            checks.append(_warn("FII/DII Data", "No institutional_flows rows", "institutional.py needs to run at least once to populate the table"))
+    except Exception as exc:
+        checks.append(_warn("FII/DII Data", f"Could not read institutional_flows: {exc}", "Verify table exists in Supabase"))
+
+    # ── Breeze Connect (options data) ─────────────────────────────────────────
+    breeze_key     = os.getenv("BREEZE_API_KEY", "")
+    breeze_secret  = os.getenv("BREEZE_API_SECRET", "")
+    breeze_token   = os.getenv("BREEZE_SESSION_TOKEN", "")
+    if breeze_key and breeze_secret and breeze_token:
+        checks.append(_ok("Breeze Connect", "API key + secret + session token all configured"))
+    elif breeze_key and breeze_secret:
+        checks.append(_warn(
+            "Breeze Connect",
+            "API key and secret configured but BREEZE_SESSION_TOKEN missing",
+            "Get session token from ICICI Direct login redirect URL and set BREEZE_SESSION_TOKEN env var"
+        ))
+    else:
+        checks.append(_warn(
+            "Breeze Connect",
+            "Not configured — falling back to NSE/Trendlyne for options data",
+            "Optional: set BREEZE_API_KEY + BREEZE_API_SECRET + BREEZE_SESSION_TOKEN for live option chain"
+        ))
+
+    # ── Anthropic API (ARIA + Claude judge) ──────────────────────────────────
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if anthropic_key:
+        checks.append(_ok("Anthropic API", "ANTHROPIC_API_KEY configured ✓"))
+    else:
+        checks.append(_err(
+            "Anthropic API",
+            "ANTHROPIC_API_KEY not set — ARIA chat and Claude validation judge will fail",
+            "Set ANTHROPIC_API_KEY in Railway env vars (backend) AND Vercel env vars (ARIA serverless)"
+        ))
+
+    # ── OpenAI API (GPT-4o-mini judge) ────────────────────────────────────────
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if openai_key:
+        checks.append(_ok("OpenAI API", "OPENAI_API_KEY configured ✓"))
+    else:
+        checks.append(_warn(
+            "OpenAI API",
+            "OPENAI_API_KEY not set — GPT-4o-mini validation judge disabled (Claude-only validation)",
+            "Set OPENAI_API_KEY in Railway env vars for model-diversity in synthesis validation"
+        ))
+
+    # ── Trendlyne F&O ─────────────────────────────────────────────────────────
+    tl_sess = os.getenv("TRENDLYNE_SESSION", "")
+    tl_csrf = os.getenv("TRENDLYNE_CSRF", "")
+    if tl_sess and tl_csrf and tl_sess != "bce34ncrlhwelezjn884vaxvyh0g543w":
+        checks.append(_ok("Trendlyne F&O", "Session cookies configured ✓"))
+    elif tl_sess == "bce34ncrlhwelezjn884vaxvyh0g543w":
+        checks.append(_warn(
+            "Trendlyne F&O",
+            "Using placeholder/default session cookies — may be expired",
+            "Login to trendlyne.com and update TRENDLYNE_SESSION + TRENDLYNE_CSRF env vars"
+        ))
+    else:
+        checks.append(_warn(
+            "Trendlyne F&O",
+            "TRENDLYNE_SESSION / TRENDLYNE_CSRF not configured — F&O Excel download will fail",
+            "Set TRENDLYNE_SESSION + TRENDLYNE_CSRF in Railway env vars"
+        ))
+
+    # Sort: errors first, then warnings, then ok
+    _sev_order = {"error": 0, "warning": 1, "ok": 2}
+    checks.sort(key=lambda c: _sev_order.get(c["severity"], 99))
+    return {
+        "checks":     checks,
+        "errors":     sum(1 for c in checks if c["severity"] == "error"),
+        "warnings":   sum(1 for c in checks if c["severity"] == "warning"),
+        "ok":         sum(1 for c in checks if c["severity"] == "ok"),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ── 7. Research proposals ──────────────────────────────────────────────────────

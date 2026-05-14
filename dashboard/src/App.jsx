@@ -958,9 +958,33 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discover
         <EmptyState
           icon="🔍"
           title="No discovery ideas yet"
-          sub={`The discovery screener scans 200+ NSE stocks every morning at 06:00 IST and needs 2–3 runs to warm up.\n\nTo run it now: python -m agents.discovery_screener`}
+          sub="The discovery screener scans 200+ NSE stocks every morning at 06:00 IST. If no ideas appear, check Governance → Data Source Health to confirm the pipeline ran. To run manually: python -m agents.discovery_screener"
         />
       )}
+
+      {/* Stale recs notice — when ideas are from previous days */}
+      {IS_LIVE && _universe.length>0 && (()=>{
+        const today = new Date().toISOString().slice(0,10);
+        const newest = _universe.reduce((best,s)=>{
+          const d = s.validTill || "";
+          return d > best ? d : best;
+        }, "");
+        // If newest validTill is more than 3 days out from today, assume it's from today's run
+        // Otherwise show a stale warning
+        const latestCreated = _universe.find(s=>s.validTill)?.validTill;
+        if(latestCreated && latestCreated < today){
+          return(
+            <div style={{background:C.accent+"0d",border:`1px solid ${C.accent}33`,borderRadius:6,padding:"6px 12px",marginBottom:10,display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:9,color:C.accent,fontWeight:700}}>⚠</span>
+              <span style={{fontSize:9,color:C.accent}}>
+                Showing ideas from a previous run (most recent valid_till: {latestCreated}).
+                Today's 06:00 IST run may not have completed yet — check the <b>Daily Screened Stocks</b> panel below.
+              </span>
+            </div>
+          );
+        }
+        return null;
+      })()}
 
       {/* Two-column layout — only shown when there is data */}
       {_universe.length>0&&<div style={{display:"grid",gridTemplateColumns:"360px 1fr",gap:16}}>
@@ -1960,6 +1984,60 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
   );
 }
 
+// ─── SYSTEM HEALTH PANEL ─────────────────────────────────────────────────────
+function SystemHealthPanel({health}){
+  if(!health) return null;
+  const {checks=[], errors=0, warnings=0, checked_at} = health;
+  if(!checks.length) return null;
+
+  const sevColor = s => s==="error"?C.red : s==="warning"?C.accent : C.green;
+  const sevIcon  = s => s==="error"?"✕" : s==="warning"?"⚠" : "✓";
+  const hasIssues = errors>0 || warnings>0;
+
+  return(
+    <div style={{
+      background: hasIssues ? C.accent+"0a" : C.green+"08",
+      border:`1px solid ${hasIssues?(errors>0?C.red:C.accent):C.green}33`,
+      borderRadius:8, padding:12, marginBottom:14,
+    }}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:11,fontWeight:700,color:hasIssues?(errors>0?C.red:C.accent):C.green}}>
+            🔌 Data Source Health
+          </span>
+          {errors>0 && <span style={{background:C.red,color:"white",borderRadius:8,padding:"0 5px",fontSize:9,fontWeight:700}}>{errors} error{errors>1?"s":""}</span>}
+          {warnings>0 && <span style={{background:C.accent,color:"#0a0a1a",borderRadius:8,padding:"0 5px",fontSize:9,fontWeight:700}}>{warnings} warning{warnings>1?"s":""}</span>}
+          {!hasIssues && <span style={{fontSize:9,color:C.green}}>All systems nominal</span>}
+        </div>
+        <span style={{fontSize:8,color:C.muted}}>{checked_at ? new Date(checked_at).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"}) + " IST" : ""}</span>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:5}}>
+        {checks.map((c,i)=>{
+          const col = sevColor(c.severity);
+          if(c.severity==="ok") return(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"3px 0",borderBottom:`1px solid ${C.border}22`}}>
+              <span style={{fontSize:9,color:col,width:10,flexShrink:0,fontWeight:700}}>{sevIcon(c.severity)}</span>
+              <span style={{fontSize:9,fontWeight:600,color:C.textDim,width:130,flexShrink:0}}>{c.name}</span>
+              <span style={{fontSize:9,color:C.muted,flex:1}}>{c.detail}</span>
+            </div>
+          );
+          return(
+            <div key={i} style={{background:col+"0d",border:`1px solid ${col}33`,borderRadius:5,padding:"6px 9px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:c.action?3:0}}>
+                <span style={{fontSize:10,color:col,fontWeight:700,flexShrink:0}}>{sevIcon(c.severity)}</span>
+                <span style={{fontSize:9,fontWeight:700,color:col,flex:1}}>{c.name}</span>
+                <Tag color={col} small>{c.severity.toUpperCase()}</Tag>
+              </div>
+              <div style={{fontSize:9,color:C.textDim,marginLeft:16,marginBottom:c.action?3:0}}>{c.detail}</div>
+              {c.action && <div style={{fontSize:8,color:col,background:col+"10",borderRadius:3,padding:"2px 7px",marginLeft:16}}>⚡ {c.action}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── PERFORMANCE TAB ─────────────────────────────────────────────────────────
 function PerformanceTab({accuracy, outcomes, alphaChart, apiLoaded}){
   const byAction = accuracy?.by_action || {};
@@ -2143,6 +2221,7 @@ export default function App(){
   const [portfolioRisk,     setPortfolioRisk]     = useState(null);
   const [optionsSignal,     setOptionsSignal]     = useState(null);
   const [valuationCache,    setValuationCache]    = useState({});   // keyed by symbol
+  const [systemHealth,      setSystemHealth]      = useState(null); // /api/system/health
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -2200,6 +2279,9 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/options/NIFTY")
         .then(d=>{ if(d&&d.signal&&d.signal!=="NO_DATA") setOptionsSignal(d); })
+        .catch(()=>{}),
+      apiFetch("/api/system/health")
+        .then(d=>{ if(d?.checks) setSystemHealth(d); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -2470,7 +2552,7 @@ export default function App(){
                 </div>
                 {IS_LIVE && apiLoaded && portfolioRecs.length===0 && (
                   <EmptyState icon="🎯" title="No recommendations yet"
-                    sub="Add stocks to your portfolio and the agent network will generate buy/hold/sell signals after the next daily run (06:00 IST). You can also ask ARIA about any stock." />
+                    sub="The orchestrator generates BUY/HOLD/SELL signals daily at 06:00 IST for a rotating set of NSE symbols. If no recs appear, check the Governance tab → Data Source Health to confirm the pipeline ran successfully today." />
                 )}
                 {portfolioRecs.length>0&&<div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:14}}>
                   <div>
@@ -2594,6 +2676,10 @@ export default function App(){
                   <GovShield size={18}/><div style={{fontSize:13,fontWeight:700,color:"white"}}>Governance Engine</div>
                   <div style={{marginLeft:"auto",background:C.green+"12",border:`1px solid ${C.green}33`,borderRadius:5,padding:"3px 8px",display:"flex",alignItems:"center",gap:4}}><Dot color={C.green} pulse/><span style={{fontSize:9,color:C.green,fontWeight:600}}>Running</span></div>
                 </div>
+
+                {/* Data source health — shown first so issues requiring manual action are obvious */}
+                <SystemHealthPanel health={systemHealth}/>
+
                 {govAlerts.length>0 ? (
                   <div style={{display:"flex",flexDirection:"column",gap:7,marginBottom:14}}>
                     {govAlerts.map(a=>{const sc={critical:C.red,warning:C.accent,info:C.blue}[a.severity]||C.muted;return(
