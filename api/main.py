@@ -1518,6 +1518,10 @@ async def get_system_health(
     def _ok(name: str, detail: str) -> dict:
         return {"name": name, "status": "ok", "detail": detail, "severity": "ok", "action": None}
 
+    def _info(name: str, detail: str, action: str) -> dict:
+        # INFO = not an error, not a warning — informational note (e.g. deprecated integrations)
+        return {"name": name, "status": "info", "detail": detail, "severity": "info", "action": action}
+
     def _warn(name: str, detail: str, action: str) -> dict:
         return {"name": name, "status": "warning", "detail": detail, "severity": "warning", "action": action}
 
@@ -1601,23 +1605,25 @@ async def get_system_health(
     except Exception as exc:
         checks.append(_warn("FII/DII Data", f"Could not read institutional_flows: {exc}", "Verify table exists in Supabase"))
 
-    # ── Breeze Connect (options data) ─────────────────────────────────────────
+    # ── Breeze Connect (marked for removal in P4 — superseded by Trendlyne F&O) ──
+    # Breeze requires a manual daily session token refresh which is high-maintenance.
+    # Trendlyne F&O Excel provides the same option chain data automatically.
+    # Breeze will be removed entirely in P4-D.
     breeze_key     = os.getenv("BREEZE_API_KEY", "")
     breeze_secret  = os.getenv("BREEZE_API_SECRET", "")
     breeze_token   = os.getenv("BREEZE_SESSION_TOKEN", "")
     if breeze_key and breeze_secret and breeze_token:
-        checks.append(_ok("Breeze Connect", "API key + secret + session token all configured"))
-    elif breeze_key and breeze_secret:
-        checks.append(_warn(
+        checks.append(_info(
             "Breeze Connect",
-            "API key and secret configured but BREEZE_SESSION_TOKEN missing",
-            "Get session token from ICICI Direct login redirect URL and set BREEZE_SESSION_TOKEN env var"
+            "Configured but marked for removal (P4-D) — Trendlyne F&O is the primary options source",
+            "No action needed. Breeze will be removed in Phase 4 (P4-D) to simplify the stack."
         ))
     else:
-        checks.append(_warn(
+        # Not configured — this is fine, Trendlyne F&O is primary
+        checks.append(_info(
             "Breeze Connect",
-            "Not configured — falling back to NSE/Trendlyne for options data",
-            "Optional: set BREEZE_API_KEY + BREEZE_API_SECRET + BREEZE_SESSION_TOKEN for live option chain"
+            "Not configured — this is expected. Trendlyne F&O Excel is the primary options source.",
+            "No action needed. Breeze is deprecated (P4-D) and will be removed in Phase 4."
         ))
 
     # ── Anthropic API (ARIA + Claude judge) ──────────────────────────────────
@@ -1642,26 +1648,40 @@ async def get_system_health(
             "Set OPENAI_API_KEY in Railway env vars for model-diversity in synthesis validation"
         ))
 
-    # ── Trendlyne F&O ─────────────────────────────────────────────────────────
+    # ── Trendlyne (F&O + Analyst targets) ────────────────────────────────────
     tl_sess = os.getenv("TRENDLYNE_SESSION", "")
     tl_csrf = os.getenv("TRENDLYNE_CSRF", "")
-    if tl_sess and tl_csrf and tl_sess != "bce34ncrlhwelezjn884vaxvyh0g543w":
-        checks.append(_ok("Trendlyne F&O", "Session cookies configured ✓"))
-    elif tl_sess == "bce34ncrlhwelezjn884vaxvyh0g543w":
+    tl_user = os.getenv("TRENDLYNE_USER", "")
+    tl_pass = os.getenv("TRENDLYNE_PASS", "")
+    _tl_placeholder = "bce34ncrlhwelezjn884vaxvyh0g543w"
+
+    if tl_sess and tl_csrf and tl_sess != _tl_placeholder:
+        # Auto-refresh configured?
+        if tl_user and tl_pass:
+            checks.append(_ok(
+                "Trendlyne",
+                "Session cookies + auto-refresh credentials configured ✓ (F&O Excel + analyst targets)"
+            ))
+        else:
+            checks.append(_ok(
+                "Trendlyne",
+                "Session cookies configured ✓ — set TRENDLYNE_USER + TRENDLYNE_PASS for auto-refresh on expiry"
+            ))
+    elif tl_sess == _tl_placeholder:
         checks.append(_warn(
-            "Trendlyne F&O",
-            "Using placeholder/default session cookies — may be expired",
-            "Login to trendlyne.com and update TRENDLYNE_SESSION + TRENDLYNE_CSRF env vars"
+            "Trendlyne",
+            "Using placeholder/default session cookies — F&O Excel and analyst targets may fail",
+            "Login to trendlyne.com, copy .trendlyne + csrftoken cookies, set TRENDLYNE_SESSION + TRENDLYNE_CSRF"
         ))
     else:
         checks.append(_warn(
-            "Trendlyne F&O",
-            "TRENDLYNE_SESSION / TRENDLYNE_CSRF not configured — F&O Excel download will fail",
-            "Set TRENDLYNE_SESSION + TRENDLYNE_CSRF in Railway env vars"
+            "Trendlyne",
+            "TRENDLYNE_SESSION / TRENDLYNE_CSRF not configured — F&O Excel and analyst targets disabled",
+            "Set TRENDLYNE_SESSION + TRENDLYNE_CSRF in Railway env vars (optionally TRENDLYNE_USER + TRENDLYNE_PASS)"
         ))
 
-    # Sort: errors first, then warnings, then ok
-    _sev_order = {"error": 0, "warning": 1, "ok": 2}
+    # Sort: errors first, then warnings, then info, then ok
+    _sev_order = {"error": 0, "warning": 1, "info": 2, "ok": 3}
     checks.sort(key=lambda c: _sev_order.get(c["severity"], 99))
     return {
         "checks":     checks,

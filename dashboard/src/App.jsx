@@ -1990,9 +1990,11 @@ function SystemHealthPanel({health}){
   const {checks=[], errors=0, warnings=0, checked_at} = health;
   if(!checks.length) return null;
 
-  const sevColor = s => s==="error"?C.red : s==="warning"?C.accent : C.green;
-  const sevIcon  = s => s==="error"?"✕" : s==="warning"?"⚠" : "✓";
+  // INFO = deprecated/note items (e.g. Breeze marked for removal) — shown like OK but muted
+  const sevColor = s => s==="error"?C.red : s==="warning"?C.accent : s==="info"?C.muted : C.green;
+  const sevIcon  = s => s==="error"?"✕" : s==="warning"?"⚠" : s==="info"?"ℹ" : "✓";
   const hasIssues = errors>0 || warnings>0;
+  const infoCount = checks.filter(c=>c.severity==="info").length;
 
   return(
     <div style={{
@@ -2008,19 +2010,23 @@ function SystemHealthPanel({health}){
           {errors>0 && <span style={{background:C.red,color:"white",borderRadius:8,padding:"0 5px",fontSize:9,fontWeight:700}}>{errors} error{errors>1?"s":""}</span>}
           {warnings>0 && <span style={{background:C.accent,color:"#0a0a1a",borderRadius:8,padding:"0 5px",fontSize:9,fontWeight:700}}>{warnings} warning{warnings>1?"s":""}</span>}
           {!hasIssues && <span style={{fontSize:9,color:C.green}}>All systems nominal</span>}
+          {infoCount>0 && !hasIssues && <span style={{fontSize:9,color:C.muted}}>{infoCount} note{infoCount>1?"s":""}</span>}
         </div>
         <span style={{fontSize:8,color:C.muted}}>{checked_at ? new Date(checked_at).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"}) + " IST" : ""}</span>
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:5}}>
         {checks.map((c,i)=>{
           const col = sevColor(c.severity);
-          if(c.severity==="ok") return(
-            <div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"3px 0",borderBottom:`1px solid ${C.border}22`}}>
+          // OK and INFO: compact single-line display
+          if(c.severity==="ok"||c.severity==="info") return(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"3px 0",borderBottom:`1px solid ${C.border}22`,opacity:c.severity==="info"?0.65:1}}>
               <span style={{fontSize:9,color:col,width:10,flexShrink:0,fontWeight:700}}>{sevIcon(c.severity)}</span>
               <span style={{fontSize:9,fontWeight:600,color:C.textDim,width:130,flexShrink:0}}>{c.name}</span>
               <span style={{fontSize:9,color:C.muted,flex:1}}>{c.detail}</span>
+              {c.severity==="info" && <span style={{fontSize:8,color:C.muted,fontStyle:"italic",flexShrink:0}}>deprecated</span>}
             </div>
           );
+          // WARNING / ERROR: highlighted card
           return(
             <div key={i} style={{background:col+"0d",border:`1px solid ${col}33`,borderRadius:5,padding:"6px 9px"}}>
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:c.action?3:0}}>

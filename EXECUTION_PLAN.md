@@ -1,6 +1,6 @@
 # Bharat Intelligence — Investment-Grade Execution Plan
 ### Target: 6.0 → 8.8 / 10 System Robustness
-*Last updated: 2026-05-12*
+*Last updated: 2026-05-15*
 
 > **Standing rules (apply after every build):**
 > 1. Update `CLAUDE.md` — new files, tables, endpoints, env vars, resolved issues
@@ -38,7 +38,8 @@
 | P2-D | Earnings calendar auto-population job | Phase 2 | ⬜ TODO | — |
 | P3-A | Position sizing output in recommendations | Phase 3 | ✅ **DONE** | 2026-05-13 |
 | P3-B | Correlation-aware portfolio alerts | Phase 3 | ✅ **DONE** | 2026-05-14 |
-| P3-C | Comprehensive Trendlyne integration (DVM, news, filings, estimates, insider) | Phase 3 | ⬜ TODO | — |
+| P3-C-BE | Trendlyne analyst targets scraper — consensus target, buy/hold/sell dist, EPS (Pillar B+E) | Phase 3 | ✅ **DONE** | 2026-05-15 |
+| P3-C | Trendlyne integration — remaining pillars (news, filings, insider bulk deals) | Phase 3 | 🔄 IN PROGRESS | — |
 | P3-D | Screener.in consolidated preference + Sales+/quarterly fix | Phase 3 | ✅ **DONE** | 2026-05-15 |
 | P3-E | Trendlyne F&O memory cleanup (compile→compact dict, gc.collect) | Phase 3 | ✅ **DONE** | 2026-05-15 |
 | DB-1 | Discovery tab blank (valid_till filter removed from 7→14d fallback) | Dashboard | ✅ **DONE** | 2026-05-15 |
@@ -54,12 +55,13 @@
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ⬜ TODO | — |
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ⬜ TODO | — |
 | P4-C | Governance numerical grounding check | Phase 4 | ⬜ TODO | — |
+| P4-D | Remove Breeze Connect — simplify options_fetcher to Trendlyne F&O → NSE → VIX | Phase 4 | ⬜ TODO | — |
 | P5-A | Enhanced outcome tracker + agent attribution | Phase 5 | ⬜ TODO | — |
 | P5-B | Paper portfolio simulation mode | Phase 5 | ⬜ TODO | — |
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 29 / 44 items complete (66%)**
+**Progress: 30 / 46 items complete (65%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |

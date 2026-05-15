@@ -1738,6 +1738,53 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
     except Exception as exc:
         log.debug("forward_estimates enrichment failed for %s: %s", symbol, exc)
 
+    # ── 9c. Trendlyne analyst targets enrichment (non-blocking) ──────────────
+    # Scrapes Trendlyne for consensus analyst target price, buy/hold/sell
+    # distribution, and EPS estimates — richer than yfinance for Indian stocks.
+    analyst_targets: dict = {}
+    analyst_interp:  dict = {}
+    try:
+        from data.trendlyne_analyst_fetcher import (
+            get_analyst_targets,
+            interpret_analyst_targets,
+        )
+        at = get_analyst_targets(symbol)
+        # Only use if we got meaningful data (at least a consensus target or rating)
+        if at.get("consensus_target") is not None or at.get("consensus_rating") is not None:
+            analyst_targets = at
+            analyst_interp  = interpret_analyst_targets(at, our_upside_pct=upside_pct)
+            data_sources.append("trendlyne_analyst")
+
+            # Surface key fields in detail for synthesis agents
+            detail.setdefault("analyst_consensus", {}).update({
+                "consensus_target":    at.get("consensus_target"),
+                "target_high":         at.get("target_high"),
+                "target_low":          at.get("target_low"),
+                "analyst_count":       at.get("analyst_count"),
+                "buy_pct":             at.get("buy_pct"),
+                "consensus_rating":    at.get("consensus_rating"),
+                "upside_to_consensus": at.get("upside_to_consensus"),
+                "signal":              analyst_interp.get("signal"),
+                "summary":             analyst_interp.get("summary"),
+                "divergence_note":     analyst_interp.get("divergence_note"),
+            })
+
+            # If Trendlyne has EPS estimates and yfinance didn't, use them
+            if not forward_est.get("eps_current_yr") and at.get("eps_current_yr"):
+                forward_est.setdefault("eps_current_yr", at["eps_current_yr"])
+            if not forward_est.get("eps_next_yr") and at.get("eps_next_yr"):
+                forward_est.setdefault("eps_next_yr", at["eps_next_yr"])
+
+            log.debug(
+                "fundamental(%s): Trendlyne analyst target=₹%s, rating=%s, upside=%s%%",
+                symbol,
+                at.get("consensus_target"),
+                at.get("consensus_rating"),
+                at.get("upside_to_consensus"),
+            )
+    except Exception as exc:
+        log.debug("trendlyne analyst enrichment failed for %s: %s", symbol, exc)
+
     result = {
         "signal":            signal,
         "score":             total_score,
@@ -1754,6 +1801,10 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
         "forward_estimates": forward_est if forward_est else None,
         "forward_valuation": forward_interp.get("valuation_signal"),
         "forward_summary":   forward_interp.get("summary"),
+        # Trendlyne analyst consensus (None if unavailable / Trendlyne not configured)
+        "analyst_targets":   analyst_targets if analyst_targets else None,
+        "analyst_signal":    analyst_interp.get("signal"),
+        "analyst_summary":   analyst_interp.get("summary"),
     }
 
     # ── 10. Persist agent run ─────────────────────────────────────────────────

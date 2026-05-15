@@ -72,10 +72,19 @@ Stock analysis/
 │   ├── symbol_map.py           # NSE → yfinance symbol resolution (YF_SYMBOL_MAP)
 │   │                           # Single source of truth for all agents.
 │   │                           # Also has SCREENER_SLUG_MAP for screener.in slugs.
-│   ├── options_fetcher.py      # Option chain: Breeze → NSE → VIX fallback (P1-B)
+│   ├── options_fetcher.py      # Option chain: Trendlyne F&O → NSE → VIX fallback
 │   │                           # get_option_metrics(symbol) → pcr, max_pain, atm_iv, iv_skew
-│   └── breeze_auth.py          # ICICI Breeze Connect session manager (P1-B)
-│   #                             get_breeze_client() with 23h cache + auto/manual refresh
+│   ├── trendlyne_fno_fetcher.py # Trendlyne F&O Excel download (primary options source)
+│   │                           # get_option_metrics(), get_fno_universe(), get_buildup_signals()
+│   │                           # Memory design: compile→compact dict at download time, gc.collect()
+│   ├── trendlyne_analyst_fetcher.py  # Trendlyne analyst targets scraper (P3-C-BE)
+│   │                           # get_analyst_targets(symbol) → consensus_target, buy_pct,
+│   │                           # consensus_rating, upside_to_consensus, eps_current_yr, eps_next_yr
+│   │                           # interpret_analyst_targets(targets, our_upside_pct) → signal+summary
+│   │                           # Per-symbol 6h cache; auto-cookie-refresh via TRENDLYNE_USER+PASS
+│   ├── forward_estimates.py    # yfinance forward EPS/PE estimates (24h Supabase cache)
+│   └── breeze_auth.py          # ICICI Breeze Connect — DEPRECATED (P4-D: scheduled for removal)
+│   #                             Superseded by trendlyne_fno_fetcher. Remove in Phase 4.
 │
 ├── api/
 │   ├── __init__.py
@@ -305,7 +314,11 @@ Uses `ANTHROPIC_API_KEY` env var server-side (never exposed to browser).
 | `BREEZE_SESSION_TOKEN` | Daily session token (get from login redirect URL, rotate every 24h) — P1-B |
 | `ICICI_USER_ID` | *(Optional)* ICICI Direct login ID — enables auto-token refresh at 08:30 IST |
 | `ICICI_PASSWORD` | *(Optional)* ICICI Direct password — enables auto-token refresh |
-| `BREEZE_TOTP_SECRET` | *(Optional)* Base32 TOTP secret — enables fully automated daily refresh |
+| `BREEZE_TOTP_SECRET` | *(Optional)* Base32 TOTP secret — enables fully automated daily refresh (DEPRECATED, see P4-D) |
+| `TRENDLYNE_SESSION` | `.trendlyne` cookie value — required for F&O Excel download + analyst targets scraper |
+| `TRENDLYNE_CSRF` | `csrftoken` cookie value — required alongside TRENDLYNE_SESSION |
+| `TRENDLYNE_USER` | *(Optional)* Trendlyne login email — enables auto-cookie-refresh when session expires |
+| `TRENDLYNE_PASS` | *(Optional)* Trendlyne login password — enables auto-cookie-refresh |
 
 ### Vercel (frontend)
 | Variable | Description |
