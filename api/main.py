@@ -440,6 +440,8 @@ async def _alert_broadcaster() -> None:
     """
     Every 30 s: check Supabase for unresolved DANGER/CRITICAL portfolio alerts
     and broadcast them to all connected WebSocket clients.
+    Applies the same dedup as /api/governance/alerts so the WebSocket doesn't
+    override the deduplicated list with all raw rows.
     """
     while True:
         try:
@@ -453,12 +455,24 @@ async def _alert_broadcaster() -> None:
                 .select("*")
                 .eq("resolved", False)
                 .in_("severity", ["DANGER", "CRITICAL"])
+                .order("created_at", desc=True)
                 .execute()
             )
             if result.data:
+                # Dedup: keep only the most recent alert per (alert_type, holding_id/symbol)
+                _seen: set[str] = set()
+                deduped = []
+                for row in result.data:
+                    key = (
+                        f"{row.get('alert_type','?')}::"
+                        f"{row.get('holding_id') or row.get('symbol') or row.get('title','?')}"
+                    )
+                    if key not in _seen:
+                        _seen.add(key)
+                        deduped.append(row)
                 await manager.broadcast({
                     "type":      "critical_alert",
-                    "alerts":    result.data,
+                    "alerts":    deduped,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
         except asyncio.CancelledError:
