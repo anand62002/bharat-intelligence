@@ -1692,6 +1692,150 @@ async def get_system_health(
     }
 
 
+# ── 6b. Screener.in live connectivity diagnostic ──────────────────────────────
+
+@app.get("/api/debug/screener", tags=["governance"])
+async def debug_screener(
+    symbol: str = Query("RELIANCE", description="NSE symbol to test"),
+    _: None = Depends(require_api_key),
+):
+    """
+    Live connectivity probe for screener.in — makes real HTTP requests and
+    reports the exact status code, response time, and whether real data was
+    parsed.  Use this to quickly diagnose Railway IP blocks from the dashboard
+    or via curl without digging through logs.
+
+    Returns:
+      {
+        symbol, tested_urls: [
+          {url, status_code, elapsed_ms, got_data, error}
+        ],
+        session_warmed, cookies_present,
+        screener_working, fallback_used,
+        data_sample: {pe, revenue_growth, ebitda_margin, ...} | null
+      }
+    """
+    import time as _time
+    import requests as _req
+
+    from data.fetchers import (
+        _get_screener_session,
+        _screener_headers,
+        _SCREENER_USER_AGENTS,
+        reset_screener_session,
+    )
+    from data.symbol_map import resolve_screener
+    import random
+
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    slug = resolve_screener(sym)
+
+    tested_urls: list[dict] = []
+
+    # ── Step 1: warmup probe ──────────────────────────────────────────────────
+    warmup_status = None
+    warmup_elapsed = None
+    try:
+        t0 = _time.time()
+        wr = _req.get(
+            "https://screener.in/",
+            headers=_screener_headers(),
+            timeout=10,
+            allow_redirects=True,
+        )
+        warmup_elapsed = round((_time.time() - t0) * 1000)
+        warmup_status  = wr.status_code
+    except Exception as exc:
+        warmup_status = f"error: {exc}"
+
+    # ── Step 2: test each candidate URL ──────────────────────────────────────
+    session = _get_screener_session()
+    candidates = list({slug, sym})  # dedup
+    for candidate in candidates:
+        for variant in ("consolidated/", ""):
+            url = f"https://www.screener.in/company/{candidate}/{variant}"
+            try:
+                t0 = _time.time()
+                r  = session.get(
+                    url,
+                    headers=_screener_headers({
+                        "Referer": "https://screener.in/",
+                        "User-Agent": random.choice(_SCREENER_USER_AGENTS),
+                    }),
+                    timeout=12,
+                )
+                elapsed = round((_time.time() - t0) * 1000)
+                # Check if we actually got company data (not a login page or 404)
+                got_data = (
+                    r.status_code == 200
+                    and "company-ratios" in r.text
+                    and len(r.text) > 5000
+                )
+                tested_urls.append({
+                    "url":          url,
+                    "status_code":  r.status_code,
+                    "elapsed_ms":   elapsed,
+                    "got_data":     got_data,
+                    "response_len": len(r.text) if r.status_code == 200 else None,
+                    "error":        None,
+                })
+            except Exception as exc:
+                tested_urls.append({
+                    "url":         url,
+                    "status_code": None,
+                    "elapsed_ms":  None,
+                    "got_data":    False,
+                    "error":       str(exc),
+                })
+
+    # ── Step 3: try to parse actual data ─────────────────────────────────────
+    screener_working = any(u["got_data"] for u in tested_urls)
+    data_sample = None
+    fallback_used = False
+
+    if screener_working:
+        try:
+            from data.fetchers import get_screener_data
+            data_sample = get_screener_data(sym)
+            if data_sample and data_sample.get("data_source") == "yfinance_fallback":
+                screener_working = False
+                fallback_used = True
+        except Exception:
+            pass
+    else:
+        fallback_used = True
+
+    cookies_present = bool(session.cookies.get("csrftoken") or session.cookies.get("sessionid"))
+
+    return {
+        "symbol":          sym,
+        "slug":            slug,
+        "warmup": {
+            "status_code": warmup_status,
+            "elapsed_ms":  warmup_elapsed,
+        },
+        "tested_urls":      tested_urls,
+        "session_warmed":   cookies_present,
+        "cookies_present":  cookies_present,
+        "cookie_names":     list(session.cookies.keys()),
+        "screener_working": screener_working,
+        "fallback_used":    fallback_used,
+        "diagnosis": (
+            "WORKING — screener.in accessible from this Railway pod"
+            if screener_working else
+            "BLOCKED — Railway IP is being blocked by screener.in (HTTP 403/429 or no data in response). "
+            "yfinance fallback is active. Options: (1) whitelist Railway IP on screener.in Pro, "
+            "(2) use a proxy, or (3) rely on yfinance fallback."
+        ),
+        "data_sample":  {
+            k: v for k, v in (data_sample or {}).items()
+            if k in ("pe", "revenue_growth", "ebitda_margin", "roce",
+                     "debt_equity", "promoter_holding", "data_source")
+        } if data_sample else None,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 # ── 7. Research proposals ──────────────────────────────────────────────────────
 
 @app.get("/api/governance/research", tags=["governance"])

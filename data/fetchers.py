@@ -40,15 +40,76 @@ _SCREENER_USER_AGENTS = [
 ]
 
 
-def _screener_headers() -> dict:
+def _screener_headers(extra: dict | None = None) -> dict:
     """Return request headers with a randomised User-Agent for screener.in calls."""
-    return {
+    h = {
         **_HEADERS,
         "User-Agent": random.choice(_SCREENER_USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
     }
+    if extra:
+        h.update(extra)
+    return h
+
+
+# ── Screener.in session warmup ──────────────────────────────────────────────
+# screener.in is Django-based and sets a csrftoken cookie + sessionid on first
+# visit.  Making a direct /company/{slug}/ request without those cookies looks
+# like a bot and triggers 403s from their Cloudflare/WAF layer.
+# We keep a module-level session that is warmed once per process (homepage visit)
+# and reused for all subsequent company-page requests.  If the session ages out
+# it self-heals by re-warming on the next call.
+_screener_session: requests.Session | None = None
+_screener_session_warmed: bool = False
+
+
+def _get_screener_session() -> requests.Session:
+    """
+    Return a warmed requests.Session for screener.in.
+
+    The first call does:
+      GET https://screener.in/  → picks up csrftoken + sessionid cookies
+    Subsequent calls reuse the same session object.
+    """
+    global _screener_session, _screener_session_warmed
+
+    if _screener_session is None:
+        _screener_session = requests.Session()
+        _screener_session.headers.update(_screener_headers())
+
+    if not _screener_session_warmed:
+        try:
+            # Warm up: visit homepage to get cookies
+            warm_resp = _screener_session.get(
+                "https://screener.in/",
+                timeout=10,
+                allow_redirects=True,
+            )
+            _screener_session_warmed = warm_resp.status_code == 200
+            if _screener_session_warmed:
+                log.debug(
+                    "_get_screener_session: warmup OK — cookies: %s",
+                    list(_screener_session.cookies.keys()),
+                )
+            else:
+                log.warning(
+                    "_get_screener_session: warmup returned HTTP %s",
+                    warm_resp.status_code,
+                )
+        except Exception as exc:
+            log.warning("_get_screener_session: warmup failed: %s", exc)
+
+    return _screener_session
+
+
+def reset_screener_session() -> None:
+    """Force a fresh session next time (call after 403/429 to recover)."""
+    global _screener_session, _screener_session_warmed
+    _screener_session = None
+    _screener_session_warmed = False
+    log.info("Screener.in session reset — will re-warm on next request")
 
 
 # ─── yfinance retry utility ──────────────────────────────────────────────────
@@ -770,24 +831,59 @@ def get_screener_data(symbol: str) -> dict | None:
         candidates.append(base_fallback)   # fallback to raw NSE symbol
 
     resp = None
+    _last_status: str = "no_attempt"
+    session = _get_screener_session()
+
     for candidate in candidates:
         for variant in ("consolidated/", ""):   # consolidated first
             url = f"https://www.screener.in/company/{candidate}/{variant}"
             try:
-                r = requests.get(url, headers=_screener_headers(), timeout=12)
+                r = session.get(
+                    url,
+                    headers=_screener_headers({
+                        "Referer": "https://screener.in/",
+                        "User-Agent": random.choice(_SCREENER_USER_AGENTS),
+                    }),
+                    timeout=12,
+                )
+                _last_status = str(r.status_code)
                 if r.status_code == 200:
                     resp = r
                     break
-                log.debug("get_screener_data: %s → HTTP %s", url, r.status_code)
+                elif r.status_code in (403, 429):
+                    # IP blocked or rate-limited — log clearly and reset session
+                    log.warning(
+                        "get_screener_data(%s): HTTP %s from screener.in (%s) — "
+                        "Railway IP may be blocked. Resetting session.",
+                        symbol, r.status_code, url,
+                    )
+                    reset_screener_session()
+                    session = _get_screener_session()
+                else:
+                    log.info(
+                        "get_screener_data(%s): HTTP %s from %s",
+                        symbol, r.status_code, url,
+                    )
+            except requests.exceptions.ConnectionError as req_exc:
+                _last_status = "connection_error"
+                log.warning(
+                    "get_screener_data(%s): connection error for %s: %s",
+                    symbol, url, req_exc,
+                )
+            except requests.exceptions.Timeout:
+                _last_status = "timeout"
+                log.warning("get_screener_data(%s): timeout hitting %s", symbol, url)
             except Exception as req_exc:
-                log.debug("get_screener_data: request error %s: %s", url, req_exc)
+                _last_status = "error"
+                log.warning("get_screener_data(%s): request error %s: %s", symbol, url, req_exc)
         if resp is not None:
             break
 
     if resp is None:
         log.warning(
-            "get_screener_data(%s): screener.in unavailable — trying yfinance fallback",
-            symbol,
+            "get_screener_data(%s): screener.in unavailable (last status: %s) "
+            "— falling back to yfinance",
+            symbol, _last_status,
         )
         # ── yfinance fallback ─────────────────────────────────────────────────
         # Resolve to yfinance symbol (try .NS first, then .BO)
@@ -1342,22 +1438,48 @@ def get_screener_history(symbol: str) -> dict | None:
         candidates.append(base_fallback)
 
     resp = None
+    _last_status: str = "no_attempt"
+    session = _get_screener_session()
+
     for candidate in candidates:
         for variant in ("consolidated/", ""):   # consolidated first
             url = f"https://www.screener.in/company/{candidate}/{variant}"
             try:
-                r = requests.get(url, headers=_screener_headers(), timeout=15)
+                r = session.get(
+                    url,
+                    headers=_screener_headers({
+                        "Referer": "https://screener.in/",
+                        "User-Agent": random.choice(_SCREENER_USER_AGENTS),
+                    }),
+                    timeout=15,
+                )
+                _last_status = str(r.status_code)
                 if r.status_code == 200:
                     resp = r
                     break
-                log.debug("get_screener_history: %s → HTTP %s", url, r.status_code)
+                elif r.status_code in (403, 429):
+                    log.warning(
+                        "get_screener_history(%s): HTTP %s — Railway IP may be blocked",
+                        symbol, r.status_code,
+                    )
+                    reset_screener_session()
+                    session = _get_screener_session()
+                else:
+                    log.info(
+                        "get_screener_history(%s): HTTP %s from %s",
+                        symbol, r.status_code, url,
+                    )
             except Exception as req_exc:
-                log.debug("get_screener_history: request error %s: %s", url, req_exc)
+                _last_status = type(req_exc).__name__
+                log.warning("get_screener_history: request error %s: %s", url, req_exc)
         if resp is not None:
             break
 
     if resp is None:
-        log.error("get_screener_history(%s): all URL variants returned non-200", symbol)
+        log.error(
+            "get_screener_history(%s): all URL variants failed (last status: %s)",
+            symbol, _last_status,
+        )
         return None
 
     try:
