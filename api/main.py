@@ -1444,8 +1444,11 @@ async def get_governance_alerts(
 
         _seen_alert_keys: set[str] = set()
         for row in raw_alerts:
-            # Dedup key: alert_type + portfolio_id (or title as fallback)
-            dedup_key = f"{row.get('alert_type','?')}::{row.get('portfolio_id') or row.get('title','?')}"
+            # Dedup key: alert_type + holding_id (or symbol as fallback).
+            # NOTE: the column is 'holding_id', NOT 'portfolio_id'.
+            # Using symbol (not title) so that price-change between monitor runs
+            # doesn't cause the same stock to appear multiple times.
+            dedup_key = f"{row.get('alert_type','?')}::{row.get('holding_id') or row.get('symbol') or row.get('title','?')}"
             if dedup_key in _seen_alert_keys:
                 continue
             _seen_alert_keys.add(dedup_key)
@@ -1532,48 +1535,48 @@ async def get_system_health(
     checks.append(_ok("Supabase", "Connection active — this response proves it"))
 
     # ── Last daily pipeline run ───────────────────────────────────────────────
+    # daily_runs schema: run_date, symbols_processed, errors (INTEGER count),
+    # duration_seconds, created_at.  No 'status' column — infer from error count.
     try:
         run_rows = (db.table("daily_runs")
-                      .select("run_date, status, errors")
+                      .select("run_date, symbols_processed, errors, duration_seconds")
                       .order("run_date", desc=True)
                       .limit(1)
                       .execute()
                       .data or [])
         if run_rows:
             run = run_rows[0]
-            run_date = str(run.get("run_date", "?"))
-            run_status = str(run.get("status", "?"))
-            errors = run.get("errors") or []
-            days_ago = (date.today() - date.fromisoformat(run_date)).days if run_date != "?" else 99
+            run_date_str   = str(run.get("run_date", "?"))
+            n_syms         = run.get("symbols_processed") or 0
+            n_errors       = run.get("errors") or 0
+            duration       = run.get("duration_seconds")
+            dur_str        = f" ({duration:.0f}s)" if duration else ""
+            days_ago       = (date.today() - date.fromisoformat(run_date_str)).days \
+                             if run_date_str != "?" else 99
+            run_status_str = "success" if n_errors == 0 else f"{n_errors} errors"
 
-            if days_ago == 0 and run_status == "success":
-                checks.append(_ok("Daily Pipeline", f"Ran today ({run_date}) — status: {run_status}"))
+            if days_ago == 0:
+                check_fn = _ok if n_errors == 0 else _warn
+                checks.append(check_fn(
+                    "Daily Pipeline",
+                    f"Ran today ({run_date_str}){dur_str} — {n_syms} symbols, {run_status_str}",
+                    "Check Railway worker logs for synthesis errors" if n_errors else "",
+                ))
             elif days_ago <= 1:
                 checks.append(_warn(
                     "Daily Pipeline",
-                    f"Last run: {run_date} ({days_ago}d ago) — status: {run_status}" +
-                    (f" — {len(errors)} error(s)" if errors else ""),
-                    "Check Railway worker logs if status is not 'success'"
+                    f"Last run: {run_date_str} ({days_ago}d ago){dur_str} — {n_syms} symbols, {run_status_str}",
+                    "Check Railway worker logs"
                 ))
             else:
                 checks.append(_err(
                     "Daily Pipeline",
-                    f"Last run: {run_date} ({days_ago} days ago) — pipeline may not be running",
+                    f"Last run: {run_date_str} ({days_ago} days ago) — pipeline may not be running",
                     "Check Railway worker dyno is running. Run: python worker.py --now"
                 ))
-
-            # Surface any screener-related errors from the run
-            if errors:
-                for e in (errors if isinstance(errors, list) else [errors])[:3]:
-                    if any(k in str(e).lower() for k in ("screener", "403", "blocked")):
-                        checks.append(_warn(
-                            "Screener.in",
-                            f"Screener error in last run: {str(e)[:120]}",
-                            "Railway static IP may be blocked by screener.in — yfinance fallback active"
-                        ))
-                        break
-                else:
-                    checks.append(_ok("Screener.in", "No screener errors in last run"))
+            # Screener.in sub-check: no error detail in daily_runs (it's a count),
+            # so just report OK here — detailed errors visible in Railway logs.
+            checks.append(_ok("Screener.in", f"Last run {run_date_str}: screener ran (check Railway logs for 403/fallback detail)"))
         else:
             checks.append(_warn("Daily Pipeline", "No daily_runs rows found — scheduler may not have run yet", "Deploy worker.py to Railway and verify it starts"))
     except Exception as exc:

@@ -1410,19 +1410,16 @@ def _log_daily_run(
         client = create_client(url, key)
 
         # ── daily_runs: aggregate pipeline log ───────────────────────────────
-        row: dict = {
+        # Only write columns that exist in the DB schema:
+        #   run_date, symbols_processed, errors (INTEGER), duration_seconds
+        # The rich coverage/discovery detail goes into discovery_runs (below).
+        # Do NOT write 'agents_run' — that column does not exist in daily_runs.
+        client.table("daily_runs").insert({
             "run_date":          today_str,
             "symbols_processed": symbols_processed,
             "errors":            0,
             "duration_seconds":  duration,
-        }
-        if coverage_stats:
-            row["agents_run"] = {
-                "agent":       AGENT_NAME,
-                "coverage":    coverage_stats,
-                "discoveries": discoveries,
-            }
-        client.table("daily_runs").insert(row).execute()
+        }).execute()
     except Exception as exc:
         log.warning("daily_runs log failed: %s", exc)
 

@@ -880,24 +880,54 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                     prompt = regime_line + prompt
 
                 log.info("[%s] Calling Claude Sonnet for synthesis...", symbol)
-                response = await asyncio.to_thread(
-                    ant_client.messages.create,
-                    model=CLAUDE_MODEL,
-                    max_tokens=CLAUDE_MAX_TOKENS,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                raw_text = response.content[0].text
+                # Retry up to 3 times on 529 Overloaded / 529-like transient errors.
+                # Backoff: 15s → 45s → give up (use fallback synthesis).
+                _synthesis_raw: str | None = None
+                _last_exc: Exception | None = None
+                for _attempt in range(3):
+                    try:
+                        _resp = await asyncio.to_thread(
+                            ant_client.messages.create,
+                            model=CLAUDE_MODEL,
+                            max_tokens=CLAUDE_MAX_TOKENS,
+                            messages=[{"role": "user", "content": prompt}],
+                        )
+                        _synthesis_raw = _resp.content[0].text
+                        break
+                    except Exception as _api_exc:
+                        _last_exc = _api_exc
+                        _err_str = str(_api_exc)
+                        if "529" in _err_str or "overload" in _err_str.lower():
+                            if _attempt < 2:
+                                _wait = 15 * (3 ** _attempt)  # 15s, 45s
+                                log.warning(
+                                    "[%s] Anthropic 529 Overloaded (attempt %d/3) — retrying in %ds",
+                                    symbol, _attempt + 1, _wait,
+                                )
+                                await asyncio.sleep(_wait)
+                            else:
+                                log.warning(
+                                    "[%s] Anthropic 529 Overloaded after 3 attempts — using fallback synthesis",
+                                    symbol,
+                                )
+                        else:
+                            raise  # non-retriable error — bubble up
 
-                try:
-                    synthesis_data = _extract_json(raw_text)
-                    log.info("[%s] Claude synthesis parsed OK", symbol)
-                except (ValueError, json.JSONDecodeError, KeyError) as parse_err:
-                    log.warning(
-                        "[%s] Claude JSON parse failed (%s) — using fallback",
-                        symbol, parse_err,
-                    )
-                    log.debug("[%s] Raw Claude response: %.500s", symbol, raw_text)
+                if _synthesis_raw is None:
+                    # All retries exhausted on 529 — use weighted fallback
                     synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
+                else:
+                    raw_text = _synthesis_raw
+                    try:
+                        synthesis_data = _extract_json(raw_text)
+                        log.info("[%s] Claude synthesis parsed OK", symbol)
+                    except (ValueError, json.JSONDecodeError, KeyError) as parse_err:
+                        log.warning(
+                            "[%s] Claude JSON parse failed (%s) — using fallback",
+                            symbol, parse_err,
+                        )
+                        log.debug("[%s] Raw Claude response: %.500s", symbol, raw_text)
+                        synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
             else:
                 synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
 
