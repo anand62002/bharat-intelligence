@@ -1,6 +1,6 @@
 # Bharat Intelligence — Investment-Grade Execution Plan
 ### Target: 6.0 → 8.8 / 10 System Robustness
-*Last updated: 2026-05-15*
+*Last updated: 2026-05-16*
 
 > **Standing rules (apply after every build):**
 > 1. Update `CLAUDE.md` — new files, tables, endpoints, env vars, resolved issues
@@ -39,11 +39,15 @@
 | P3-A | Position sizing output in recommendations | Phase 3 | ✅ **DONE** | 2026-05-13 |
 | P3-B | Correlation-aware portfolio alerts | Phase 3 | ✅ **DONE** | 2026-05-14 |
 | P3-C-BE | Trendlyne analyst targets scraper — consensus target, buy/hold/sell dist, EPS (Pillar B+E) | Phase 3 | ✅ **DONE** | 2026-05-15 |
-| P3-C | Trendlyne integration — remaining pillars (news, filings, insider bulk deals) | Phase 3 | 🔄 IN PROGRESS | — |
+| P3-C-P1 | Trendlyne Pillar 1 — fundamentals 10-yr series (screener.in fallback tier-2) | Phase 3 | ⬜ TODO | — |
+| P3-C-P2 | Trendlyne Pillar 2 — corporate actions → earnings_calendar daily refresh | Phase 3 | ⬜ TODO | — |
+| P3-C-P3 | Trendlyne Pillar 3 — DVM scores in discovery pre-screen | Phase 3 | ⬜ TODO | — |
+| P3-C-P5 | Trendlyne Pillar 5 — BSE filings + insider sentiment in sentiment agent | Phase 3 | ⬜ TODO | — |
+| P3-C-P6 | Trendlyne Pillar 6 — Insider/SAST signal in institutional agent | Phase 3 | ⬜ TODO | — |
 | P3-D | Screener.in consolidated preference + Sales+/quarterly fix | Phase 3 | ✅ **DONE** | 2026-05-15 |
 | P3-E | Trendlyne F&O memory cleanup (compile→compact dict, gc.collect) | Phase 3 | ✅ **DONE** | 2026-05-15 |
 | DB-1 | Discovery tab blank (valid_till filter removed from 7→14d fallback) | Dashboard | ✅ **DONE** | 2026-05-15 |
-| DB-2 | Governance stoploss dedup (per alert_type+portfolio_id) | Dashboard | ✅ **DONE** | 2026-05-15 |
+| DB-2 | Governance stoploss dedup (holding_id + WebSocket broadcaster fix) | Dashboard | ✅ **DONE** | 2026-05-16 |
 | DB-3 | Data source health panel in Governance tab (/api/system/health) | Dashboard | ✅ **DONE** | 2026-05-15 |
 | DB-4 | Stale recs notice on Discovery tab when ideas are from prior day | Dashboard | ✅ **DONE** | 2026-05-15 |
 | DB-5 | Recs tab empty state → link to health panel | Dashboard | ✅ **DONE** | 2026-05-15 |
@@ -56,19 +60,23 @@
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ⬜ TODO | — |
 | P4-C | Governance numerical grounding check | Phase 4 | ⬜ TODO | — |
 | P4-D | Remove Breeze Connect — simplify options_fetcher to Trendlyne F&O → NSE → VIX | Phase 4 | ⬜ TODO | — |
+| BF-8 | Discovery save silent failure — missing required DB columns + discoveries.append gate | Bug Fix | ✅ **DONE** | 2026-05-16 |
+| BF-9 | Health panel daily_runs.status + agents_run column errors | Bug Fix | ✅ **DONE** | 2026-05-16 |
+| BF-10 | Governance WebSocket broadcaster pushing all 107 raw alerts (bypassing dedup) | Bug Fix | ✅ **DONE** | 2026-05-16 |
+| BF-11 | Synthesis 529 Overloaded — 3-attempt retry with 15s/45s backoff | Enhancement | ✅ **DONE** | 2026-05-16 |
 | P5-A | Enhanced outcome tracker + agent attribution | Phase 5 | ⬜ TODO | — |
 | P5-B | Paper portfolio simulation mode | Phase 5 | ⬜ TODO | — |
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 30 / 46 items complete (65%)**
+**Progress: 38 / 54 items complete (70%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
 |---|---|---|
 | Discovery tab: "13 passed, 2 promoted" but blank recs | `valid_till < today` filter in 7d fallback excluded all recs | ✅ Fixed: 14d window, no valid_till filter |
 | Portfolio recs tab always empty | Orchestrator generates recs for screener universe, not portfolio-specific | ⬜ DB-8 (filter by held symbols) |
-| Governance: duplicate STOPLOSS_HIT per stock | No dedup in API; same alert fired on every monitor run | ✅ Fixed: dedup by (alert_type, portfolio_id) |
+| Governance: duplicate STOPLOSS_HIT per stock | API used wrong field (portfolio_id→holding_id); WebSocket broadcaster pushed all raw rows every 30s overriding dedup | ✅ Fixed: dedup by holding_id/symbol in both REST + WebSocket; SQL to bulk-resolve 107 stale DB rows |
 | Performance tab no data | recommendation_outcomes table empty (recs < 90 days old) | ⬜ DB-6 (seed from old recs when ≥90d old) |
 | Market tab: empty news | No RSS-per-stock feed integrated in dashboard | ⬜ DB-7 |
 | Screener returning standalone figures instead of consolidated | URL order was standalone-first; Reliance PE was 42x instead of 22.8x | ✅ Fixed: consolidated/ tried first |
@@ -849,5 +857,5 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.6 — 2026-05-14 (Phase 0 + Phase 1 + bug-fix session + P2-A/B/C + P3-A/B complete)*  
-*Next milestone: P3-C Trendlyne integration (requires StratQ subscription) or P3-D Angel One options (resume after account verification)*
+*Document version: 3.7 — 2026-05-16 (P3-C-BE analyst targets + Trendlyne F&O + screener session warming + governance dedup + synthesis retry + discovery save fix)*  
+*Next milestone: P3-C remaining pillars — Pillar 1 (fundamentals fallback) is highest priority given screener.in Railway block*
