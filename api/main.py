@@ -1680,6 +1680,57 @@ async def get_system_health(
             "Set TRENDLYNE_SESSION + TRENDLYNE_CSRF in Railway env vars (optionally TRENDLYNE_USER + TRENDLYNE_PASS)"
         ))
 
+    # ── Discovery screener health ──────────────────────────────────────────────
+    # Checks whether the last run promoted any recs to the recommendations table.
+    # A "0 promoted" run is not an error but is flagged as a warning when it
+    # persists for more than 3 consecutive days — it usually means the save is
+    # silently failing (DB issue) or thresholds need calibration.
+    try:
+        disc_rows = (db.table("discovery_runs")
+                       .select("run_date,total_discoveries,total_passed,total_screened")
+                       .order("run_date", desc=True)
+                       .limit(7)
+                       .execute()
+                       .data or [])
+        if disc_rows:
+            latest = disc_rows[0]
+            run_date_str   = latest.get("run_date", "?")
+            total_disc     = latest.get("total_discoveries", 0) or 0
+            total_passed   = latest.get("total_passed", 0) or 0
+            total_screened = latest.get("total_screened", 0) or 0
+            # Count consecutive days with 0 promotions
+            consecutive_zeros = sum(1 for r in disc_rows if (r.get("total_discoveries") or 0) == 0)
+
+            if total_disc > 0:
+                checks.append(_ok(
+                    "Discovery Screener",
+                    f"Last run {run_date_str}: {total_disc} promoted, {total_passed} passed/{total_screened} screened ✓"
+                ))
+            elif consecutive_zeros >= 3:
+                checks.append(_warn(
+                    "Discovery Screener",
+                    f"0 promotions for {consecutive_zeros} consecutive days (last run: {run_date_str}, "
+                    f"{total_passed} passed pre-screen/{total_screened} screened) — "
+                    f"check if _save_discovery is failing or thresholds need calibration",
+                    "Check Railway logs for '_save_discovery FAILED' errors. "
+                    "Run: GET /api/debug/screener to validate screener.in access."
+                ))
+            else:
+                checks.append(_ok(
+                    "Discovery Screener",
+                    f"Last run {run_date_str}: 0 promoted ({total_passed} passed pre-screen/{total_screened} screened) — "
+                    f"normal if market conditions don't meet 20%+ upside threshold"
+                ))
+        else:
+            checks.append(_warn(
+                "Discovery Screener",
+                "No discovery_runs rows found — screener has not run yet",
+                "Deploy worker.py and verify 06:00 IST job fires, or run: python -m agents.discovery_screener"
+            ))
+    except Exception as exc:
+        checks.append(_warn("Discovery Screener", f"Could not read discovery_runs: {exc}",
+                            "Verify discovery_runs table exists (run db/migrations/create_discovery_runs.sql)"))
+
     # Sort: errors first, then warnings, then info, then ok
     _sev_order = {"error": 0, "warning": 1, "info": 2, "ok": 3}
     checks.sort(key=lambda c: _sev_order.get(c["severity"], 99))

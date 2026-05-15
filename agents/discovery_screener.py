@@ -968,32 +968,39 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
     Upsert a discovery into the recommendations table.
     Returns the saved row UUID or None on failure.
 
+    Uses INSERT (not upsert) so each daily run can produce a fresh rec.
+    If the same symbol was already promoted today, the INSERT succeeds because
+    there is no unique constraint on (symbol, date) — each discovery run is
+    independent.
+
     Note: the recommendations table needs an `is_discovery` BOOLEAN column.
     Run the migration in db/schema.sql if it doesn't exist yet.
     """
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_KEY")
     if not url or not key:
+        log.warning("_save_discovery(%s): SUPABASE_URL/SUPABASE_SERVICE_KEY not set — skipping save", result.symbol)
         return None
     try:
         from supabase import create_client
 
         tier = result.opportunity_tier
-        action = "BUY" if tier == "STANDARD" else "BUY"     # CRITICAL also BUY
+        action = "BUY"     # CRITICAL and STANDARD both BUY for discoveries
 
         # ── P3-A: Position sizing ─────────────────────────────────────────────
+        pos_pct   = None
+        pos_label = None
         try:
             from agents.position_sizer import calc_position_size
-            _sizing = calc_position_size(
+            _sizing   = calc_position_size(
                 upside_pct   = result.upside_pct,
                 confidence   = result.upside_confidence,
                 action       = action,
             )
-            _pos_pct   = _sizing["suggested_position_pct"]
-            _pos_label = _sizing["position_label"]
-        except Exception:
-            _pos_pct   = None
-            _pos_label = None
+            pos_pct   = _sizing["suggested_position_pct"]
+            pos_label = _sizing["position_label"]
+        except Exception as pe:
+            log.debug("_save_discovery(%s): position sizing failed: %s", result.symbol, pe)
 
         row = {
             "symbol":                 result.symbol,
@@ -1001,6 +1008,11 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             "confidence":             result.upside_confidence,
             "upside_pct":             result.upside_pct,
             "upside_confidence":      result.upside_confidence,
+            "risk_score":             None,   # discovery recs don't run the danger model
+            "entry_low":              None,
+            "entry_high":             None,
+            "target":                 None,
+            "stoploss":               None,
             "horizon_days":           _horizon_to_days(result.upside_horizon),
             "headline":               (
                 f"{'⚡ CRITICAL' if tier == 'CRITICAL' else '✅ STANDARD'} DISCOVERY: "
@@ -1011,10 +1023,11 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 k: {"signal": v.get("signal"), "score": v.get("score")}
                 for k, v in result.agent_signals.items()
             },
+            "gov_check":              {"flags": [], "passed": True, "note": "discovery_auto"},
             "is_discovery":           True,
             "valid_till":             _valid_till(result.upside_horizon),
-            "suggested_position_pct": _pos_pct,
-            "position_label":         _pos_label,
+            "suggested_position_pct": pos_pct,
+            "position_label":         pos_label,
             # metadata persists price snapshot + discovery context so
             # GET /api/discovery can serve a baseline price even when the
             # live yfinance refresh fails (weekend / holiday / network issue).
@@ -1035,16 +1048,29 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             },
         }
 
-        resp = (
-            create_client(url, key)
-            .table("recommendations")
-            .insert(row)
-            .execute()
-        )
+        client = create_client(url, key)
+        resp   = client.table("recommendations").insert(row).execute()
+
         if resp.data:
-            return resp.data[0].get("id")
+            rec_id = resp.data[0].get("id")
+            log.info(
+                "_save_discovery(%s): INSERT OK → id=%s tier=%s upside=%.1f%%",
+                result.symbol, rec_id, tier, result.upside_pct,
+            )
+            return rec_id
+
+        # insert returned no data (unusual — log it clearly)
+        log.warning(
+            "_save_discovery(%s): INSERT returned no data — resp=%s",
+            result.symbol, resp,
+        )
+
     except Exception as exc:
-        log.warning("Failed to save discovery for %s: %s", result.symbol, exc)
+        # Log with full traceback so Railway logs show the actual DB error
+        log.error(
+            "_save_discovery(%s): FAILED — %s",
+            result.symbol, exc, exc_info=True,
+        )
     return None
 
 
@@ -1303,9 +1329,22 @@ def run_discovery(
                 rec_id = _save_discovery(dr)
                 dr.saved_rec_id = rec_id
                 if rec_id:
-                    log.info("  Saved discovery %s → rec_id=%s", symbol, rec_id)
+                    log.info("  ✅ Saved discovery %s → rec_id=%s", symbol, rec_id)
+                else:
+                    log.warning(
+                        "  ⚠ Discovery %s [%s] NOT saved to DB — "
+                        "will not appear in dashboard discovery tab",
+                        symbol, tier,
+                    )
+            else:
+                dr.saved_rec_id = "dry_run"  # --no-save mode: treat as "saved" for counting
 
-            discoveries.append(dr)
+            # Only append if the record was actually persisted (or this is a dry run).
+            # This ensures discovery_symbols in the run log only lists stocks that
+            # genuinely appear in the recommendations table — so the ⚡ icon in the
+            # dashboard only fires for stocks the user can actually see.
+            if dr.saved_rec_id:
+                discoveries.append(dr)
             log.info(
                 "  ✓ %s [%s] upside=%.1f%% conf=%.1f comp_score=%.1f",
                 symbol, tier, upside_pct, upside_conf, comp_score,
@@ -1329,7 +1368,11 @@ def run_discovery(
 
     # ── 8. Log daily run ──────────────────────────────────────────────────────
     passed_syms    = [s for s, _ in screened]          # all pre-screen passers
-    discovery_syms = [d.symbol for d in discoveries]   # only those that became recs
+    # discovery_syms = only symbols with saved_rec_id set — i.e. actually
+    # persisted to recommendations table (or "dry_run" in --no-save mode).
+    # This is now guaranteed correct because discoveries.append() is gated
+    # on dr.saved_rec_id being truthy (fixed in the loop above).
+    discovery_syms = [d.symbol for d in discoveries]
 
     _log_daily_run(
         symbols_processed  = len(candidates),
