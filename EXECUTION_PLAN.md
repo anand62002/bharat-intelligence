@@ -57,8 +57,8 @@
 | DB-9 | ARIA — "What ran today" quick summary button (calls /api/discovery/runs) | Dashboard | ⬜ TODO | — |
 | DB-10 | Screener Export-to-Excel fallback (if HTML blocked, use CSV download) | Dashboard | ⬜ TODO | — |
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ✅ **DONE** | 2026-05-16 |
-| P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ⬜ TODO | — |
-| P4-C | Governance numerical grounding check | Phase 4 | ⬜ TODO | — |
+| P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ✅ **DONE** | (already built) |
+| P4-C | Governance numerical grounding check | Phase 4 | ✅ **DONE** | 2026-05-16 |
 | P4-D | Replace Breeze with Angel One SmartAPI — live options chain (lowest priority) | Phase 4 | ⬜ TODO | — |
 | BF-8 | Discovery save silent failure — missing required DB columns + discoveries.append gate | Bug Fix | ✅ **DONE** | 2026-05-16 |
 | BF-9 | Health panel daily_runs.status + agents_run column errors | Bug Fix | ✅ **DONE** | 2026-05-16 |
@@ -69,7 +69,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 44 / 54 items complete (81%)**
+**Progress: 46 / 54 items complete (85%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -749,10 +749,38 @@ Add both to Railway `worker` + `web` services.
 
 ---
 
-### ⬜ P4-C: Governance Numerical Grounding Check
-**Problem:** `fact_checker.py` uses LLM to check claims but doesn't deterministically verify numbers.  
-**Fix:** Pre-LLM pass: extract numbers from synthesis text, compare against `agent_results` values. Auto-flag mismatches as CONTRADICTED before Haiku call.  
-**Files:** `governance/fact_checker.py`
+### ✅ P4-C: Governance Numerical Grounding Check *(completed 2026-05-16)*
+**Problem:** `fact_checker.py` passed every claim to Claude Haiku — including simple numeric comparisons where "PE is 40.0" vs actual PE=22.5 could be verified deterministically without an LLM. Haiku could silently agree with wrong numbers or produce false negatives.
+
+**Fix — deterministic pre-LLM pass:**
+
+1. **`_NUMERIC_TOLERANCES`** dict — per-metric tolerance config:
+   - Relative tolerances (fraction of actual): `pe` ±15%, `revenue_growth` ±20%, `ebitda_margin/debt_equity` ±10–15%, `roce/roe` ±10%, `ema50/ema20` ±2%
+   - Absolute tolerances (units): `promoter_holding` ±2pp, `promoter_pledging` ±2pp, `rsi` ±5 points
+
+2. **`_extract_numeric_from_source(metric_key, source_name, cached_data)`** — extracts actual value from already-fetched source cache:
+   - Screener.in dict → direct key lookup
+   - OHLCV DataFrame → computes RSI (Wilder EMA), EMA20, EMA50
+
+3. **`_numerical_grounding_check(claims, source_cache, symbol)`** — pre-LLM pass:
+   - For each claim in `_NUMERIC_TOLERANCES`: extract actual, compare, set `claim.status`:
+     - Within tolerance → `"VERIFIED"` (Haiku skipped)
+     - Outside tolerance → `"CONTRADICTED"` + `corrected_claim` set (Haiku skipped)
+     - Unavailable → status unchanged → Haiku handles it
+   - Returns count of deterministically resolved claims (logged)
+
+4. **`_verify_claim` updated** — skips Haiku entirely if `claim.status` already set
+
+5. **`_check_one` updated** — calls `_numerical_grounding_check` before the Haiku loop; logs how many claims were resolved deterministically
+
+**Impact:**
+- PE, ROCE, promoter holding, EBITDA margin, RSI, EMA claims verified/contradicted without LLM calls
+- Eliminates false negatives where Haiku "agrees" with a wrong number
+- Produces exact corrected values: *"Actual ROCE is 8.2%, not 30.0%"*
+- Reduces Haiku API calls for numeric-heavy recommendations (typically 3–5 of 7 claims)
+
+**Files changed:** `governance/fact_checker.py`  
+**New file:** `tests/test_fact_checker.py` — 40 tests covering `_extract_numeric_from_source`, `_numerical_grounding_check`, `_verify_claim` skip behaviour, and integration with `_check_one`
 
 ---
 
@@ -874,8 +902,8 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P3-B** | Correlation-aware portfolio alerts | Code | None | M | ✅ Done |
 | **P3-C** | Comprehensive Trendlyne integration (6 pillars) | Code + Service | ₹492/mo (StratQ annual) | L–XL | ✅ Done |
 | **P4-A** | Warren bot commentary grounding | Code | None | S | ✅ Done |
-| **P4-B** | Symbol resolution cache persistence | Code | None | S | ⬜ TODO |
-| **P4-C** | Governance numerical grounding check | Code | None | M | ⬜ TODO |
+| **P4-B** | Symbol resolution cache persistence | Code | None | S | ✅ Done (already built) |
+| **P4-C** | Governance numerical grounding check | Code | None | M | ✅ Done |
 | **P4-D** | Replace Breeze with Angel One SmartAPI (live options) | Code | ₹0 (free with demat) | M | ⬜ TODO (lowest priority) |
 | **P5-A** | Enhanced outcome tracker + attribution | Code | None | L | ⬜ TODO |
 | **P5-B** | Paper portfolio simulation mode | Code | None | L | ⬜ TODO |

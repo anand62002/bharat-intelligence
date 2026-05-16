@@ -329,6 +329,182 @@ def _extract_claims(rec: dict, agent_results: dict, source_cache: dict) -> list[
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# P4-C: Deterministic numerical grounding (pre-LLM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Tolerance map: metric_key → (tolerance, use_absolute)
+# use_absolute=True  → tolerance is in absolute units (pp, RSI points, etc.)
+# use_absolute=False → tolerance is a fraction of the actual value (relative %)
+_NUMERIC_TOLERANCES: dict[str, tuple] = {
+    "pe":                (0.15, False),  # ±15% relative  — P/E varies by source timing
+    "revenue_growth":    (0.20, False),  # ±20% relative  — YoY% can vary by source
+    "ebitda_margin":     (0.10, False),  # ±10% relative
+    "debt_equity":       (0.15, False),  # ±15% relative
+    "roce":              (0.10, False),  # ±10% relative
+    "roe":               (0.10, False),  # ±10% relative
+    "promoter_holding":  (2.0,  True),   # ±2 pp absolute — should be near-exact
+    "promoter_pledging": (2.0,  True),   # ±2 pp absolute
+    "rsi":               (5.0,  True),   # ±5 RSI points  — slight window differences ok
+    "ema50":             (0.02, False),  # ±2% relative   — price
+    "ema20":             (0.02, False),  # ±2% relative
+}
+
+
+def _extract_numeric_from_source(
+    metric_key:  str,
+    source_name: str,
+    cached_data,
+) -> Optional[float]:
+    """
+    Extract the actual numeric value for a metric from already-cached source data.
+
+    Returns None when:
+      - cached_data is None (data fetch failed)
+      - metric_key is not present in the cached data
+      - The cached data type doesn't match the expected shape
+
+    Supports:
+      - screener.in snapshot (dict): pe, revenue_growth, ebitda_margin, debt_equity,
+        roce, roe, promoter_holding, promoter_pledging
+      - yfinance OHLCV (DataFrame): rsi (computed), ema20, ema50 (computed)
+    """
+    if cached_data is None:
+        return None
+
+    # ── Screener.in / yfinance-sector snapshot ─────────────────────────────────
+    if source_name in ("screener_in", "yfinance_sector"):
+        if isinstance(cached_data, dict):
+            v = cached_data.get(metric_key)
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    pass
+
+    # ── OHLCV DataFrame ─────────────────────────────────────────────────────────
+    elif source_name in ("yfinance_ohlcv_1y", "yfinance_price"):
+        if isinstance(cached_data, pd.DataFrame) and not cached_data.empty:
+            close = cached_data["Close"].dropna()
+            if close.empty:
+                return None
+            if metric_key == "rsi":
+                return _compute_rsi(close)
+            elif metric_key in ("ema50", "ema_50"):
+                try:
+                    return float(close.ewm(span=50, adjust=False).mean().iloc[-1])
+                except (IndexError, ValueError):
+                    return None
+            elif metric_key in ("ema20", "ema_20"):
+                try:
+                    return float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+                except (IndexError, ValueError):
+                    return None
+
+    return None
+
+
+def _numerical_grounding_check(
+    claims:       list[Claim],
+    source_cache: dict,
+    symbol:       str,
+) -> int:
+    """
+    Deterministic numerical grounding pass — runs BEFORE the Haiku LLM call.
+
+    For each claim whose metric_key is in _NUMERIC_TOLERANCES and whose
+    claimed_value is numeric, this function:
+
+      1. Extracts the actual value from the already-fetched source_cache
+      2. Compares claimed vs actual using the configured tolerance
+      3. Sets claim.status:
+           "VERIFIED"     — within tolerance  → Haiku call skipped
+           "CONTRADICTED" — outside tolerance → Haiku call skipped; corrected_claim set
+         or leaves status="" if the actual value is unavailable → Haiku handles it
+
+    Benefits:
+      • Eliminates false negatives where Haiku "agrees" with a wrong number
+      • Produces exact corrected values (e.g. "actual ROCE is 18.3%, not 24.0%")
+      • Reduces LLM API calls — numeric claims resolved here skip Haiku entirely
+      • Preserves Haiku for qualitative/directional claims it's better suited for
+
+    Returns:
+        Number of claims resolved deterministically (for logging).
+    """
+    resolved = 0
+
+    for claim in claims:
+        if claim.status:
+            continue  # already resolved
+
+        tolerance_entry = _NUMERIC_TOLERANCES.get(claim.metric_key)
+        if tolerance_entry is None:
+            continue  # no tolerance defined — pass to Haiku
+
+        tolerance, use_absolute = tolerance_entry
+
+        try:
+            claimed = float(claim.claimed_value)
+        except (TypeError, ValueError):
+            continue  # non-numeric claimed value — pass to Haiku
+
+        # Look up actual value from source cache
+        cache_key   = f"{claim.data_source}::{symbol}"
+        cached_data = source_cache.get(cache_key)
+        actual = _extract_numeric_from_source(
+            claim.metric_key, claim.data_source, cached_data
+        )
+
+        if actual is None:
+            continue  # cannot determine actual — Haiku handles it
+
+        # Compare
+        diff_abs = abs(claimed - actual)
+        if use_absolute:
+            within = diff_abs <= tolerance
+        else:
+            within = (diff_abs / abs(actual) <= tolerance) if actual != 0 else (claimed == 0)
+
+        if within:
+            claim.status = "VERIFIED"
+            if use_absolute:
+                claim.reason = (
+                    f"Numerical check: claimed {claimed:.2f}, actual {actual:.2f} "
+                    f"(diff {diff_abs:.2f}, tolerance ±{tolerance:.1f})"
+                )
+            else:
+                rel_pct = diff_abs / abs(actual) * 100
+                claim.reason = (
+                    f"Numerical check: claimed {claimed:.2f}, actual {actual:.2f} "
+                    f"(diff {rel_pct:.1f}%, threshold {int(tolerance * 100)}%)"
+                )
+        else:
+            claim.status = "CONTRADICTED"
+            claim.corrected_claim = (
+                f"Actual {claim.metric_key.replace('_', ' ')} is {actual:.2f}, "
+                f"not {claimed:.2f}"
+            )
+            if use_absolute:
+                claim.reason = (
+                    f"Numerical check: claimed {claimed:.2f} vs actual {actual:.2f} "
+                    f"(diff {diff_abs:.2f}pp, threshold ±{tolerance:.1f}pp)"
+                )
+            else:
+                rel_pct = diff_abs / abs(actual) * 100 if actual != 0 else float("inf")
+                claim.reason = (
+                    f"Numerical check: claimed {claimed:.2f} vs actual {actual:.2f} "
+                    f"(diff {rel_pct:.1f}%, threshold {int(tolerance * 100)}%)"
+                )
+            log.debug(
+                "[%s] GROUNDING CONTRADICTED: %s (claimed=%.2f, actual=%.2f)",
+                symbol, claim.metric_key, claimed, actual,
+            )
+
+        resolved += 1
+
+    return resolved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Haiku verification
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -341,8 +517,15 @@ def _verify_claim(
     """
     Call Claude Haiku to verify one claim. Returns the Claim with
     status/reason/corrected_claim populated.
+
+    Skips the API call entirely if the claim was already resolved by the
+    deterministic numerical grounding check (_numerical_grounding_check).
     Falls back to UNVERIFIED if Haiku call fails.
     """
+    # Skip if already resolved deterministically (P4-C grounding)
+    if claim.status:
+        return claim
+
     if not ant_client or not prompt_tmpl:
         claim.status = "UNVERIFIED"
         claim.reason = "Haiku client unavailable"
@@ -615,7 +798,15 @@ def _check_one(
         }
         return rec, {}
 
-    # Verify each claim via Haiku
+    # ── P4-C: Deterministic numerical grounding pass (pre-LLM) ───────────────
+    n_grounded = _numerical_grounding_check(claims, source_cache, symbol)
+    if n_grounded:
+        log.info(
+            "[%s] Numerical grounding resolved %d/%d claims deterministically",
+            symbol, n_grounded, len(claims),
+        )
+
+    # Verify remaining claims via Haiku (already-resolved claims are skipped)
     for claim in claims:
         _verify_claim(claim, symbol, prompt_tmpl, ant_client)
         log.debug("[%s] %s → %s", symbol, claim.claim_text[:60], claim.status)
