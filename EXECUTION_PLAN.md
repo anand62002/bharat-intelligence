@@ -39,7 +39,7 @@
 | P3-A | Position sizing output in recommendations | Phase 3 | ✅ **DONE** | 2026-05-13 |
 | P3-B | Correlation-aware portfolio alerts | Phase 3 | ✅ **DONE** | 2026-05-14 |
 | P3-C-BE | Trendlyne analyst targets scraper — consensus target, buy/hold/sell dist, EPS (Pillar B+E) | Phase 3 | ✅ **DONE** | 2026-05-15 |
-| P3-C-P1 | Trendlyne Pillar 1 — fundamentals 10-yr series (screener.in fallback tier-2) | Phase 3 | ⬜ TODO | — |
+| P3-C-P1 | Trendlyne Pillar 1 — fundamentals 10-yr series (screener.in fallback tier-2) | Phase 3 | ✅ **DONE** | 2026-05-16 |
 | P3-C-P2 | Trendlyne Pillar 2 — corporate actions → earnings_calendar daily refresh | Phase 3 | ⬜ TODO | — |
 | P3-C-P3 | Trendlyne Pillar 3 — DVM scores in discovery pre-screen | Phase 3 | ⬜ TODO | — |
 | P3-C-P5 | Trendlyne Pillar 5 — BSE filings + insider sentiment in sentiment agent | Phase 3 | ⬜ TODO | — |
@@ -69,7 +69,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 38 / 54 items complete (70%)**
+**Progress: 39 / 54 items complete (72%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
