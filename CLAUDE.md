@@ -479,6 +479,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (P4-A) | P4-A: Warren bot commentary grounding — `_validate_commentary` + `_build_grounded_commentary` + JSON-structured Haiku prompt; tone follows signal; 27 new tests (62 total) |
 | (P3-C-P5/P6) | P3-C-P5+P6: Promoter/insider signal — data/insider_signal.py shared module; sentiment.py +5/-10 pts; institutional.py +8 pts ACCUMULATING; 67 new tests |
 | (P3-C-P2) | P3-C-P2: Earnings calendar enhanced — trendlyne_fetcher.get_upcoming_earnings(); earnings_fetcher.py Trendlyne tier-1.5; worker.py expanded to portfolio+discovery symbols |
 | (P3-C-P3) | P3-C-P3: DVM Filter 6 in discovery pre-screen — opt-in via TRENDLYNE_SESSION; 10 tests |
@@ -574,7 +575,7 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Bug Fix Session** ✅: yfinance 1.2.0 fix, discovery screener 0-pass bugs, FII stale zeros, macro news, embeddings, partial sell, symbol aliases
 - **Phase 2 (P2)** ✅: P2-A (yfinance fallback), P2-B (RAG auto-refresh), P2-C (concentration alerts), P2-D (superseded by P3-C)
 - **Phase 3 (P3)** ✅: P3-A ✅ (position sizing), P3-B ✅ (correlation alerts), P3-C ✅ (Trendlyne — all pillars: P1 fundamentals fallback, P2 earnings calendar, P3 DVM filter, P5 insider sentiment, P6 insider institutional)
-- **Phase 4 (P4)** ← CURRENT: Commentary grounding, symbol cache persistence, governance numerical check
+- **Phase 4 (P4)** ← CURRENT: P4-A ✅ commentary grounding; P4-B symbol cache persistence; P4-C governance numerical check; P4-D Angel One options (lowest priority)
 - **Phase 5 (P5)**: Robust forward paper portfolio tracker + attribution analysis
 - **Phase 6 (P6)**: Dashboard performance tab (hit rate, alpha, backtest results)
 

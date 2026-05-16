@@ -568,6 +568,86 @@ def _check_disqualifiers(
 
 # ─── AI Commentary ────────────────────────────────────────────────────────────
 
+def _validate_commentary(text: str, anchor_values: list) -> bool:
+    """
+    Return True if at least 2 anchor values appear as substrings in text.
+
+    Anchors are pre-formatted numeric strings (e.g. "25.3", "18.2", "35.0").
+    This guards against LLM commentary that ignores the actual data supplied
+    in the prompt — commentary that does not cite ≥2 real numbers is considered
+    ungrounded and triggers the deterministic fallback.
+
+    Args:
+        text:          The generated commentary string.
+        anchor_values: List of numeric strings to check for, e.g. ["25.3", "18.2"].
+
+    Returns:
+        True if ≥2 anchors are present in text, False otherwise.
+    """
+    if not text:
+        return False
+    hits = sum(1 for v in anchor_values if v and v in text)
+    return hits >= 2
+
+
+def _build_grounded_commentary(
+    symbol: str,
+    score: int,
+    signal: str,
+    moat_type: str,
+    roce_avg: Optional[float],
+    eps_cagr: Optional[float],
+    mos_pct: Optional[float],
+) -> tuple[str, str]:
+    """
+    Deterministic, grounded commentary — always references actual numeric values.
+
+    Used as the fallback when:
+      • No ANTHROPIC_API_KEY is set
+      • The API call raises an exception
+      • The LLM response fails _validate_commentary (didn't cite ≥2 data points)
+
+    Tone of why_pass is calibrated to signal: QUALITY_BUY → constructive caution,
+    AVOID → clear rejection language, WATCHLIST → price-conditional language.
+
+    Returns:
+        (why_like, why_pass) — both sentences embed actual numbers from the analysis.
+    """
+    moat_desc = moat_type.lower().replace("_", " ")
+    roce_str = f"{roce_avg:.1f}%" if roce_avg is not None else "N/A"
+    cagr_str = f"{eps_cagr:.1f}%" if eps_cagr is not None else "N/A"
+    mos_str  = f"{mos_pct:.1f}%"  if mos_pct  is not None else "N/A"
+
+    why_like = (
+        f"{symbol} delivers ROCE of {roce_str} with {moat_desc} moat characteristics "
+        f"and EPS CAGR of {cagr_str} — the kind of capital efficiency that compounds "
+        f"shareholder wealth over a decade."
+    )
+
+    if signal == "QUALITY_BUY":
+        why_pass = (
+            f"Even quality businesses at a DCF margin of safety of {mos_str} carry "
+            f"re-rating risk — a patient Buffett-style investor would want the "
+            f"{score}/100 business quality score sustained through the next cycle "
+            f"before committing full capital."
+        )
+    elif signal == "AVOID":
+        why_pass = (
+            f"At a business quality score of {score}/100 and DCF margin of safety "
+            f"of {mos_str}, this business does not meet our minimum quality and value "
+            f"thresholds — we would require higher ROCE ({roce_str}) trend and a "
+            f"wider safety margin before conviction."
+        )
+    else:  # WATCHLIST
+        why_pass = (
+            f"At a score of {score}/100 and DCF margin of safety of {mos_str}, "
+            f"this is a watchlist candidate — ROCE of {roce_str} is constructive "
+            f"but we need a better entry price before committing capital."
+        )
+
+    return why_like, why_pass
+
+
 def _generate_commentary(
     symbol: str,
     moat_type: str,
@@ -575,78 +655,110 @@ def _generate_commentary(
     eps_cagr: Optional[float],
     mos_pct: Optional[float],
     score: int,
+    *,
+    signal: str = "WATCHLIST",
 ) -> tuple[str, str]:
     """
-    Generate 2-sentence Buffett/Jhunjhunwala-style commentary using Claude Haiku.
+    Generate grounded Buffett/Jhunjhunwala-style commentary using Claude Haiku.
 
-    Uses ANTHROPIC_API_KEY environment variable. Returns fallback strings if
-    key is missing or API call fails.
+    Strategy:
+      1. If no ANTHROPIC_API_KEY → use _build_grounded_commentary (deterministic).
+      2. Ask Haiku for JSON {"why_like": "...", "why_pass": "..."} with a prompt
+         that explicitly lists all numeric data points and REQUIRES them to be cited.
+      3. Parse JSON; validate with _validate_commentary that ≥2 actual numbers
+         appear in the combined output.
+      4. If JSON parse fails OR validation fails → fall back to _build_grounded_commentary.
+
+    This ensures commentary is always grounded in real data — it can never silently
+    contradict the actual scores or omit the key metrics.
+
+    Args:
+        symbol:    Cleaned NSE symbol string.
+        moat_type: One of BRAND / SWITCHING_COSTS / NETWORK_EFFECT / etc.
+        roce_avg:  10-year average ROCE in percent, or None.
+        eps_cagr:  10-year EPS CAGR in percent, or None.
+        mos_pct:   DCF margin of safety in percent, or None.
+        score:     Total business quality score (0–100).
+        signal:    "QUALITY_BUY" | "WATCHLIST" | "AVOID" — used for tone calibration.
 
     Returns:
-        (why_like, why_pass) — both plain English strings
+        (why_like, why_pass) — both plain English strings, always numeric-grounded.
     """
+    import json as _json
+
+    # Pre-format anchor strings for validation
+    roce_str  = f"{roce_avg:.1f}" if roce_avg is not None else None
+    cagr_str  = f"{eps_cagr:.1f}" if eps_cagr is not None else None
+    mos_str   = f"{mos_pct:.1f}"  if mos_pct  is not None else None
+    score_str = str(score)
+    anchors   = [v for v in [roce_str, cagr_str, mos_str, score_str] if v is not None]
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        why_like = (
-            f"{symbol} demonstrates {moat_type.lower().replace('_', ' ')} characteristics "
-            f"with strong capital returns that compound shareholder wealth over time."
+        return _build_grounded_commentary(
+            symbol, score, signal, moat_type, roce_avg, eps_cagr, mos_pct
         )
-        why_pass = (
-            f"Without a deeper margin of safety and clearer moat evidence, "
-            f"the risk/reward on {symbol} does not meet our long-term hurdle rate."
-        )
-        return why_like, why_pass
 
-    roce_str = f"{roce_avg:.1f}" if roce_avg is not None else "N/A"
-    cagr_str = f"{eps_cagr:.1f}" if eps_cagr is not None else "N/A"
-    mos_str  = f"{mos_pct:.1f}"  if mos_pct  is not None else "N/A"
+    prompt = (
+        f"You are Warren Buffett and Rakesh Jhunjhunwala giving a 2-sentence opinion "
+        f"on {symbol}.\n\n"
+        f"ACTUAL DATA — you MUST cite at least 2 of these figures verbatim in each "
+        f"response field:\n"
+        f"  ROCE average    : {roce_str or 'N/A'}%\n"
+        f"  EPS CAGR (10yr) : {cagr_str or 'N/A'}%\n"
+        f"  DCF MoS         : {mos_str or 'N/A'}%\n"
+        f"  Quality score   : {score_str}/100\n"
+        f"  Signal          : {signal}\n"
+        f"  Moat type       : {moat_type}\n\n"
+        f"Rules:\n"
+        f"1. why_like — 2 sentences on investment merit. Must include ≥2 numbers above.\n"
+        f"2. why_pass — 2 sentences on concerns. Must include ≥2 numbers above. "
+        f"Tone must match signal={signal} "
+        f"(AVOID=clearly skeptical, QUALITY_BUY=cautiously positive, WATCHLIST=conditional).\n"
+        f"3. Respond ONLY with valid JSON, no markdown fences, no extra text.\n\n"
+        f'Output format: {{"why_like": "...", "why_pass": "..."}}'
+    )
 
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
-
-        like_prompt = (
-            f"In 2 sentences as Warren Buffett and Rakesh Jhunjhunwala would speak, "
-            f"explain why you would like investing in {symbol} given: "
-            f"moat_type={moat_type}, roce_avg={roce_str}%, "
-            f"eps_cagr={cagr_str}%, margin_of_safety={mos_str}%. "
-            f"Be specific and direct."
-        )
-        pass_prompt = (
-            f"In 2 sentences as Warren Buffett and Rakesh Jhunjhunwala would speak, "
-            f"explain what concerns would make you pass on {symbol} given: "
-            f"moat_type={moat_type}, roce_avg={roce_str}%, "
-            f"eps_cagr={cagr_str}%, margin_of_safety={mos_str}%. "
-            f"Be honest and specific."
-        )
-
-        why_like_msg = client.messages.create(
+        msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
-            messages=[{"role": "user", "content": like_prompt}],
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
         )
-        why_like = why_like_msg.content[0].text.strip()
+        raw = msg.content[0].text.strip()
 
-        why_pass_msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=150,
-            messages=[{"role": "user", "content": pass_prompt}],
-        )
-        why_pass = why_pass_msg.content[0].text.strip()
+        # Strip markdown code fences if Haiku wraps output
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:].lstrip()
+
+        parsed   = _json.loads(raw)
+        why_like = parsed.get("why_like", "").strip()
+        why_pass = parsed.get("why_pass", "").strip()
+
+        # Grounding validation — at least 2 actual numbers must appear in the text
+        combined = f"{why_like} {why_pass}"
+        if not why_like or not why_pass or not _validate_commentary(combined, anchors):
+            log.debug(
+                "_generate_commentary(%s): validation failed (anchors=%s), "
+                "using grounded fallback",
+                symbol, anchors,
+            )
+            return _build_grounded_commentary(
+                symbol, score, signal, moat_type, roce_avg, eps_cagr, mos_pct
+            )
 
         return why_like, why_pass
 
     except Exception as exc:
         log.warning("_generate_commentary: API call failed for %s: %s", symbol, exc)
-        why_like = (
-            f"{symbol} shows {moat_type.lower().replace('_', ' ')} moat with "
-            f"ROCE of {roce_str}% — the kind of compounding machine we seek."
+        return _build_grounded_commentary(
+            symbol, score, signal, moat_type, roce_avg, eps_cagr, mos_pct
         )
-        why_pass = (
-            f"At current valuations (MoS={mos_str}%), the price does not offer "
-            f"the margin of safety a Buffett-style investor demands."
-        )
-        return why_like, why_pass
 
 
 # ─── Supabase Audit Logger ────────────────────────────────────────────────────
@@ -1021,7 +1133,8 @@ def analyse(symbol: str) -> dict:
 
         # ── Step 15: Commentary ───────────────────────────────────────────────
         why_like, why_pass = _generate_commentary(
-            screener_symbol, moat_type, roce_avg, eps_cagr, mos_pct, total_score
+            screener_symbol, moat_type, roce_avg, eps_cagr, mos_pct, total_score,
+            signal=signal,
         )
 
         # ── Step 16: Detail string ────────────────────────────────────────────

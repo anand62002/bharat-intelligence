@@ -56,7 +56,7 @@
 | DB-8 | Portfolio recs tab — filter by portfolio holdings (only show recs for held stocks) | Dashboard | ⬜ TODO | — |
 | DB-9 | ARIA — "What ran today" quick summary button (calls /api/discovery/runs) | Dashboard | ⬜ TODO | — |
 | DB-10 | Screener Export-to-Excel fallback (if HTML blocked, use CSV download) | Dashboard | ⬜ TODO | — |
-| P4-A | Warren bot commentary grounding fix | Phase 4 | ⬜ TODO | — |
+| P4-A | Warren bot commentary grounding fix | Phase 4 | ✅ **DONE** | 2026-05-16 |
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ⬜ TODO | — |
 | P4-C | Governance numerical grounding check | Phase 4 | ⬜ TODO | — |
 | P4-D | Replace Breeze with Angel One SmartAPI — live options chain (lowest priority) | Phase 4 | ⬜ TODO | — |
@@ -69,7 +69,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 43 / 54 items complete (80%)**
+**Progress: 44 / 54 items complete (81%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -721,10 +721,24 @@ Add both to Railway `worker` + `web` services.
 
 ---
 
-### ⬜ P4-A: Warren Bot Commentary Grounding
-**Problem:** Claude Haiku commentary can contradict actual scores (no numerical grounding constraint).  
-**Fix:** Structured JSON output with required fields referencing actual data numbers. Validate at least 2 data points appear in generated text.  
-**Files:** `agents/warren_bot.py` (`_generate_commentary()`)
+### ✅ P4-A: Warren Bot Commentary Grounding *(completed 2026-05-16)*
+**Problem:** Claude Haiku commentary could say anything — free-form text with no constraint to cite actual numbers, making it possible to generate commentary that silently contradicted the real ROCE / EPS CAGR / MoS values computed by the scoring engine.
+
+**Fix:**
+1. **`_validate_commentary(text, anchor_values)`** — checks that ≥2 pre-formatted numeric strings (e.g. `"25.3"`, `"18.2"`) appear as substrings in the generated text. Returns `False` if fewer anchors found.
+2. **`_build_grounded_commentary(symbol, score, signal, moat_type, roce_avg, eps_cagr, mos_pct)`** — deterministic template fallback that always embeds actual numbers. Tone calibrated to `signal`: AVOID=rejection language, QUALITY_BUY=cautiously positive, WATCHLIST=price-conditional.
+3. **`_generate_commentary` rewritten** — asks Haiku for structured JSON `{"why_like": "...", "why_pass": "..."}` with an explicit prompt listing all data points and requiring ≥2 to be cited. After JSON parse, runs `_validate_commentary`; falls back to `_build_grounded_commentary` if validation fails or JSON is malformed.
+4. **`signal` parameter added** — `analyse()` now passes `signal=signal` so commentary tone is consistent with the actual recommendation.
+
+**Fallback chain (commentary always grounded):**
+- No API key → `_build_grounded_commentary`
+- API error → `_build_grounded_commentary`
+- Non-JSON response → `_build_grounded_commentary`
+- Valid JSON but validation fails (no real numbers cited) → `_build_grounded_commentary`
+- Valid JSON + validation passes → LLM text used as-is
+
+**Files changed:** `agents/warren_bot.py`  
+**Tests:** `tests/test_warren_bot.py` — added 3 new test classes (27 tests): `TestValidateCommentary`, `TestBuildGroundedCommentary`, `TestGenerateCommentary`, `TestCommentaryGroundingIntegration`. All 62 warren_bot tests pass.
 
 ---
 
@@ -859,7 +873,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P3-A** | Position sizing output in recs | Code | None | S | ✅ Done |
 | **P3-B** | Correlation-aware portfolio alerts | Code | None | M | ✅ Done |
 | **P3-C** | Comprehensive Trendlyne integration (6 pillars) | Code + Service | ₹492/mo (StratQ annual) | L–XL | ✅ Done |
-| **P4-A** | Warren bot commentary grounding | Code | None | S | ⬜ TODO |
+| **P4-A** | Warren bot commentary grounding | Code | None | S | ✅ Done |
 | **P4-B** | Symbol resolution cache persistence | Code | None | S | ⬜ TODO |
 | **P4-C** | Governance numerical grounding check | Code | None | M | ⬜ TODO |
 | **P4-D** | Replace Breeze with Angel One SmartAPI (live options) | Code | ₹0 (free with demat) | M | ⬜ TODO (lowest priority) |

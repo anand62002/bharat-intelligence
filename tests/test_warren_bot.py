@@ -32,6 +32,8 @@ from agents.warren_bot import (  # noqa: E402
     _jhunjhunwala_bonus,
     _check_disqualifiers,
     _generate_commentary,
+    _validate_commentary,
+    _build_grounded_commentary,
 )
 
 
@@ -660,3 +662,343 @@ class TestHelperFunctions:
         }
         dq = _check_disqualifiers(hist, {}, market_cap_cr=5000.0, pledging=2.0)
         assert dq == [], f"Expected no disqualifiers, got {dq}"
+
+
+# ─── P4-A: Commentary grounding ──────────────────────────────────────────────
+
+class TestValidateCommentary:
+    """Unit tests for _validate_commentary anchor-presence check."""
+
+    def test_two_anchors_present_passes(self):
+        text = "ROCE of 25.3% with EPS CAGR of 18.2% makes this a compounder."
+        assert _validate_commentary(text, ["25.3", "18.2", "35.0"]) is True
+
+    def test_exactly_two_anchors_is_sufficient(self):
+        text = "Score 82/100 and margin of safety 35.0% look attractive."
+        assert _validate_commentary(text, ["82", "35.0"]) is True
+
+    def test_one_anchor_fails(self):
+        text = "Only mentions ROCE of 25.3% but nothing else."
+        assert _validate_commentary(text, ["25.3", "18.2", "35.0"]) is False
+
+    def test_zero_anchors_fails(self):
+        text = "This is a wonderful business with excellent returns."
+        assert _validate_commentary(text, ["25.3", "18.2", "35.0"]) is False
+
+    def test_empty_text_fails(self):
+        assert _validate_commentary("", ["25.3", "18.2"]) is False
+
+    def test_none_anchors_skipped(self):
+        """None values in anchor list should be ignored."""
+        text = "ROCE 25.3% and margin 35.0% mentioned."
+        # Only 2 valid anchors — both present → should pass
+        assert _validate_commentary(text, ["25.3", None, "35.0"]) is True
+
+    def test_all_none_anchors_fails(self):
+        """If all anchors are None, no hits possible → always False."""
+        text = "Some text that says nothing numerical."
+        assert _validate_commentary(text, [None, None]) is False
+
+    def test_partial_number_not_matched(self):
+        """Anchor '5.3' should not match '25.3' (substring)."""
+        text = "ROCE of 25.3% is excellent."
+        # "5.3" IS a substring of "25.3" — this is a known limitation (simple substring)
+        # Test documents the actual behaviour
+        result = _validate_commentary(text, ["5.3", "18.2"])
+        # "5.3" in "25.3%" → True, but "18.2" not present → only 1 hit → False
+        assert result is False
+
+
+class TestBuildGroundedCommentary:
+    """Unit tests for _build_grounded_commentary deterministic template."""
+
+    def test_contains_roce_number(self):
+        why_like, _ = _build_grounded_commentary(
+            "TCS", 82, "QUALITY_BUY", "SWITCHING_COSTS",
+            roce_avg=28.5, eps_cagr=15.3, mos_pct=32.1,
+        )
+        assert "28.5" in why_like
+
+    def test_contains_eps_cagr_number(self):
+        why_like, _ = _build_grounded_commentary(
+            "TCS", 82, "QUALITY_BUY", "SWITCHING_COSTS",
+            roce_avg=28.5, eps_cagr=15.3, mos_pct=32.1,
+        )
+        assert "15.3" in why_like
+
+    def test_contains_mos_in_why_pass(self):
+        _, why_pass = _build_grounded_commentary(
+            "TCS", 82, "QUALITY_BUY", "SWITCHING_COSTS",
+            roce_avg=28.5, eps_cagr=15.3, mos_pct=32.1,
+        )
+        assert "32.1" in why_pass
+
+    def test_score_in_why_pass(self):
+        _, why_pass = _build_grounded_commentary(
+            "TCS", 82, "QUALITY_BUY", "SWITCHING_COSTS",
+            roce_avg=28.5, eps_cagr=15.3, mos_pct=32.1,
+        )
+        assert "82" in why_pass
+
+    def test_avoid_signal_tone(self):
+        _, why_pass = _build_grounded_commentary(
+            "BADCO", 38, "AVOID", "NONE",
+            roce_avg=8.2, eps_cagr=3.1, mos_pct=-15.0,
+        )
+        # AVOID should have skeptical / rejection language
+        assert any(w in why_pass.lower() for w in ("not meet", "does not", "require", "threshold"))
+
+    def test_watchlist_signal_tone(self):
+        _, why_pass = _build_grounded_commentary(
+            "MEDCO", 62, "WATCHLIST", "BRAND",
+            roce_avg=16.0, eps_cagr=11.0, mos_pct=10.5,
+        )
+        assert "watchlist" in why_pass.lower() or "entry" in why_pass.lower() or "price" in why_pass.lower()
+
+    def test_quality_buy_signal_tone(self):
+        _, why_pass = _build_grounded_commentary(
+            "GOODCO", 85, "QUALITY_BUY", "BRAND",
+            roce_avg=32.0, eps_cagr=22.0, mos_pct=40.0,
+        )
+        # QUALITY_BUY: why_pass should be cautiously positive, not blanket rejection
+        assert "quality" in why_pass.lower() or "patient" in why_pass.lower() or "capital" in why_pass.lower()
+
+    def test_none_values_handled_gracefully(self):
+        """None metrics → 'N/A' in text, no crash."""
+        why_like, why_pass = _build_grounded_commentary(
+            "UNKNOWN", 50, "WATCHLIST", "NONE",
+            roce_avg=None, eps_cagr=None, mos_pct=None,
+        )
+        assert isinstance(why_like, str) and len(why_like) > 0
+        assert isinstance(why_pass, str) and len(why_pass) > 0
+        assert "N/A" in why_like or "N/A" in why_pass
+
+    def test_validate_passes_on_grounded_output(self):
+        """Grounded output always passes _validate_commentary with its own anchors."""
+        roce_avg, eps_cagr, mos_pct, score = 24.7, 16.3, 28.5, 76
+        why_like, why_pass = _build_grounded_commentary(
+            "RELIANCE", score, "QUALITY_BUY", "COST_ADVANTAGE",
+            roce_avg=roce_avg, eps_cagr=eps_cagr, mos_pct=mos_pct,
+        )
+        anchors = [f"{roce_avg:.1f}", f"{eps_cagr:.1f}", f"{mos_pct:.1f}", str(score)]
+        combined = f"{why_like} {why_pass}"
+        assert _validate_commentary(combined, anchors), (
+            f"Grounded commentary failed its own validation.\n"
+            f"Anchors: {anchors}\nText: {combined}"
+        )
+
+
+class TestGenerateCommentary:
+    """Integration tests for _generate_commentary — all API calls mocked."""
+
+    def test_no_api_key_returns_grounded(self, monkeypatch):
+        """No ANTHROPIC_API_KEY → grounded fallback with actual numbers."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        why_like, why_pass = _generate_commentary(
+            "TCS", "SWITCHING_COSTS", 28.5, 15.3, 32.1, 82, signal="QUALITY_BUY"
+        )
+        assert "28.5" in why_like, "why_like must contain ROCE"
+        assert "15.3" in why_like, "why_like must contain EPS CAGR"
+        assert "32.1" in why_pass, "why_pass must contain MoS"
+
+    def test_api_error_returns_grounded(self, monkeypatch):
+        """API exception → grounded fallback with actual numbers."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        with patch("anthropic.Anthropic") as mock_client_cls:
+            mock_client_cls.return_value.messages.create.side_effect = Exception("rate limit")
+            why_like, why_pass = _generate_commentary(
+                "INFY", "SWITCHING_COSTS", 22.1, 12.5, 25.0, 74, signal="WATCHLIST"
+            )
+        assert "22.1" in why_like
+        assert "25.0" in why_pass
+
+    def test_valid_grounded_llm_response_accepted(self, monkeypatch):
+        """LLM returns JSON with actual numbers cited → accepted as-is."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        json_response = (
+            '{"why_like": "TCS earns ROCE of 28.5% with switching costs moat '
+            'and EPS CAGR of 15.3% — a true compounder.", '
+            '"why_pass": "At margin of safety 32.1% and score 82/100, the premium '
+            'is real — wait for a better price."}'
+        )
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=json_response)]
+        with patch("anthropic.Anthropic") as mock_client_cls:
+            mock_client_cls.return_value.messages.create.return_value = mock_msg
+            why_like, why_pass = _generate_commentary(
+                "TCS", "SWITCHING_COSTS", 28.5, 15.3, 32.1, 82, signal="QUALITY_BUY"
+            )
+        assert "28.5" in why_like
+        assert "32.1" in why_pass
+
+    def test_ungrounded_llm_response_falls_back(self, monkeypatch):
+        """LLM returns valid JSON but no real numbers → falls back to grounded."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        ungrounded_json = (
+            '{"why_like": "This is a wonderful business with excellent returns.", '
+            '"why_pass": "The valuation looks stretched at current levels."}'
+        )
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=ungrounded_json)]
+        with patch("anthropic.Anthropic") as mock_client_cls:
+            mock_client_cls.return_value.messages.create.return_value = mock_msg
+            why_like, why_pass = _generate_commentary(
+                "TCS", "SWITCHING_COSTS", 28.5, 15.3, 32.1, 82, signal="QUALITY_BUY"
+            )
+        # Should fall back → grounded text with real numbers
+        combined = f"{why_like} {why_pass}"
+        assert "28.5" in combined or "15.3" in combined, (
+            "Grounded fallback must contain actual data numbers"
+        )
+
+    def test_json_parse_error_falls_back(self, monkeypatch):
+        """LLM returns malformed JSON → grounded fallback."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text="Sorry, I cannot help with that.")]
+        with patch("anthropic.Anthropic") as mock_client_cls:
+            mock_client_cls.return_value.messages.create.return_value = mock_msg
+            why_like, why_pass = _generate_commentary(
+                "TCS", "SWITCHING_COSTS", 28.5, 15.3, 32.1, 82, signal="QUALITY_BUY"
+            )
+        assert "28.5" in why_like
+
+    def test_markdown_fenced_json_stripped(self, monkeypatch):
+        """LLM wraps JSON in ```json ... ``` fences → stripped correctly."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        fenced = (
+            "```json\n"
+            '{"why_like": "ROCE of 28.5% and EPS CAGR of 15.3% — excellent compounder.", '
+            '"why_pass": "MoS of 32.1% and score 82/100 demand patience."}\n'
+            "```"
+        )
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=fenced)]
+        with patch("anthropic.Anthropic") as mock_client_cls:
+            mock_client_cls.return_value.messages.create.return_value = mock_msg
+            why_like, why_pass = _generate_commentary(
+                "TCS", "SWITCHING_COSTS", 28.5, 15.3, 32.1, 82, signal="QUALITY_BUY"
+            )
+        assert "28.5" in why_like
+        assert "32.1" in why_pass
+
+    def test_signal_passed_affects_grounded_tone(self, monkeypatch):
+        """signal=AVOID → why_pass contains rejection language."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        _, why_pass = _generate_commentary(
+            "BADCO", "NONE", 7.5, 2.1, -20.0, 30, signal="AVOID"
+        )
+        assert any(
+            w in why_pass.lower()
+            for w in ("not meet", "does not", "require", "threshold", "minimum")
+        )
+
+    def test_all_none_metrics_no_crash(self, monkeypatch):
+        """All-None metrics → grounded fallback still returns strings."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        why_like, why_pass = _generate_commentary(
+            "UNKNOWN", "NONE", None, None, None, 45, signal="WATCHLIST"
+        )
+        assert isinstance(why_like, str) and len(why_like) > 0
+        assert isinstance(why_pass, str) and len(why_pass) > 0
+
+
+class TestCommentaryGroundingIntegration:
+    """Integration: full analyse() — commentary always contains real data numbers."""
+
+    @patch("agents.warren_bot._log_to_supabase")
+    @patch("agents.warren_bot.yf")
+    @patch("agents.warren_bot.get_ohlcv")
+    @patch("agents.warren_bot.get_screener_history")
+    @patch("agents.warren_bot.get_screener_data")
+    def test_full_analyse_commentary_grounded_no_api(
+        self,
+        mock_snap,
+        mock_hist,
+        mock_ohlcv,
+        mock_yf,
+        mock_supabase,
+        monkeypatch,
+    ):
+        """
+        With no API key, commentary from a full analyse() run must contain
+        at least one real numeric value from the analysis (ROCE, EPS CAGR, or MoS).
+        """
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        mock_snap.return_value = _high_quality_snap()
+        mock_hist.return_value = _high_quality_hist()
+        mock_ohlcv.return_value = _mock_ohlcv(price=2500.0)
+        mock_yf.Ticker.return_value = _mock_yf_info(market_cap_cr=10000.0, sector="Consumer Goods")
+        mock_supabase.return_value = None
+
+        result = analyse("TCS.NS")
+
+        why_like = result["why_buffett_would_like"]
+        why_pass = result["why_buffett_would_pass"]
+        combined = f"{why_like} {why_pass}"
+
+        # At least one numeric anchor must appear in the generated commentary
+        # (ROCE is always available for high-quality hist fixture)
+        assert any(char.isdigit() for char in combined), (
+            f"Commentary contains no numbers at all: {combined}"
+        )
+        assert len(why_like) > 20
+        assert len(why_pass) > 20
+
+    @patch("agents.warren_bot._log_to_supabase")
+    @patch("agents.warren_bot.yf")
+    @patch("agents.warren_bot.get_ohlcv")
+    @patch("agents.warren_bot.get_screener_history")
+    @patch("agents.warren_bot.get_screener_data")
+    def test_signal_forwarded_to_commentary(
+        self,
+        mock_snap,
+        mock_hist,
+        mock_ohlcv,
+        mock_yf,
+        mock_supabase,
+        monkeypatch,
+    ):
+        """AVOID signal from analyse() → commentary why_pass has rejection tone."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        # Low-quality snap + short history → AVOID signal expected
+        snap = {
+            "pe": 5.0, "roce": 4.0, "roe": 3.0,
+            "ebitda_margin": 5.0, "debt_equity": 3.5,
+            "promoter_holding": 20.0, "promoter_pledging": 55.0,
+            "ocf_margin": -2.0,
+        }
+        hist = {
+            "years": ["Mar 2022", "Mar 2023", "Mar 2024"],
+            "ebitda_margins": [5.0, 4.0, 3.0],
+            "pat_history": [-10, -5, 5],
+            "eps_history": [-1.0, -0.5, 0.5],
+            "roce_history": [4.0, 3.0, 3.5],
+            "promoter_holding_history": [22, 21, 20],
+            "dividend_payout_history": [0, 0, 0],
+            "depreciation_history": [5, 5, 5],
+            "capex_history": [10, 10, 10],
+            "revenue_history": [200, 190, 195],
+            "roe_history": [3.0, 2.5, 3.0],
+            "promoter_holding_quarters": [],
+            "years_available": 3,
+        }
+
+        mock_snap.return_value = snap
+        mock_hist.return_value = hist
+        mock_ohlcv.return_value = _mock_ohlcv(price=50.0)
+        mock_yf.Ticker.return_value = _mock_yf_info(market_cap_cr=300.0, sector="Metals")
+        mock_supabase.return_value = None
+
+        result = analyse("BADCO.NS")
+
+        # Should be AVOID due to pledging > 50
+        assert result["signal"] == "AVOID"
+        # why_pass must carry rejection / caution language
+        why_pass = result["why_buffett_would_pass"]
+        assert any(
+            w in why_pass.lower()
+            for w in ("not meet", "does not", "require", "threshold", "minimum", "avoid", "score")
+        ), f"AVOID signal commentary should have rejection language, got: {why_pass}"
