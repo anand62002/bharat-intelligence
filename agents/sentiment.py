@@ -30,6 +30,7 @@ if _ROOT not in sys.path:
 
 from data.fetchers import get_rss_headlines, get_nse_fii_dii  # noqa: E402
 from agents.base import DataCompletenessValidator, insufficient_data_result
+from data.insider_signal import get_promoter_signal  # noqa: E402  # P3-C-P5
 
 _dcv = DataCompletenessValidator()
 
@@ -493,6 +494,30 @@ def analyse(symbol: str) -> dict:
 
     breakdown = Counter(s.get("sentiment", "neutral") for s in scored)
 
+    # ── 4b. Insider / promoter signal (P3-C-P5) ──────────────────────────────
+    # Promoter buying = +5 pts (institutional vote of confidence)
+    # Promoter selling = -10 pts (smart money exit — stronger negative signal)
+    # NEUTRAL / snapshot-only = 0 pts (no evidence either way)
+    insider_adjustment = 0
+    insider_data: dict = {}
+    try:
+        insider_data = get_promoter_signal(symbol)
+        ins_signal   = insider_data.get("signal", "NEUTRAL")
+        if ins_signal == "ACCUMULATING":
+            insider_adjustment = +5
+            data_sources.append("insider_promoter_buying")
+            log.debug("sentiment(%s): insider +5 (promoter ACCUMULATING)", symbol)
+        elif ins_signal == "DISTRIBUTING":
+            insider_adjustment = -10
+            data_sources.append("insider_promoter_selling")
+            log.debug("sentiment(%s): insider -10 (promoter DISTRIBUTING)", symbol)
+        # else NEUTRAL: 0 adjustment
+    except Exception as _ins_exc:
+        log.debug("sentiment(%s): insider signal skipped: %s", symbol, _ins_exc)
+
+    if insider_adjustment != 0:
+        avg_score = max(0.0, min(100.0, round(avg_score + insider_adjustment, 1)))
+
     # ── 5. Misinformation detection ───────────────────────────────────────────
     misinfo_flags = _detect_misinformation(unique_headlines)
 
@@ -582,6 +607,10 @@ def analyse(symbol: str) -> dict:
             "fii_net":              fii_net,
             "fii_available":        fii_available,
             "news_only_mode":       not fii_available,
+            # P3-C-P5: insider / promoter signal
+            "insider_signal":       insider_data.get("signal", "NEUTRAL"),
+            "insider_adjustment":   insider_adjustment,
+            "insider_note":         insider_data.get("note", ""),
         },
         "danger_signals": danger_signals,
         "data_sources":   list(dict.fromkeys(data_sources)),  # dedup, preserve order

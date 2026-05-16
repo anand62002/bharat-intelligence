@@ -154,20 +154,45 @@ def _heuristic_earnings_date(symbol: str) -> tuple[date | None, str]:
         return None, ""
 
 
+def _trendlyne_earnings_date(symbol: str) -> tuple[date | None, bool]:
+    """
+    Try Trendlyne equity page for board meeting / results date.
+    Returns (date, confirmed) or (None, False) on failure.
+
+    Requires TRENDLYNE_SESSION env var to be set.
+    """
+    import os
+    if not os.getenv("TRENDLYNE_SESSION"):
+        return None, False
+    try:
+        from data.trendlyne_fetcher import get_upcoming_earnings
+        result = get_upcoming_earnings(symbol)
+        if result and result.get("date"):
+            import datetime as _dt
+            d = _dt.date.fromisoformat(result["date"])
+            return d, result.get("confirmed", False)
+    except Exception as exc:
+        log.debug("Trendlyne earnings date failed for %s: %s", symbol, exc)
+    return None, False
+
+
 def fetch_upcoming_earnings(symbols: list[str], days_ahead: int = 30) -> list[dict]:
     """
     Fetch upcoming earnings dates for a list of symbols.
+    Priority: yfinance → Trendlyne board meeting → heuristic estimate.
     Returns list of {symbol, earnings_date, quarter, source, confirmed}.
     """
     results = []
+    cutoff  = date.today() + timedelta(days=days_ahead)
+
     for symbol in symbols:
         plain = symbol.replace(".NS", "").replace(".BO", "").upper()
 
-        # 1. yfinance
+        # 1. yfinance (most reliable — direct calendar data)
         yf_date = _yfinance_earnings_date(plain)
-        if yf_date and yf_date <= date.today() + timedelta(days=days_ahead):
+        if yf_date and yf_date <= cutoff:
             results.append({
-                "symbol":       plain,
+                "symbol":        plain,
                 "earnings_date": str(yf_date),
                 "quarter":       _quarter_label(yf_date),
                 "source":        "yfinance",
@@ -175,11 +200,23 @@ def fetch_upcoming_earnings(symbols: list[str], days_ahead: int = 30) -> list[di
             })
             continue
 
-        # 2. Heuristic
-        est_date, quarter = _heuristic_earnings_date(plain)
-        if est_date and est_date <= date.today() + timedelta(days=days_ahead):
+        # 1.5. Trendlyne board meeting / results date (P3-C-P2)
+        tl_date, tl_confirmed = _trendlyne_earnings_date(plain)
+        if tl_date and tl_date <= cutoff:
             results.append({
-                "symbol":       plain,
+                "symbol":        plain,
+                "earnings_date": str(tl_date),
+                "quarter":       _quarter_label(tl_date),
+                "source":        "trendlyne_board_meeting" if tl_confirmed else "trendlyne_result_date",
+                "confirmed":     tl_confirmed,
+            })
+            continue
+
+        # 2. Heuristic (fallback — 45 days after last quarter end)
+        est_date, quarter = _heuristic_earnings_date(plain)
+        if est_date and est_date <= cutoff:
+            results.append({
+                "symbol":        plain,
                 "earnings_date": str(est_date),
                 "quarter":       quarter,
                 "source":        "heuristic_estimate",

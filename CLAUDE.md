@@ -82,6 +82,16 @@ Stock analysis/
 │   │                           # consensus_rating, upside_to_consensus, eps_current_yr, eps_next_yr
 │   │                           # interpret_analyst_targets(targets, our_upside_pct) → signal+summary
 │   │                           # Per-symbol 6h cache; auto-cookie-refresh via TRENDLYNE_USER+PASS
+│   ├── trendlyne_fetcher.py    # Trendlyne equity page scraper — tier-2 fallback for screener.in (P3-C-P1)
+│   │                           # get_trendlyne_fundamentals(symbol) → same schema as get_screener_data()
+│   │                           # get_trendlyne_dvm(symbol) → {durability,valuation,momentum,composite_dvm}
+│   │                           # get_upcoming_earnings(symbol) → {date,source,confirmed,raw_text} (P3-C-P2)
+│   │                           # Shares page cache (6h TTL) across all three functions per symbol
+│   ├── insider_signal.py       # Promoter/insider holding trend signal (P3-C-P5/P3-C-P6)
+│   │                           # get_promoter_signal(symbol) → {signal,current_holding,change_1y,change_3y,source,note}
+│   │                           # signal: ACCUMULATING | DISTRIBUTING | NEUTRAL
+│   │                           # Data: screener_history (trend) → screener_snapshot → trendlyne_snapshot
+│   │                           # Used by: sentiment.py (+5/-10 pts) + institutional.py (+8 pts ACCUMULATING)
 │   ├── forward_estimates.py    # yfinance forward EPS/PE estimates (24h Supabase cache)
 │   └── breeze_auth.py          # ICICI Breeze Connect — DEPRECATED (P4-D: scheduled for removal)
 │   #                             Superseded by trendlyne_fno_fetcher. Remove in Phase 4.
@@ -472,6 +482,10 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (P3-C-P5/P6) | P3-C-P5+P6: Promoter/insider signal — data/insider_signal.py shared module; sentiment.py +5/-10 pts; institutional.py +8 pts ACCUMULATING; 67 new tests |
+| (P3-C-P2) | P3-C-P2: Earnings calendar enhanced — trendlyne_fetcher.get_upcoming_earnings(); earnings_fetcher.py Trendlyne tier-1.5; worker.py expanded to portfolio+discovery symbols |
+| (P3-C-P3) | P3-C-P3: DVM Filter 6 in discovery pre-screen — opt-in via TRENDLYNE_SESSION; 10 tests |
+| (P3-C-P1) | P3-C-P1: Trendlyne fundamentals as screener.in tier-2 fallback; data/trendlyne_fetcher.py |
 | (P3-A)   | P3-A: Position sizing — agents/position_sizer.py, 4-tier model, wired into orchestrator + discovery + API + dashboard (45 tests) |
 | (fix)    | fix: restore FII live data (NSE schema change + brotli encoding) + sentiment news-only fallback |
 | (P2-C)   | P2-C: Portfolio concentration alerts — SECTOR_CONCENTRATION + MACRO_CLUSTER (54 tests) |
@@ -562,8 +576,8 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 1 (P1)** ✅: Historical backtest framework, options paid feed, GPT-4o 3rd judge, score calibration
 - **Bug Fix Session** ✅: yfinance 1.2.0 fix, discovery screener 0-pass bugs, FII stale zeros, macro news, embeddings, partial sell, symbol aliases
 - **Phase 2 (P2)** ✅: P2-A (yfinance fallback), P2-B (RAG auto-refresh), P2-C (concentration alerts), P2-D (superseded by P3-C)
-- **Phase 3 (P3)** ← CURRENT: P3-A ✅ (position sizing), P3-B ✅ (correlation alerts), P3-C (Trendlyne)
-- **Phase 4 (P4)**: Commentary grounding, symbol cache persistence, governance numerical check
+- **Phase 3 (P3)** ✅: P3-A ✅ (position sizing), P3-B ✅ (correlation alerts), P3-C ✅ (Trendlyne — all pillars: P1 fundamentals fallback, P2 earnings calendar, P3 DVM filter, P5 insider sentiment, P6 insider institutional)
+- **Phase 4 (P4)** ← CURRENT: Commentary grounding, symbol cache persistence, governance numerical check
 - **Phase 5 (P5)**: Robust forward paper portfolio tracker + attribution analysis
 - **Phase 6 (P6)**: Dashboard performance tab (hit rate, alpha, backtest results)
 

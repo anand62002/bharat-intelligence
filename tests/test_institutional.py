@@ -19,9 +19,11 @@ from agents.institutional import (
     _BLOCK_DEAL_MIN_CR,
     _FII_DANGER_5D_CR,
     _FII_OPPTY_10D_CR,
+    _INSIDER_ACCUM_PTS,
     _build_flow_history,
     _consecutive_direction,
     _detect_signals,
+    _get_insider_signal,
     _is_mf_client,
     _net_totals,
     _parse_bulk_csv,
@@ -66,6 +68,21 @@ def _deal(side: str = "BUY", value_cr: float = 100.0, is_mf: bool = False) -> di
     }
 
 
+_NEUTRAL_INSIDER = (0, "Insider NEUTRAL: No trend data", {})
+_ACCUM_INSIDER   = (
+    _INSIDER_ACCUM_PTS,
+    "Insider ACCUMULATING (+8pts): Promoter buying — holding 52.0%, Δ1y ↑2.0pp",
+    {"signal": "ACCUMULATING", "current_holding": 52.0, "change_1y": 2.0,
+     "change_3y": 4.0, "source": "screener_history", "note": "Promoter buying — holding 52.0%"},
+)
+_DISTRIB_INSIDER = (
+    0,
+    "Insider DISTRIBUTING (noted, no additional penalty): Promoter selling",
+    {"signal": "DISTRIBUTING", "current_holding": 45.0, "change_1y": -3.0,
+     "change_3y": -6.0, "source": "screener_history", "note": "Promoter selling"},
+)
+
+
 @pytest.fixture(autouse=True)
 def isolate():
     """Suppress all external calls in every test."""
@@ -73,7 +90,8 @@ def isolate():
          patch("agents.institutional._store_flow"), \
          patch("agents.institutional._fetch_historical_flows", return_value=[]), \
          patch("agents.institutional._fetch_bulk_deals", return_value=[]), \
-         patch("agents.institutional.get_nse_fii_dii", return_value=None):
+         patch("agents.institutional.get_nse_fii_dii", return_value=None), \
+         patch("agents.institutional._get_insider_signal", return_value=_NEUTRAL_INSIDER):
         yield
 
 
@@ -421,6 +439,7 @@ def _run_analyse(
     deals: list[dict] | None = None,
     promoter_pledging: float | None = None,
     symbol: str = "RELIANCE",
+    insider=None,   # tuple (pts, note, raw) or None → uses autouse fixture default
 ):
     live_data = (
         {"date": "2024-01-15", "fii_net": live_fii, "dii_net": live_dii}
@@ -429,11 +448,19 @@ def _run_analyse(
     hist = history or []
     bl   = deals or []
 
+    ctx = {
+        "agents.institutional.get_nse_fii_dii":            live_data,
+        "agents.institutional._fetch_historical_flows":     hist,
+        "agents.institutional._fetch_bulk_deals":           bl,
+    }
+    insider_val = insider if insider is not None else _NEUTRAL_INSIDER
+
     with patch("agents.institutional.get_nse_fii_dii", return_value=live_data), \
          patch("agents.institutional._fetch_historical_flows", return_value=hist), \
          patch("agents.institutional._fetch_bulk_deals", return_value=bl), \
          patch("agents.institutional._store_flow"), \
-         patch("agents.institutional._write_agent_performance"):
+         patch("agents.institutional._write_agent_performance"), \
+         patch("agents.institutional._get_insider_signal", return_value=insider_val):
         return analyse(symbol, promoter_pledging=promoter_pledging)
 
 
@@ -660,3 +687,94 @@ class TestAnalyseEdgeCases:
     def test_zero_fii_dii_neutral_score(self):
         result = _run_analyse(live_fii=0.0, live_dii=0.0)
         assert result["signal"] in ("HOLD", "BUY", "AVOID", "NEUTRAL")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# P3-C-P6: _get_insider_signal unit tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestGetInsiderSignal:
+    def test_accumulating_returns_positive_pts(self):
+        history = {"promoter_holding": [48.0, 49.0, 50.0, 51.0, 52.0]}
+        with patch("data.insider_signal.get_screener_history", return_value=history), \
+             patch("data.insider_signal.get_screener_data", return_value=None):
+            pts, note, raw = _get_insider_signal("RELIANCE")
+        assert pts == _INSIDER_ACCUM_PTS
+        assert raw["signal"] == "ACCUMULATING"
+        assert "ACCUMULATING" in note
+
+    def test_distributing_returns_zero_pts_with_note(self):
+        """Distribution is noted but not double-penalised — returns 0 pts."""
+        history = {"promoter_holding": [55.0, 54.0, 52.0, 50.0, 47.0]}
+        with patch("data.insider_signal.get_screener_history", return_value=history), \
+             patch("data.insider_signal.get_screener_data", return_value=None):
+            pts, note, raw = _get_insider_signal("RELIANCE")
+        assert pts == 0
+        assert raw["signal"] == "DISTRIBUTING"
+        assert "DISTRIBUTING" in note
+
+    def test_neutral_returns_zero_pts(self):
+        history = {"promoter_holding": [50.0, 50.3, 50.1, 50.5, 50.4]}
+        with patch("data.insider_signal.get_screener_history", return_value=history), \
+             patch("data.insider_signal.get_screener_data", return_value=None):
+            pts, note, raw = _get_insider_signal("RELIANCE")
+        assert pts == 0
+        assert raw["signal"] == "NEUTRAL"
+
+    def test_failure_returns_zero_no_crash(self):
+        with patch("data.insider_signal.get_screener_history", side_effect=Exception("network error")), \
+             patch("data.insider_signal.get_screener_data", side_effect=Exception("network error")):
+            pts, note, raw = _get_insider_signal("RELIANCE")
+        assert pts == 0
+        assert isinstance(note, str)
+
+    def test_insider_pts_constant_is_8(self):
+        assert _INSIDER_ACCUM_PTS == 8
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# P3-C-P6: insider signal integration in analyse()
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestInsiderSignalIntegration:
+    def test_accumulating_adds_pts_to_score(self):
+        """ACCUMULATING insider signal raises score vs NEUTRAL baseline."""
+        neutral_result = _run_analyse(live_fii=100.0, live_dii=50.0, insider=_NEUTRAL_INSIDER)
+        accum_result   = _run_analyse(live_fii=100.0, live_dii=50.0, insider=_ACCUM_INSIDER)
+        assert accum_result["score"] >= neutral_result["score"]
+
+    def test_distributing_does_not_subtract_score(self):
+        """DISTRIBUTING insider adds 0 pts — no double-penalty over FII signals."""
+        neutral_result = _run_analyse(live_fii=100.0, live_dii=50.0, insider=_NEUTRAL_INSIDER)
+        distrib_result = _run_analyse(live_fii=100.0, live_dii=50.0, insider=_DISTRIB_INSIDER)
+        assert distrib_result["score"] == neutral_result["score"]
+
+    def test_detail_contains_insider_dict(self):
+        """Result detail must have an 'insider' sub-dict (P3-C-P6)."""
+        result = _run_analyse()
+        assert "insider" in result["detail"]
+        insider = result["detail"]["insider"]
+        assert "signal" in insider
+        assert "score_adjustment" in insider
+        assert "current_holding" in insider
+        assert "change_1y" in insider
+        assert "source" in insider
+        assert "note" in insider
+
+    def test_accumulating_adds_data_source(self):
+        """ACCUMULATING insider should appear in data_sources."""
+        result = _run_analyse(live_fii=100.0, live_dii=50.0, insider=_ACCUM_INSIDER)
+        assert "insider_promoter_signal" in result["data_sources"]
+
+    def test_neutral_insider_no_extra_data_source(self):
+        """NEUTRAL insider should NOT add insider_promoter_signal to data_sources."""
+        result = _run_analyse(live_fii=100.0, live_dii=50.0, insider=_NEUTRAL_INSIDER)
+        assert "insider_promoter_signal" not in result["data_sources"]
+
+    def test_score_within_0_100_with_insider(self):
+        """Score must remain 0–100 regardless of insider signal."""
+        for ins in [_NEUTRAL_INSIDER, _ACCUM_INSIDER, _DISTRIB_INSIDER]:
+            r = _run_analyse(live_fii=600.0, live_dii=400.0,
+                             history=_rows([500] * 4, [300] * 4),
+                             deals=[_deal("BUY", 2000.0)], insider=ins)
+            assert 0 <= r["score"] <= 100

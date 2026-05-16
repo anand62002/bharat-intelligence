@@ -576,6 +576,136 @@ def get_trendlyne_dvm(symbol: str) -> Optional[dict]:
     return dvm
 
 
+def get_upcoming_earnings(symbol: str) -> Optional[dict]:
+    """
+    Parse board meeting / results date from Trendlyne equity page.
+
+    Trendlyne shows upcoming board meeting dates and result dates in sections
+    labelled "Board Meeting" or "Result Date" (HTML text scan + regex).
+
+    Returns:
+        {
+            "date":      str   — ISO date string "YYYY-MM-DD"
+            "source":    str   — "trendlyne_board_meeting" | "trendlyne_result_date"
+            "confirmed": bool  — True if an explicit board meeting date was found
+            "raw_text":  str   — raw date string from page (for debugging)
+        }
+    Returns None if no upcoming date was found or page could not be fetched.
+    """
+    import re as _re
+    from datetime import date as _date, datetime as _datetime
+
+    entry = _fetch_and_cache(symbol)
+    if entry is None:
+        return None
+
+    html  = entry.get("_html", "")
+    soup  = BeautifulSoup(html, "html.parser")
+    today = _date.today()
+
+    # ── Month name → number (handles both Jan and January) ───────────────────
+    _MONTHS = {
+        "jan": 1,  "feb": 2,  "mar": 3,  "apr": 4,
+        "may": 5,  "jun": 6,  "jul": 7,  "aug": 8,
+        "sep": 9,  "oct": 10, "nov": 11, "dec": 12,
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "june": 6, "july": 7, "august": 8, "september": 9,
+        "october": 10, "november": 11, "december": 12,
+    }
+
+    def _parse_date_text(text: str) -> Optional[_date]:
+        """Try multiple date formats: DD-Mon-YYYY, DD/MM/YYYY, YYYY-MM-DD, DD Mon YYYY."""
+        text = text.strip()
+        # ISO
+        m = _re.match(r"(\d{4})-(\d{2})-(\d{2})", text)
+        if m:
+            try:
+                return _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                pass
+        # DD-Mon-YYYY or DD Mon YYYY
+        m = _re.match(r"(\d{1,2})[-\s/]([A-Za-z]+)[-\s/](\d{4})", text)
+        if m:
+            mon = _MONTHS.get(m.group(2).lower()[:3])
+            if mon:
+                try:
+                    return _date(int(m.group(3)), mon, int(m.group(1)))
+                except ValueError:
+                    pass
+        # DD/MM/YYYY
+        m = _re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
+        if m:
+            try:
+                return _date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            except ValueError:
+                pass
+        return None
+
+    # ── Scan for board meeting / result date labels ───────────────────────────
+    _BOARD_LABELS = _re.compile(
+        r"board\s*meeting|result\s*date|results?\s*on|q[1-4]\s*result",
+        _re.IGNORECASE,
+    )
+    _DATE_PATTERN  = _re.compile(
+        r"\b(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})\b"
+    )
+
+    best_date: Optional[_date] = None
+    best_source = "trendlyne_result_date"
+    best_raw    = ""
+
+    # Strategy 1: find label elements, then look for adjacent dates
+    for el in soup.find_all(string=_BOARD_LABELS):
+        # Search surrounding text (parent + siblings)
+        parent = el.parent if el.parent else None
+        if parent is None:
+            continue
+        search_text = parent.get_text(" ", strip=True)
+        # Expand to grandparent if not enough text
+        if len(search_text) < 10 and parent.parent:
+            search_text = parent.parent.get_text(" ", strip=True)
+
+        for m in _DATE_PATTERN.finditer(search_text):
+            d = _parse_date_text(m.group(1))
+            if d and d >= today:
+                is_board = bool(_re.search(r"board\s*meeting", search_text, _re.IGNORECASE))
+                if best_date is None or d < best_date:
+                    best_date   = d
+                    best_source = "trendlyne_board_meeting" if is_board else "trendlyne_result_date"
+                    best_raw    = m.group(1)
+
+    # Strategy 2: raw HTML scan for "Board Meeting" near a date string
+    if best_date is None:
+        for m in _re.finditer(
+            r"(?:Board\s*Meeting|Result\s*Date|Results?\s*On)[^<]{0,80}"
+            r"(\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})",
+            html, _re.IGNORECASE,
+        ):
+            d = _parse_date_text(m.group(1))
+            if d and d >= today:
+                context   = m.group(0)
+                is_board  = bool(_re.search(r"board\s*meeting", context, _re.IGNORECASE))
+                if best_date is None or d < best_date:
+                    best_date   = d
+                    best_source = "trendlyne_board_meeting" if is_board else "trendlyne_result_date"
+                    best_raw    = m.group(1)
+
+    if best_date is None:
+        logger.debug("get_upcoming_earnings(%s): no upcoming date found on Trendlyne page", symbol)
+        return None
+
+    logger.info(
+        "get_upcoming_earnings(%s): found %s on %s (raw=%s)",
+        symbol, best_source, best_date, best_raw,
+    )
+    return {
+        "date":      str(best_date),
+        "source":    best_source,
+        "confirmed": best_source == "trendlyne_board_meeting",
+        "raw_text":  best_raw,
+    }
+
+
 def clear_cache(symbol: Optional[str] = None) -> None:
     """
     Invalidate the page cache.

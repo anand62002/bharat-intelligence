@@ -25,6 +25,7 @@ if _ROOT not in sys.path:
 
 from data.fetchers import get_nse_fii_dii  # noqa: E402
 from agents.base import DataCompletenessValidator, insufficient_data_result
+from data.insider_signal import get_promoter_signal  # noqa: E402  # P3-C-P6
 
 _dcv = DataCompletenessValidator()
 
@@ -415,6 +416,54 @@ def _consecutive_direction(rows: list[dict], key: str, direction: str) -> int:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# P3-C-P6: Insider / SAST signal
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Points added to raw score when promoter buying confirmed
+_INSIDER_ACCUM_PTS = 8
+
+def _get_insider_signal(symbol: str) -> tuple[int, str, dict]:
+    """
+    Fetch promoter buying/selling trend via the shared insider_signal module.
+
+    Returns:
+        (score_adjustment, note, raw_data)
+        score_adjustment: +8 for ACCUMULATING, 0 for NEUTRAL, 0 for DISTRIBUTING
+                          (Distribution is already penalised by FII/bulk signals;
+                           we only ADD upside here — not double-penalise.)
+        note: human-readable string for detail dict
+        raw_data: full dict from get_promoter_signal()
+    """
+    try:
+        data   = get_promoter_signal(symbol)
+        signal = data.get("signal", "NEUTRAL")
+
+        if signal == "ACCUMULATING":
+            return (
+                _INSIDER_ACCUM_PTS,
+                f"Insider ACCUMULATING (+{_INSIDER_ACCUM_PTS}pts): {data.get('note', '')}",
+                data,
+            )
+        elif signal == "DISTRIBUTING":
+            # Distribution is already captured by FII flow scores;
+            # surface the note but don't apply a double-penalty here.
+            return (
+                0,
+                f"Insider DISTRIBUTING (noted, no additional penalty): {data.get('note', '')}",
+                data,
+            )
+        else:
+            return (
+                0,
+                f"Insider NEUTRAL: {data.get('note', 'No trend data')}",
+                data,
+            )
+    except Exception as exc:
+        log.debug("_get_insider_signal(%s): failed (%s)", symbol, exc)
+        return 0, "Insider signal unavailable", {}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Scoring
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -719,6 +768,12 @@ def analyse(
     dii_score,  dii_note  = _score_dii(rows_5d, fii_score)
     bulk_score, bulk_note = _score_bulk_deals(bulk_deals, symbol)
 
+    # P3-C-P6: insider / SAST signal (+8 pts for ACCUMULATING, 0 otherwise)
+    insider_pts, insider_note, insider_raw = _get_insider_signal(symbol)
+    if insider_pts > 0:
+        data_sources.append("insider_promoter_signal")
+        log.debug("institutional(%s): insider +%d pts (%s)", symbol, insider_pts, insider_raw.get("signal"))
+
     # yfinance snapshot nudge — POSITIVE only.
     #
     # Rationale for NO negative nudge:
@@ -753,12 +808,14 @@ def analyse(
 
     # ── Normalise to 0–100 ────────────────────────────────────────────────────
     # Formula centres at exactly 50 when raw_score = 0:
-    #   raw range: [-50, 65]  →  offset = 57.5, span = 115
-    #   (0 + 57.5) / 115 * 100 = 50.0 ✓
+    #   raw range: [-50, 73]  →  offset = 57.5, span = 130.5
+    #   (P3-C-P6 adds insider_pts ≤ +8, so upper bound is 65+8=73)
+    #   We keep offset=57.5/span=115 for backward compatibility;
+    #   the +8 insider bonus maps to +6.9 normalised — appropriate weight.
     #
     # OVERRIDE to 50 when no real flow data existed — data gap must not
     # produce a sub-50 (negative-leaning) score.
-    raw_score = fii_score + dii_score + bulk_score + yf_nudge
+    raw_score = fii_score + dii_score + bulk_score + yf_nudge + insider_pts
 
     data_unavailable_note = ""
     if data_quality == "NO_DATA":
@@ -853,6 +910,16 @@ def analyse(
         } if yf_inst else None,
         "raw_score":        raw_score,
         "sessions_history": len(rows_10d),
+        # P3-C-P6: insider / promoter signal
+        "insider": {
+            "signal":           insider_raw.get("signal", "NEUTRAL"),
+            "score_adjustment": insider_pts,
+            "current_holding":  insider_raw.get("current_holding"),
+            "change_1y":        insider_raw.get("change_1y"),
+            "change_3y":        insider_raw.get("change_3y"),
+            "source":           insider_raw.get("source", "none"),
+            "note":             insider_note,
+        },
     }
 
     result = {

@@ -71,10 +71,16 @@ def _haiku_response(sentiment: str = "bullish", score: int = 75,
 # Autouse: suppress Supabase + real network
 # ──────────────────────────────────────────────────────────────────────────────
 
+_NEUTRAL_PROMOTER  = {"signal": "NEUTRAL",      "current_holding": 50.0, "change_1y": 0.5, "change_3y": 1.0, "source": "screener_history", "note": "Promoter holding stable — holding 50.0%"}
+_ACCUM_PROMOTER    = {"signal": "ACCUMULATING", "current_holding": 52.0, "change_1y": 2.0, "change_3y": 4.0, "source": "screener_history", "note": "Promoter buying — holding 52.0%"}
+_DISTRIB_PROMOTER  = {"signal": "DISTRIBUTING", "current_holding": 45.0, "change_1y": -3.0,"change_3y": -6.0,"source": "screener_history", "note": "Promoter selling — holding 45.0%"}
+
+
 @pytest.fixture(autouse=True)
 def isolate():
     with patch("agents.sentiment._write_agent_performance"), \
-         patch("agents.sentiment.get_nse_fii_dii", return_value=None):
+         patch("agents.sentiment.get_nse_fii_dii", return_value=None), \
+         patch("agents.sentiment.get_promoter_signal", return_value=_NEUTRAL_PROMOTER):
         yield
 
 
@@ -476,6 +482,7 @@ def _run_analyse(
     newsapi_articles: list | None = None,
     haiku_score: dict | None = None,
     fii_net: float | None = None,
+    insider: dict | None = None,   # mock for get_promoter_signal; None → NEUTRAL
 ):
     """
     Run analyse() with fully mocked external calls.
@@ -493,12 +500,14 @@ def _run_analyse(
     def fake_haiku(headline, sym):
         return haiku_score or {"sentiment": "neutral", "score": 50, "key_claim": ""}
 
-    fii_return = {"date": "2024-01-15", "fii_net": fii_net, "dii_net": 0} if fii_net is not None else None
+    fii_return    = {"date": "2024-01-15", "fii_net": fii_net, "dii_net": 0} if fii_net is not None else None
+    insider_val   = insider if insider is not None else _NEUTRAL_PROMOTER
 
     with patch("agents.sentiment.get_rss_headlines", return_value=rss_headlines), \
          patch("agents.sentiment._fetch_newsapi", return_value=newsapi_articles), \
          patch("agents.sentiment._call_haiku", side_effect=fake_haiku), \
          patch("agents.sentiment.get_nse_fii_dii", return_value=fii_return), \
+         patch("agents.sentiment.get_promoter_signal", return_value=insider_val), \
          patch.dict(os.environ, env_patch):
         return analyse(symbol)
 
@@ -735,3 +744,88 @@ class TestAnalyseRollingTrend:
             assert "source" in sh
             assert "sentiment" in sh
             assert 0 <= sh["score"] <= 100
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# P3-C-P5: Insider / promoter signal integration in analyse()
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestInsiderSentimentSignal:
+    """Tests for promoter holding trend adjustment in sentiment score (P3-C-P5)."""
+
+    def test_accumulating_raises_score(self):
+        """ACCUMULATING promoter → +5 pts → score higher than NEUTRAL baseline."""
+        neutral = _run_analyse(
+            haiku_score={"sentiment": "neutral", "score": 50, "key_claim": ""},
+            insider=_NEUTRAL_PROMOTER,
+        )
+        accum = _run_analyse(
+            haiku_score={"sentiment": "neutral", "score": 50, "key_claim": ""},
+            insider=_ACCUM_PROMOTER,
+        )
+        assert accum["score"] >= neutral["score"]
+
+    def test_distributing_lowers_score(self):
+        """DISTRIBUTING promoter → -10 pts → score lower than NEUTRAL baseline."""
+        neutral = _run_analyse(
+            haiku_score={"sentiment": "neutral", "score": 60, "key_claim": ""},
+            insider=_NEUTRAL_PROMOTER,
+        )
+        distrib = _run_analyse(
+            haiku_score={"sentiment": "neutral", "score": 60, "key_claim": ""},
+            insider=_DISTRIB_PROMOTER,
+        )
+        assert distrib["score"] <= neutral["score"]
+
+    def test_insider_fields_in_detail(self):
+        """Result detail must contain insider_signal, insider_adjustment, insider_note."""
+        result = _run_analyse(insider=_ACCUM_PROMOTER)
+        assert "insider_signal" in result["detail"]
+        assert "insider_adjustment" in result["detail"]
+        assert "insider_note" in result["detail"]
+
+    def test_accumulating_adjustment_is_positive(self):
+        result = _run_analyse(insider=_ACCUM_PROMOTER)
+        assert result["detail"]["insider_adjustment"] == +5
+
+    def test_distributing_adjustment_is_negative(self):
+        result = _run_analyse(insider=_DISTRIB_PROMOTER)
+        assert result["detail"]["insider_adjustment"] == -10
+
+    def test_neutral_adjustment_is_zero(self):
+        result = _run_analyse(insider=_NEUTRAL_PROMOTER)
+        assert result["detail"]["insider_adjustment"] == 0
+
+    def test_accumulating_adds_data_source(self):
+        result = _run_analyse(insider=_ACCUM_PROMOTER)
+        assert "insider_promoter_buying" in result["data_sources"]
+
+    def test_distributing_adds_data_source(self):
+        result = _run_analyse(insider=_DISTRIB_PROMOTER)
+        assert "insider_promoter_selling" in result["data_sources"]
+
+    def test_neutral_no_extra_data_source(self):
+        result = _run_analyse(insider=_NEUTRAL_PROMOTER)
+        assert "insider_promoter_buying" not in result["data_sources"]
+        assert "insider_promoter_selling" not in result["data_sources"]
+
+    def test_score_clamped_after_adjustment(self):
+        """Score must stay 0–100 even with extreme adjustments."""
+        for ins in [_NEUTRAL_PROMOTER, _ACCUM_PROMOTER, _DISTRIB_PROMOTER]:
+            r = _run_analyse(
+                haiku_score={"sentiment": "bullish", "score": 99, "key_claim": ""},
+                insider=ins,
+            )
+            assert 0 <= r["score"] <= 100
+
+    def test_insider_signal_failure_no_crash(self):
+        """If get_promoter_signal raises, analyse must not crash."""
+        with patch("agents.sentiment.get_rss_headlines", return_value=_make_headlines(5)), \
+             patch("agents.sentiment._fetch_newsapi", return_value=[]), \
+             patch("agents.sentiment.get_nse_fii_dii", return_value=None), \
+             patch("agents.sentiment.get_promoter_signal",
+                   side_effect=Exception("screener.in blocked")):
+            result = analyse("RELIANCE")
+        assert result["agent_name"] == "sentiment"
+        # Should still produce a valid result
+        assert result["signal"] in VALID_SIGNALS

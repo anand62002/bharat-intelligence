@@ -102,23 +102,75 @@ def job_research_agent() -> None:
 
 
 def job_earnings_calendar() -> None:
-    """08:00 IST — refresh earnings calendar for portfolio symbols."""
+    """08:00 IST — refresh earnings calendar for portfolio + recently-screened symbols (P3-C-P2)."""
     log.info("-" * 50)
     log.info("  JOB START: Earnings Calendar (08:00 IST)")
     log.info("-" * 50)
     try:
-        from supabase import create_client
         import os
-        client = create_client(os.getenv("SUPABASE_URL",""), os.getenv("SUPABASE_SERVICE_KEY",""))
-        rows   = client.table("portfolio_holdings").select("symbol").eq("status","OPEN").execute().data or []
-        symbols = [r["symbol"] for r in rows]
-        if not symbols:
-            log.info("No open holdings — skipping earnings calendar refresh")
+        from supabase import create_client
+        client = create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_KEY", ""))
+
+        # --- Source 1: Open portfolio holdings ---
+        portfolio_rows = (
+            client.table("portfolio_holdings")
+            .select("symbol")
+            .eq("status", "OPEN")
+            .execute()
+            .data or []
+        )
+        portfolio_symbols = {r["symbol"] for r in portfolio_rows}
+
+        # --- Source 2: Recently-screened symbols (last 3 days of discovery_runs) ---
+        # P3-C-P2: expand coverage beyond portfolio to symbols the screener just touched.
+        # We include symbols that 'passed' the pre-screen (higher quality filter) over
+        # the last 3 days so the earnings guard can block a stock before it enters
+        # a full agent pipeline run the next day.
+        discovery_symbols: set[str] = set()
+        try:
+            from datetime import date, timedelta
+            cutoff = str(date.today() - timedelta(days=3))
+            disc_rows = (
+                client.table("discovery_runs")
+                .select("passed_symbols")
+                .gte("run_date", cutoff)
+                .execute()
+                .data or []
+            )
+            for row in disc_rows:
+                passed = row.get("passed_symbols") or []
+                if isinstance(passed, list):
+                    discovery_symbols.update(s for s in passed if isinstance(s, str))
+            if discovery_symbols:
+                log.info(
+                    "Earnings calendar: found %d recently-screened symbols from last 3 days",
+                    len(discovery_symbols),
+                )
+        except Exception as exc:
+            log.warning("Could not fetch recently-screened symbols: %s", exc)
+
+        # Merge; portfolio holdings take priority (already in set)
+        all_symbols = sorted(portfolio_symbols | discovery_symbols)
+        if not all_symbols:
+            log.info("No symbols to refresh — skipping earnings calendar")
             return
+
+        log.info(
+            "Earnings calendar refresh: %d total symbols (%d portfolio + %d discovery)",
+            len(all_symbols),
+            len(portfolio_symbols),
+            len(discovery_symbols - portfolio_symbols),
+        )
+
         from data.earnings_fetcher import fetch_upcoming_earnings, upsert_earnings_calendar
-        records = fetch_upcoming_earnings(symbols, days_ahead=30)
+        # Use wider look-ahead for screened symbols (60d) so upcoming earnings
+        # are available even if the stock is processed next cycle week
+        records = fetch_upcoming_earnings(all_symbols, days_ahead=60)
         n = upsert_earnings_calendar(records)
-        log.info("Earnings calendar refresh done — %d records upserted for %d symbols", n, len(symbols))
+        log.info(
+            "Earnings calendar done — %d records upserted for %d symbols",
+            n, len(all_symbols),
+        )
     except Exception as exc:
         log.error("Earnings calendar job failed: %s", exc, exc_info=True)
 

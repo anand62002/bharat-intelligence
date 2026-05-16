@@ -40,10 +40,10 @@
 | P3-B | Correlation-aware portfolio alerts | Phase 3 | ✅ **DONE** | 2026-05-14 |
 | P3-C-BE | Trendlyne analyst targets scraper — consensus target, buy/hold/sell dist, EPS (Pillar B+E) | Phase 3 | ✅ **DONE** | 2026-05-15 |
 | P3-C-P1 | Trendlyne Pillar 1 — fundamentals 10-yr series (screener.in fallback tier-2) | Phase 3 | ✅ **DONE** | 2026-05-16 |
-| P3-C-P2 | Trendlyne Pillar 2 — corporate actions → earnings_calendar daily refresh | Phase 3 | ⬜ TODO | — |
+| P3-C-P2 | Trendlyne Pillar 2 — corporate actions → earnings_calendar daily refresh | Phase 3 | ✅ **DONE** | 2026-05-16 |
 | P3-C-P3 | Trendlyne Pillar 3 — DVM scores in discovery pre-screen | Phase 3 | ✅ **DONE** | 2026-05-16 |
-| P3-C-P5 | Trendlyne Pillar 5 — BSE filings + insider sentiment in sentiment agent | Phase 3 | ⬜ TODO | — |
-| P3-C-P6 | Trendlyne Pillar 6 — Insider/SAST signal in institutional agent | Phase 3 | ⬜ TODO | — |
+| P3-C-P5 | Trendlyne Pillar 5 — BSE filings + insider sentiment in sentiment agent | Phase 3 | ✅ **DONE** | 2026-05-16 |
+| P3-C-P6 | Trendlyne Pillar 6 — Insider/SAST signal in institutional agent | Phase 3 | ✅ **DONE** | 2026-05-16 |
 | P3-D | Screener.in consolidated preference + Sales+/quarterly fix | Phase 3 | ✅ **DONE** | 2026-05-15 |
 | P3-E | Trendlyne F&O memory cleanup (compile→compact dict, gc.collect) | Phase 3 | ✅ **DONE** | 2026-05-15 |
 | DB-1 | Discovery tab blank (valid_till filter removed from 7→14d fallback) | Dashboard | ✅ **DONE** | 2026-05-15 |
@@ -69,7 +69,7 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 40 / 54 items complete (74%)**
+**Progress: 43 / 54 items complete (80%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -818,7 +818,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P2-D** | Earnings calendar auto-population | Code | None | M | ⬜ TODO |
 | **P3-A** | Position sizing output in recs | Code | None | S | ✅ Done |
 | **P3-B** | Correlation-aware portfolio alerts | Code | None | M | ✅ Done |
-| **P3-C** | Comprehensive Trendlyne integration (6 pillars) | Code + Service | ₹492/mo (StratQ annual) | L–XL | ⬜ TODO |
+| **P3-C** | Comprehensive Trendlyne integration (6 pillars) | Code + Service | ₹492/mo (StratQ annual) | L–XL | ✅ Done |
 | **P4-A** | Warren bot commentary grounding | Code | None | S | ⬜ TODO |
 | **P4-B** | Symbol resolution cache persistence | Code | None | S | ⬜ TODO |
 | **P4-C** | Governance numerical grounding check | Code | None | M | ⬜ TODO |
