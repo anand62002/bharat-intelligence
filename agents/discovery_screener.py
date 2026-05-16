@@ -340,6 +340,7 @@ def _fii_net_buying(fii_data: Optional[dict]) -> Optional[bool]:
 
 
 _MIN_INSTITUTIONAL_HOLDING_PCT = 5.0   # Filter 3: stock must have ≥5% institutional ownership
+_MIN_DVM_SCORE = 45.0                  # Filter 6: Trendlyne DVM composite score threshold (0–100)
 
 
 def prescreen(
@@ -347,16 +348,21 @@ def prescreen(
     fii_data: Optional[dict] = None,   # kept for API compatibility; no longer used for Filter 3
 ) -> tuple[bool, list[str]]:
     """
-    Run the 5 quick pre-screen filters against a single symbol.
+    Run the 6 quick pre-screen filters against a single symbol.
 
-    Threshold logic: must pass 4-of-5 filters.
+    Threshold logic: must accumulate ≥ 4 triggers (absolute count).
+    - Filters 1–5 always evaluated (OHLCV + screener.in data).
+    - Filter 6 (DVM) only evaluated when TRENDLYNE_SESSION env var is set;
+      silently skipped when unavailable (no impact on threshold).
 
     Filters:
       1. RSI between 40–65  (momentum sweet spot)
       2. PE < 50  OR  revenue growth > 30%  (valuation / growth justification)
-      3. Institutional holding ≥ 5%  (smart money present)  ← was: FII market-wide net flow
+      3. Institutional holding ≥ 5%  (smart money present)
       4. Revenue growth YoY > 15%  (business momentum)
       5. Price above 200-day EMA   (uptrend confirmed)
+      6. Trendlyne DVM composite ≥ 45  (business quality + value + momentum)
+         Optional — fires only when TRENDLYNE_SESSION is configured.
 
     Filter 3 was changed from index-level FII net flow (market-wide aggregate,
     same value for ALL stocks = methodologically wrong) to stock-specific
@@ -476,7 +482,47 @@ def prescreen(
             )
         # If data is missing, we simply don't add the trigger (filter not passed)
 
-    # Threshold: 4-of-5 filters must pass
+    # Filter 6: Trendlyne DVM composite score ≥ 45 (optional quality gate)
+    # ─────────────────────────────────────────────────────────────────────────
+    # Only attempted when TRENDLYNE_SESSION is configured (otherwise silently
+    # skipped — no impact on the 4-trigger threshold).
+    #
+    # When Trendlyne was already used as tier-2 fallback for screener data,
+    # the equity page is already cached → this call is free (no extra HTTP req).
+    # When screener.in succeeded, this adds one lightweight Trendlyne request.
+    #
+    # DVM dimensions:
+    #   Durability  — business quality / moat proxy (higher = better business)
+    #   Valuation   — value vs sector peers (higher = cheaper vs peers)
+    #   Momentum    — price + earnings momentum (higher = stronger trend)
+    #   Composite   — simple average; ≥45 means stock is at least median quality
+    import os as _os
+    if _os.getenv("TRENDLYNE_SESSION"):
+        try:
+            from data.trendlyne_fetcher import get_trendlyne_dvm
+            dvm = get_trendlyne_dvm(symbol)
+            if dvm is not None and dvm.get("composite_dvm") is not None:
+                comp = dvm["composite_dvm"]
+                if comp >= _MIN_DVM_SCORE:
+                    dur = dvm.get("durability_score") or 0
+                    val = dvm.get("valuation_score")  or 0
+                    mom = dvm.get("momentum_score")   or 0
+                    triggers.append(
+                        f"DVM composite {comp:.0f}≥{_MIN_DVM_SCORE:.0f} "
+                        f"(Dur={dur:.0f} Val={val:.0f} Mom={mom:.0f})"
+                    )
+                else:
+                    log.debug(
+                        "prescreen(%s): DVM composite %.1f < %.1f threshold",
+                        symbol, comp, _MIN_DVM_SCORE,
+                    )
+        except Exception as _dvm_exc:
+            # DVM is an optional enhancement — never block prescreen on failure
+            log.debug("prescreen(%s): DVM filter skipped (%s)", symbol, _dvm_exc)
+
+    # Threshold: ≥ 4 triggers must fire (absolute count, not percentage)
+    # With DVM available (6 filters): still only 4 required → more opportunities.
+    # Without DVM (5 filters):        same 4-of-5 requirement as before.
     threshold = _MIN_PRESCREEN_PASS
     real_hits = sum(1 for t in triggers if not t.startswith("["))
     passes = real_hits >= threshold

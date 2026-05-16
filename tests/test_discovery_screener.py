@@ -353,7 +353,7 @@ class TestPrescreen:
         assert all(not t.startswith("[") for t in t_no_fii)
 
     def test_trigger_count_matches_pass_decision(self, monkeypatch):
-        """Real trigger count must be consistent with the pass/fail decision (always 4-of-5)."""
+        """Real trigger count must be consistent with the pass/fail decision (≥4 threshold)."""
         monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
                             lambda s, period: _make_df(252, drift=0.05))
         monkeypatch.setattr("agents.discovery_screener.get_screener_data",
@@ -361,10 +361,176 @@ class TestPrescreen:
         passes, triggers = prescreen("TEST.NS", fii_data=None)
         # No [meta] notes injected (FII meta logic removed in P0-F)
         assert all(not t.startswith("[") for t in triggers)
-        # Function decision matches count: threshold is always 4-of-5
-        real_hits = len(triggers)   # all are real now (no [meta] notes)
-        expected = real_hits >= 4   # strict threshold
+        # Function decision must match the trigger count against the ≥4 threshold
+        real_hits = len(triggers)
+        expected = real_hits >= 4
         assert passes is expected
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Filter 6: DVM composite score (P3-C-P3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _good_dvm(composite: float = 65.0) -> dict:
+    return {
+        "durability_score":  70.0,
+        "valuation_score":   60.0,
+        "momentum_score":    65.0,
+        "composite_dvm":     composite,
+    }
+
+
+class TestPrescreenFilter6DVM:
+    """Tests for Filter 6: Trendlyne DVM composite score ≥ 45."""
+
+    def _setup_base(self, monkeypatch, screener=None):
+        """Patch OHLCV + screener so Filters 1–5 have known state."""
+        monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
+                            lambda s, period: _make_df(252, drift=0.05))
+        monkeypatch.setattr("agents.discovery_screener.get_screener_data",
+                            lambda s: screener if screener is not None else _good_screener())
+
+    def test_dvm_adds_trigger_when_session_set_and_score_passes(self, monkeypatch):
+        """When TRENDLYNE_SESSION is set and DVM ≥ 45, a trigger is appended."""
+        self._setup_base(monkeypatch)
+        monkeypatch.setenv("TRENDLYNE_SESSION", "fake-session-token")
+        monkeypatch.setattr(
+            "data.trendlyne_fetcher.get_trendlyne_dvm",
+            lambda s: _good_dvm(65.0),
+        )
+        _, triggers = prescreen("TEST.NS")
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        assert len(dvm_triggers) == 1
+        assert "65" in dvm_triggers[0]   # composite score in trigger text
+
+    def test_dvm_no_trigger_when_score_below_threshold(self, monkeypatch):
+        """DVM composite < 45 → trigger NOT added."""
+        self._setup_base(monkeypatch)
+        monkeypatch.setenv("TRENDLYNE_SESSION", "fake-session-token")
+        monkeypatch.setattr(
+            "data.trendlyne_fetcher.get_trendlyne_dvm",
+            lambda s: _good_dvm(30.0),   # below 45 threshold
+        )
+        _, triggers = prescreen("TEST.NS")
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        assert len(dvm_triggers) == 0
+
+    def test_dvm_skipped_when_no_session_env_var(self, monkeypatch):
+        """Without TRENDLYNE_SESSION, Filter 6 silently skips."""
+        self._setup_base(monkeypatch)
+        monkeypatch.delenv("TRENDLYNE_SESSION", raising=False)
+        # Even if DVM data is available, the filter must not fire
+        monkeypatch.setattr(
+            "data.trendlyne_fetcher.get_trendlyne_dvm",
+            lambda s: _good_dvm(80.0),
+        )
+        _, triggers = prescreen("TEST.NS")
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        assert len(dvm_triggers) == 0
+
+    def test_dvm_skipped_when_returns_none(self, monkeypatch):
+        """When get_trendlyne_dvm returns None, Filter 6 silently skips."""
+        self._setup_base(monkeypatch)
+        monkeypatch.setenv("TRENDLYNE_SESSION", "fake-session-token")
+        monkeypatch.setattr(
+            "data.trendlyne_fetcher.get_trendlyne_dvm",
+            lambda s: None,
+        )
+        _, triggers = prescreen("TEST.NS")
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        assert len(dvm_triggers) == 0
+
+    def test_dvm_exception_does_not_crash_prescreen(self, monkeypatch):
+        """If get_trendlyne_dvm raises, prescreen must still return normally."""
+        self._setup_base(monkeypatch)
+        monkeypatch.setenv("TRENDLYNE_SESSION", "fake-session-token")
+
+        def _raise(s):
+            raise RuntimeError("Trendlyne network error")
+
+        monkeypatch.setattr("data.trendlyne_fetcher.get_trendlyne_dvm", _raise)
+        passes, triggers = prescreen("TEST.NS")
+        # Function returns without crashing; DVM trigger absent
+        assert isinstance(passes, bool)
+        assert isinstance(triggers, list)
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        assert len(dvm_triggers) == 0
+
+    def test_dvm_trigger_contains_all_three_dimensions(self, monkeypatch):
+        """Trigger text must embed Durability, Valuation, Momentum scores."""
+        self._setup_base(monkeypatch)
+        monkeypatch.setenv("TRENDLYNE_SESSION", "fake-session-token")
+        monkeypatch.setattr(
+            "data.trendlyne_fetcher.get_trendlyne_dvm",
+            lambda s: {"durability_score": 72.0, "valuation_score": 55.0,
+                       "momentum_score": 48.0, "composite_dvm": 58.3},
+        )
+        _, triggers = prescreen("TEST.NS")
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        assert len(dvm_triggers) == 1
+        t = dvm_triggers[0]
+        assert "Dur=72" in t
+        assert "Val=55" in t
+        assert "Mom=48" in t
+
+    def test_dvm_helps_reach_threshold_when_other_filters_miss(self, monkeypatch):
+        """
+        Stock that would fail 3-of-5 without DVM can pass 4-of-6 with DVM.
+        Setup: screener has no fii_holding_pct → Filter 3 fails.
+               drift=0.05 → RSI typically high → Filter 1 may fail.
+               Only EMA200 + PE + revenue_growth fire (3 real hits).
+               DVM ≥ 45 pushes to 4 → passes threshold.
+        """
+        self._setup_base(monkeypatch,
+                         screener={"pe": 25.0, "revenue_growth": 22.0})  # no institutional data
+        monkeypatch.setenv("TRENDLYNE_SESSION", "fake-session-token")
+        monkeypatch.setattr(
+            "data.trendlyne_fetcher.get_trendlyne_dvm",
+            lambda s: _good_dvm(60.0),
+        )
+        passes, triggers = prescreen("TEST.NS")
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        # DVM fired
+        assert len(dvm_triggers) == 1
+        # If exactly 3 core filters fired + DVM = 4 → passes; or already 4 core → passes too
+        assert passes is True
+
+    def test_dvm_threshold_boundary_exactly_45(self, monkeypatch):
+        """Composite score exactly at 45 must fire (boundary inclusive)."""
+        self._setup_base(monkeypatch)
+        monkeypatch.setenv("TRENDLYNE_SESSION", "fake-session-token")
+        monkeypatch.setattr(
+            "data.trendlyne_fetcher.get_trendlyne_dvm",
+            lambda s: _good_dvm(45.0),
+        )
+        _, triggers = prescreen("TEST.NS")
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        assert len(dvm_triggers) == 1   # exactly 45 → passes (≥ 45)
+
+    def test_dvm_threshold_just_below_45_does_not_fire(self, monkeypatch):
+        """Composite score of 44.9 must NOT fire."""
+        self._setup_base(monkeypatch)
+        monkeypatch.setenv("TRENDLYNE_SESSION", "fake-session-token")
+        monkeypatch.setattr(
+            "data.trendlyne_fetcher.get_trendlyne_dvm",
+            lambda s: _good_dvm(44.9),
+        )
+        _, triggers = prescreen("TEST.NS")
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        assert len(dvm_triggers) == 0
+
+    def test_dvm_absent_composite_field_skips(self, monkeypatch):
+        """DVM dict with composite_dvm=None is treated as unavailable."""
+        self._setup_base(monkeypatch)
+        monkeypatch.setenv("TRENDLYNE_SESSION", "fake-session-token")
+        monkeypatch.setattr(
+            "data.trendlyne_fetcher.get_trendlyne_dvm",
+            lambda s: {"durability_score": 70.0, "valuation_score": 60.0,
+                       "momentum_score": 55.0, "composite_dvm": None},
+        )
+        _, triggers = prescreen("TEST.NS")
+        dvm_triggers = [t for t in triggers if "DVM" in t]
+        assert len(dvm_triggers) == 0   # None composite → skip
 
 
 # ──────────────────────────────────────────────────────────────────────────────
