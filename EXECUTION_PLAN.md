@@ -59,7 +59,7 @@
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ⬜ TODO | — |
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ⬜ TODO | — |
 | P4-C | Governance numerical grounding check | Phase 4 | ⬜ TODO | — |
-| P4-D | Remove Breeze Connect — simplify options_fetcher to Trendlyne F&O → NSE → VIX | Phase 4 | ⬜ TODO | — |
+| P4-D | Replace Breeze with Angel One SmartAPI — live options chain (lowest priority) | Phase 4 | ⬜ TODO | — |
 | BF-8 | Discovery save silent failure — missing required DB columns + discoveries.append gate | Bug Fix | ✅ **DONE** | 2026-05-16 |
 | BF-9 | Health panel daily_runs.status + agents_run column errors | Bug Fix | ✅ **DONE** | 2026-05-16 |
 | BF-10 | Governance WebSocket broadcaster pushing all 107 raw alerts (bypassing dedup) | Bug Fix | ✅ **DONE** | 2026-05-16 |
@@ -742,6 +742,46 @@ Add both to Railway `worker` + `web` services.
 
 ---
 
+### ⬜ P4-D: Replace Breeze Connect with Angel One SmartAPI (Live Options)
+**Priority:** Lowest — Trendlyne F&O already works well as primary options source.  
+**What changes:**
+- Remove `data/breeze_auth.py` (deprecated per CLAUDE.md P4-D note)
+- Remove Breeze plumbing from `data/options_fetcher.py`
+- Add `data/angel_one_fetcher.py` — Angel One SmartAPI client for live option chain
+- New options source priority: **Angel One → Trendlyne F&O → NSE → VIX proxy**
+
+**Why Angel One over Breeze:**
+- Free with any Angel One demat account (no separate API portal fee)
+- SmartAPI is well-documented (`pip install smartapi-python`)
+- Real strike-level OI, IV, bid/ask — same quality as Breeze
+- Supports automated daily session refresh via Client ID + Password + TOTP
+
+**Angel One SmartAPI — what it provides:**
+- `get_option_chain(symbol, expiry)` → full strike table with OI, volume, IV, bid/ask
+- Real PCR, max pain, ATM IV, IV skew — all computable from live OI data
+- Historical OHLCV as bonus (can supplement yfinance)
+
+**New env vars needed (add to Railway worker + web):**
+| Variable | Description |
+|---|---|
+| `ANGEL_ONE_API_KEY` | From smartapi.angelbroking.com → Apps |
+| `ANGEL_ONE_CLIENT_ID` | Your Angel One login ID |
+| `ANGEL_ONE_PASSWORD` | Your Angel One login password |
+| `ANGEL_ONE_TOTP_SECRET` | Base32 TOTP secret (from 2FA setup) — enables automated daily token refresh |
+
+**Current credential status:** Client ID + Password available. TOTP secret TBD (scan QR from Angel One 2FA settings).
+
+**Files to change:**
+- `data/angel_one_fetcher.py` — NEW: session manager + `get_option_chain()` + `_parse_chain()`
+- `data/options_fetcher.py` — replace Breeze tier with Angel One tier; keep rest of fallback chain
+- `data/breeze_auth.py` — DELETE
+- `worker.py` — replace `job_breeze_token_refresh()` with `job_angel_one_token_refresh()` at 08:30 IST
+- `requirements.txt` — swap `breeze-connect` → `smartapi-python`
+
+**Effort:** M (3–6 hrs)
+
+---
+
 ## ⬜ PHASE 5 — Forward Paper Portfolio Tracker
 
 *Build after Phase 0–4 complete.*
@@ -822,6 +862,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P4-A** | Warren bot commentary grounding | Code | None | S | ⬜ TODO |
 | **P4-B** | Symbol resolution cache persistence | Code | None | S | ⬜ TODO |
 | **P4-C** | Governance numerical grounding check | Code | None | M | ⬜ TODO |
+| **P4-D** | Replace Breeze with Angel One SmartAPI (live options) | Code | ₹0 (free with demat) | M | ⬜ TODO (lowest priority) |
 | **P5-A** | Enhanced outcome tracker + attribution | Code | None | L | ⬜ TODO |
 | **P5-B** | Paper portfolio simulation mode | Code | None | L | ⬜ TODO |
 | **P6-A** | System performance dashboard tab | Code | None | M | ⬜ TODO |

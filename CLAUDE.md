@@ -94,7 +94,10 @@ Stock analysis/
 │   │                           # Used by: sentiment.py (+5/-10 pts) + institutional.py (+8 pts ACCUMULATING)
 │   ├── forward_estimates.py    # yfinance forward EPS/PE estimates (24h Supabase cache)
 │   └── breeze_auth.py          # ICICI Breeze Connect — DEPRECATED (P4-D: scheduled for removal)
-│   #                             Superseded by trendlyne_fno_fetcher. Remove in Phase 4.
+│   #                             Superseded by trendlyne_fno_fetcher (current primary).
+│   #                             P4-D will replace with Angel One SmartAPI as new live tier-1 source.
+│   #                             Angel One credentials needed: ANGEL_ONE_API_KEY, ANGEL_ONE_CLIENT_ID,
+│   #                             ANGEL_ONE_PASSWORD, ANGEL_ONE_TOTP_SECRET (see EXECUTION_PLAN P4-D).
 │
 ├── api/
 │   ├── __init__.py
