@@ -199,7 +199,8 @@ def _good_ohlcv():
 
 
 def _good_screener():
-    return {"pe": 25.0, "revenue_growth": 22.0}
+    # Include fii_holding_pct so Filter 3 (institutional holding ≥ 5%) fires.
+    return {"pe": 25.0, "revenue_growth": 22.0, "fii_holding_pct": 15.0, "dii_holding_pct": 8.0}
 
 
 def _good_fii():
@@ -266,8 +267,8 @@ class TestPrescreen:
         monkeypatch.setattr("agents.discovery_screener.get_screener_data",
                             lambda s: None)
         passes, triggers = prescreen("TEST.NS", fii_data=_good_fii())
-        # FII data IS available (positive) → strict 4-of-5 threshold applies.
-        # Without screener, only EMA200 + RSI + FII can fire (≤3 real hits) → fails.
+        # Without screener data, only EMA200 + RSI can fire (Filter 3 needs
+        # institutional_holding_pct from screener → also absent).  ≤2 real hits → fails.
         real_hits = sum(1 for t in triggers if not t.startswith("["))
         assert real_hits <= 3
         assert passes is False
@@ -282,35 +283,38 @@ class TestPrescreen:
             assert isinstance(t, str)
             assert len(t) > 5
 
-    # ── FII-unavailable threshold relaxation ─────────────────────────────────
+    # ── fii_data param is legacy (kept for API compat) ────────────────────────
 
-    def test_fii_none_adds_meta_note_to_triggers(self, monkeypatch):
-        """When FII API is blocked, a [meta] note must appear in triggers."""
+    def test_fii_data_param_ignored_no_meta_note(self, monkeypatch):
+        """
+        The fii_data param is kept for API compatibility but is no longer used
+        in prescreen logic (Filter 3 now uses stock-specific institutional holding
+        from screener data).  Passing fii_data=None must NOT add a [meta] note
+        and must NOT change the threshold (always 4-of-5).
+        """
         monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
                             lambda s, period: _make_df(252, drift=0.05))
         monkeypatch.setattr("agents.discovery_screener.get_screener_data",
                             lambda s: _good_screener())
         _, triggers = prescreen("TEST.NS", fii_data=None)
         meta = [t for t in triggers if t.startswith("[")]
-        assert len(meta) == 1
-        assert "FII data unavailable" in meta[0]
+        # No legacy FII meta note should be injected (that logic was removed in P0-F)
+        assert len(meta) == 0
 
-    def test_fii_none_uses_relaxed_threshold_passes(self, monkeypatch):
-        """3-of-4 known filters should be enough when FII API is blocked."""
-        # Setup: RSI good + EMA200 good + screener good (PE + revenue) → 4 real hits
-        # Even without FII, 4 > threshold=3, so must pass
+    def test_good_screener_data_causes_pass(self, monkeypatch):
+        """With full screener data (including institutional holding), 4+ filters fire."""
+        # EMA200 + PE + revenue_growth + institutional_holding = 4 hits → passes 4-of-5
         monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
                             lambda s, period: _make_df(252, drift=0.05))
         monkeypatch.setattr("agents.discovery_screener.get_screener_data",
                             lambda s: _good_screener())
         passes, triggers = prescreen("TEST.NS", fii_data=None)
         real_hits = sum(1 for t in triggers if not t.startswith("["))
-        assert real_hits >= 3
+        assert real_hits >= 4        # at least 4 of 5 filters
         assert passes is True
 
-    def test_fii_none_with_only_2_real_hits_fails(self, monkeypatch):
-        """2-of-4 known filters is still below relaxed threshold of 3."""
-        # Only EMA200 + RSI fire; screener returns None → no PE/revenue triggers
+    def test_no_screener_causes_fail_strict_threshold(self, monkeypatch):
+        """Without screener data only EMA200 + RSI can fire → below 4-of-5 strict threshold."""
         monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
                             lambda s, period: _make_df(252, drift=0.05))
         monkeypatch.setattr("agents.discovery_screener.get_screener_data",
@@ -320,47 +324,46 @@ class TestPrescreen:
         assert real_hits <= 2
         assert passes is False
 
-    def test_fii_available_false_still_uses_strict_threshold(self, monkeypatch):
+    def test_threshold_always_strict_regardless_of_fii_param(self, monkeypatch):
         """
-        FII API responded with net selling → strict 4-of-5 threshold applies.
-        Same data that passes the relaxed (3-of-4) threshold should FAIL the
-        strict (4-of-5) threshold when FII is known-negative.
+        Since P0-F, the threshold is always strict 4-of-5 regardless of whether
+        fii_data is None or provided.  The old relaxed 3-of-4 path (triggered when
+        fii_data=None) was removed when Filter 3 changed from global FII flow to
+        per-stock institutional holding %.
 
-        Setup: drift=0.05 gives RSI > 65 (all gains) so filter 1 doesn't fire.
-        EMA200 + PE + revenue_growth = 3 real hits.
-          - fii_data=None   → relaxed threshold=3 → PASSES
-          - fii_data negative → strict threshold=4 → FAILS
+        Setup: drift=0.05 → RSI typically > 65 (all-up trend) so Filter 1 doesn't
+        fire.  _good_screener() now includes fii_holding_pct=15%, so:
+          EMA200 + PE + revenue_growth + institutional = 4 real hits → PASSES
+        Both fii_data=None and fii_data=-500 should produce the same outcome.
         """
         monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
                             lambda s, period: _make_df(252, drift=0.05))
         monkeypatch.setattr("agents.discovery_screener.get_screener_data",
                             lambda s: _good_screener())
 
-        # FII unavailable → relaxed → should pass
-        passes_relaxed, t_relaxed = prescreen("TEST.NS", fii_data=None)
-        # FII available but negative → strict → should fail
-        passes_strict, t_strict = prescreen("TEST.NS", fii_data={"fii_net": -500.0})
+        passes_no_fii,  t_no_fii  = prescreen("TEST.NS", fii_data=None)
+        passes_neg_fii, t_neg_fii = prescreen("TEST.NS", fii_data={"fii_net": -500.0})
 
-        # No meta note when FII is known
-        meta = [t for t in t_strict if t.startswith("[")]
-        assert len(meta) == 0
+        # fii_data param doesn't change trigger list or outcome since P0-F
+        real_hits_no_fii  = sum(1 for t in t_no_fii  if not t.startswith("["))
+        real_hits_neg_fii = sum(1 for t in t_neg_fii if not t.startswith("["))
+        assert real_hits_no_fii == real_hits_neg_fii   # identical
+        assert passes_no_fii == passes_neg_fii         # same decision
+        # No [meta] notes injected (old FII meta logic removed)
+        assert all(not t.startswith("[") for t in t_no_fii)
 
-        # The same underlying real hits should cause different outcomes
-        real_hits_strict = sum(1 for t in t_strict if not t.startswith("["))
-        assert real_hits_strict < 4          # less than strict threshold
-        assert passes_relaxed is True        # relaxed: 3-of-4 passes
-        assert passes_strict is False        # strict: 3-of-5 fails
-
-    def test_meta_note_not_counted_as_filter_hit(self, monkeypatch):
-        """The [meta] note must never be counted as a passing filter."""
+    def test_trigger_count_matches_pass_decision(self, monkeypatch):
+        """Real trigger count must be consistent with the pass/fail decision (always 4-of-5)."""
         monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
                             lambda s, period: _make_df(252, drift=0.05))
         monkeypatch.setattr("agents.discovery_screener.get_screener_data",
                             lambda s: _good_screener())
         passes, triggers = prescreen("TEST.NS", fii_data=None)
-        # Count real hits manually and verify it matches what the function decided
-        real_hits = sum(1 for t in triggers if not t.startswith("["))
-        expected = real_hits >= 3   # relaxed threshold
+        # No [meta] notes injected (FII meta logic removed in P0-F)
+        assert all(not t.startswith("[") for t in triggers)
+        # Function decision matches count: threshold is always 4-of-5
+        real_hits = len(triggers)   # all are real now (no [meta] notes)
+        expected = real_hits >= 4   # strict threshold
         assert passes is expected
 
 

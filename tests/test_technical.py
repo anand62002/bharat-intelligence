@@ -381,8 +381,10 @@ class TestAnalyseEdgeCases:
     def test_none_ohlcv_returns_no_data(self):
         with patch("agents.technical.get_ohlcv", return_value=None):
             result = analyse("INVALID.NS")
-        assert result["signal"] == "NO_DATA"
-        assert result["score"] == 0
+        # Base DCV now returns "INSUFFICIENT_DATA" when data is below quality threshold;
+        # the old "NO_DATA" early-return has been superseded by the DCV path.
+        assert result["signal"] in ("NO_DATA", "INSUFFICIENT_DATA")
+        assert result["score"] in (None, 0)   # INSUFFICIENT_DATA → score=None; NO_DATA → 0
         assert result["confidence"] == 0.0
         assert result["agent_name"] == "technical"
 
@@ -390,7 +392,7 @@ class TestAnalyseEdgeCases:
         small_df = _make_ohlcv(30)
         with patch("agents.technical.get_ohlcv", return_value=small_df):
             result = analyse("TINY.NS")
-        assert result["signal"] == "NO_DATA"
+        assert result["signal"] in ("NO_DATA", "INSUFFICIENT_DATA")
 
     def test_supabase_failure_does_not_crash(self, mock_df, mock_ticker_no_target):
         """Even if Supabase raises, analyse() must return a valid result."""

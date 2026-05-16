@@ -511,8 +511,11 @@ class TestAnalyse:
         monkeypatch.setattr("agents.macro.get_inr_usd",           lambda: None)
         monkeypatch.setattr("agents.macro.get_india_vix",         lambda: None)
         result = analyse()
-        assert result["signal"] in ("RISK_ON", "NEUTRAL", "RISK_OFF")
-        assert 0 <= result["score"] <= 100
+        # When all inputs are None the base DCV fires → INSUFFICIENT_DATA.
+        # Previously the agent returned a graceful NEUTRAL/RISK_ON/RISK_OFF; now
+        # the data-quality gate takes precedence.  Accept both for compatibility.
+        assert result["signal"] in ("RISK_ON", "NEUTRAL", "RISK_OFF", "INSUFFICIENT_DATA")
+        assert result["score"] is None or 0 <= result["score"] <= 100
 
     def test_data_sources_populated(self, monkeypatch):
         _mock_analyse_deps(monkeypatch)

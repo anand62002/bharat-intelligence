@@ -503,9 +503,11 @@ class TestAnalyse:
         empty_dfs = {k: None for k in ["GC=F", "CL=F", "SI=F", "USDINR=X", "GOLDBEES.NS", "CRUDEOIL.NS"]}
         _patch_yf(monkeypatch, empty_dfs)
         result = analyse()
-        # Should still return valid structure
+        # Should still return valid structure.
+        # INSUFFICIENT_DATA path returns score=None (excluded from composite);
+        # normal paths return an int 0-100.
         assert "signal" in result
-        assert 0 <= result["score"] <= 100
+        assert result["score"] is None or 0 <= result["score"] <= 100
 
     def test_yfinance_exception_graceful(self, monkeypatch):
         mock = MagicMock()

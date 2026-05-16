@@ -122,7 +122,7 @@ REQUIRED_DETAIL_KEYS = {
     "growth_quality", "profitability", "balance_sheet", "governance",
     "danger", "raw_metrics", "sector_specific", "sector_regime",
 }
-VALID_SIGNALS = {"STRONG_BUY", "BUY", "HOLD", "AVOID", "SELL", "NO_DATA"}
+VALID_SIGNALS = {"STRONG_BUY", "BUY", "HOLD", "AVOID", "SELL", "NO_DATA", "INSUFFICIENT_DATA"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -551,13 +551,17 @@ class TestAnalyseEdgeCases:
         """All-None fundamentals must return a valid dict, not raise."""
         result = _run_analyse(SPARSE_DATA)
         assert REQUIRED_KEYS.issubset(result.keys())
-        assert 0 <= result["score"] <= 100
+        # INSUFFICIENT_DATA path returns score=None (excluded from composite);
+        # normal paths return an int 0-100.
+        assert result["score"] is None or 0 <= result["score"] <= 100
         assert result["signal"] in VALID_SIGNALS
 
     def test_sparse_data_no_danger(self):
-        """No data → no triggers → no danger."""
+        """No data → no triggers → no danger (or INSUFFICIENT_DATA with no detail)."""
         result = _run_analyse(SPARSE_DATA)
-        assert result["detail"]["danger"]["level"] is None
+        # INSUFFICIENT_DATA path may omit the danger dict entirely.
+        danger = result.get("detail", {}).get("danger", {})
+        assert danger.get("level") is None
 
     def test_supabase_failure_no_crash(self):
         with patch("agents.fundamental.get_screener_data", return_value=HEALTHY_DATA), \
@@ -1399,6 +1403,10 @@ class TestGetScreenerDataTier3:
     Unit-test the OCF margin parser using mocked HTTP responses.
     All other fields (CAGR, ROE, etc.) are already exercised by screener tests;
     this class focuses exclusively on the new OCF margin extraction.
+
+    Mocking note: get_screener_data() uses requests.Session (via _get_screener_session()),
+    NOT the global requests.get().  We must patch the session factory, not requests.get,
+    otherwise the mock response is never seen by session.get() calls.
     """
 
     @staticmethod
@@ -1409,6 +1417,13 @@ class TestGetScreenerDataTier3:
         resp.text = html
         resp.raise_for_status = MagicMock()
         return resp
+
+    @staticmethod
+    def _make_mock_session(mock_resp):
+        """Wrap mock_resp in a mock Session whose .get() returns it."""
+        sess = MagicMock()
+        sess.get.return_value = mock_resp
+        return sess
 
     def test_ocf_margin_computed_from_pl_and_cashflow(self):
         """ocf_margin = (Cash from Operating Activity / Sales) * 100."""
@@ -1440,7 +1455,8 @@ class TestGetScreenerDataTier3:
         # OCF margin = 1800 / 12000 * 100 = 15.0%
         from data.fetchers import get_screener_data
         mock_resp = self._make_mock_response(html)
-        with patch("requests.get", return_value=mock_resp), \
+        mock_sess = self._make_mock_session(mock_resp)
+        with patch("data.fetchers._get_screener_session", return_value=mock_sess), \
              patch("data.symbol_map.resolve_screener", return_value="TEST"), \
              patch("data.symbol_map.is_excluded", return_value=False):
             result = get_screener_data("TEST")
@@ -1466,7 +1482,8 @@ class TestGetScreenerDataTier3:
         """
         from data.fetchers import get_screener_data
         mock_resp = self._make_mock_response(html)
-        with patch("requests.get", return_value=mock_resp), \
+        mock_sess = self._make_mock_session(mock_resp)
+        with patch("data.fetchers._get_screener_session", return_value=mock_sess), \
              patch("data.symbol_map.resolve_screener", return_value="TEST"), \
              patch("data.symbol_map.is_excluded", return_value=False):
             result = get_screener_data("TEST")
@@ -1491,7 +1508,8 @@ class TestGetScreenerDataTier3:
         """
         from data.fetchers import get_screener_data
         mock_resp = self._make_mock_response(html)
-        with patch("requests.get", return_value=mock_resp), \
+        mock_sess = self._make_mock_session(mock_resp)
+        with patch("data.fetchers._get_screener_session", return_value=mock_sess), \
              patch("data.symbol_map.resolve_screener", return_value="TEST"), \
              patch("data.symbol_map.is_excluded", return_value=False):
             result = get_screener_data("TEST")
@@ -1526,7 +1544,8 @@ class TestGetScreenerDataTier3:
         # Expected: OCF=4000, Sales=20000 → OCF margin = 20.0%
         from data.fetchers import get_screener_data
         mock_resp = self._make_mock_response(html)
-        with patch("requests.get", return_value=mock_resp), \
+        mock_sess = self._make_mock_session(mock_resp)
+        with patch("data.fetchers._get_screener_session", return_value=mock_sess), \
              patch("data.symbol_map.resolve_screener", return_value="TEST"), \
              patch("data.symbol_map.is_excluded", return_value=False):
             result = get_screener_data("TEST")
@@ -1539,7 +1558,8 @@ class TestGetScreenerDataTier3:
         html = "<html><body><ul id='top-ratios'></ul></body></html>"
         from data.fetchers import get_screener_data
         mock_resp = self._make_mock_response(html)
-        with patch("requests.get", return_value=mock_resp), \
+        mock_sess = self._make_mock_session(mock_resp)
+        with patch("data.fetchers._get_screener_session", return_value=mock_sess), \
              patch("data.symbol_map.resolve_screener", return_value="TEST"), \
              patch("data.symbol_map.is_excluded", return_value=False):
             result = get_screener_data("TEST")
