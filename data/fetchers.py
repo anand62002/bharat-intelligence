@@ -882,10 +882,28 @@ def get_screener_data(symbol: str) -> dict | None:
     if resp is None:
         log.warning(
             "get_screener_data(%s): screener.in unavailable (last status: %s) "
-            "— falling back to yfinance",
+            "— trying Trendlyne tier-2 fallback",
             symbol, _last_status,
         )
-        # ── yfinance fallback ─────────────────────────────────────────────────
+        # ── Trendlyne tier-2 fallback ─────────────────────────────────────────
+        # Only attempted when screener.in is blocked/down (Railway IP block etc.)
+        # Returns same schema as get_screener_data(); no extra wiring needed in agents.
+        try:
+            from data.trendlyne_fetcher import get_trendlyne_fundamentals
+            tl_data = get_trendlyne_fundamentals(symbol)
+            if tl_data is not None:
+                log.info(
+                    "get_screener_data(%s): Trendlyne tier-2 returned data "
+                    "(pe=%s roce=%s revg=%s)",
+                    symbol, tl_data.get("pe"), tl_data.get("roce"),
+                    tl_data.get("revenue_growth"),
+                )
+                return tl_data
+        except Exception as _tl_exc:
+            log.warning("get_screener_data(%s): Trendlyne fallback error: %s", symbol, _tl_exc)
+
+        log.warning("get_screener_data(%s): Trendlyne also failed — falling back to yfinance", symbol)
+        # ── yfinance tier-3 fallback ──────────────────────────────────────────
         # Resolve to yfinance symbol (try .NS first, then .BO)
         from data.symbol_map import YF_SYMBOL_MAP
         clean_sym = symbol.replace(".NS", "").replace(".BO", "").upper()
