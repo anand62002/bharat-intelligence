@@ -163,13 +163,7 @@ Stock analysis/
 | `earnings_calendar` | Earnings dates for pre-earnings guard | `symbol, earnings_date, quarter, source, confirmed` |
 | `backtest_results` | Walk-forward backtest runs | `run_date, universe, period_start/end, split_type (TRAIN/TEST/FULL), hit_rate_90d, avg_alpha_90d/180d, sharpe_ratio, max_drawdown, win_loss_ratio, signal_details (jsonb)` |
 
-> **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime)
->
-> **New pending migration (run in Supabase SQL Editor):**
-> - `db/migrations/create_earnings_calendar.sql` — required for earnings_guard primary lookup
->
-> **Pending data seed:**
-> - `python -m db.seed_historical_events_comprehensive --append` — loads 57 new historical events (Gap 11)
+> **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results)
 
 ---
 
@@ -519,7 +513,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | All 3 synthesis validation judges use Claude variants — correlated sampling | MEDIUM | `scheduler/synthesis_validator.py` | ✅ Fixed (P1-C) — GPT-4o-mini as 3rd judge + Anthropic lazy-init |
 | `earnings_calendar` table not yet created | MEDIUM | `agents/earnings_guard.py` | ✅ Migration run + 150 events seeded |
 | `fallback_synthesis` thresholds (≥72=BUY) uncalibrated | LOW | `scheduler/orchestrator.py` | ✅ Fixed (P1-D) — now ≥75/58/30 |
-| Single data provider (screener.in) — no fallback if blocked | HIGH | `data/fetchers.py` | 🔲 P2-A |
+| Single data provider (screener.in) — no fallback if blocked | HIGH | `data/fetchers.py` | ✅ Fixed (P2-A) — Trendlyne tier-2 + yfinance tier-3 fallback chain |
 | portfolio_monitor HTTP 400 on ALL recommendations queries (danger_trigger/window not in table) | CRITICAL | `scheduler/portfolio_monitor.py` | ✅ Fixed (Step 9) — removed non-existent columns from SELECT |
 | `/api/portfolio/risk` returns HTTP 500 — NaN floats not JSON-serialisable | HIGH | `api/main.py` | ✅ Fixed (Step 9) — `_sanitise_floats()` wrapper added |
 | `portfolio_risk_snapshots` table missing (PGRST205) | HIGH | `agents/portfolio_risk.py` | ✅ Migration created — run `db/migrations/create_portfolio_risk_snapshots.sql` |
