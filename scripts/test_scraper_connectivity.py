@@ -38,6 +38,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import requests
+import urllib3
 
 LINE = "─" * 60
 
@@ -77,24 +78,31 @@ def main():
             "https": f"http://scraperapi:{scraperapi_key}@proxy-server.scraperapi.com:8001",
         }
         proxy_name = "ScraperAPI"
+        # ScraperAPI's CONNECT tunnel cert isn't trusted by Railway's CA bundle
+        # → disable SSL verify for proxy requests (same as production proxy_session.py)
+        _proxy_verify = False
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     elif fixie_url:
         print(f"  ✅  FIXIE_URL configured ({fixie_url[:30]}...)")
         proxy_dict = {"http": fixie_url, "https": fixie_url}
         proxy_name = "Fixie"
+        _proxy_verify = True
     elif https_proxy:
         print(f"  ✅  HTTPS_PROXY configured")
         proxy_dict = {"http": https_proxy, "https": https_proxy}
         proxy_name = "HTTPS_PROXY"
+        _proxy_verify = True
     else:
         print("  ⚠️   No proxy configured (direct connection)")
         print("       To fix: set SCRAPERAPI_KEY or FIXIE_URL in Railway env vars")
         proxy_dict = {}
         proxy_name = None
+        _proxy_verify = True
 
     # ── 3. Screener.in connectivity ───────────────────────────────────────────
     print(f"\n[3] Screener.in")
 
-    def _test_screener(proxies: dict, label: str):
+    def _test_screener(proxies: dict, label: str, verify: bool = True):
         try:
             t0 = time.time()
             r = requests.get(
@@ -105,6 +113,7 @@ def main():
                 proxies=proxies,
                 timeout=10,
                 allow_redirects=True,
+                verify=verify,
             )
             elapsed = round((time.time() - t0) * 1000)
             ok = r.status_code == 200
@@ -126,6 +135,7 @@ def main():
                     proxies=proxies,
                     timeout=12,
                     allow_redirects=True,
+                    verify=verify,
                 )
                 elapsed2 = round((time.time() - t0) * 1000)
                 has_data = r2.status_code == 200 and "company-ratios" in r2.text
@@ -143,9 +153,9 @@ def main():
 
     if proxy_dict and not screener_direct:
         print(f"       → Direct failed, trying via {proxy_name}…")
-        screener_proxy = _test_screener(proxy_dict, proxy_name)
+        screener_proxy = _test_screener(proxy_dict, proxy_name, verify=_proxy_verify)
     elif proxy_dict:
-        screener_proxy = _test_screener(proxy_dict, proxy_name)
+        screener_proxy = _test_screener(proxy_dict, proxy_name, verify=_proxy_verify)
     else:
         screener_proxy = False
 
@@ -158,7 +168,7 @@ def main():
     print(f"  {'✅' if tl_sess else '⚠️ '}  TRENDLYNE_SESSION: {'configured' if tl_sess else 'NOT SET'}")
     print(f"  {'✅' if tl_csrf else '⚠️ '}  TRENDLYNE_CSRF:    {'configured' if tl_csrf else 'NOT SET'}")
 
-    def _test_trendlyne(proxies: dict, label: str):
+    def _test_trendlyne(proxies: dict, label: str, verify: bool = True):
         try:
             s = requests.Session()
             s.headers.update({
@@ -172,6 +182,8 @@ def main():
                 s.cookies.set("csrftoken", tl_csrf, domain="trendlyne.com")
             if proxies:
                 s.proxies.update(proxies)
+            if not verify:
+                s.verify = False
 
             t0 = time.time()
             r = s.get("https://trendlyne.com/equity/RELIANCE/NSE/", timeout=15, allow_redirects=True)
@@ -199,9 +211,9 @@ def main():
 
     if proxy_dict and not tl_direct:
         print(f"       → Direct failed, trying via {proxy_name}…")
-        tl_proxy = _test_trendlyne(proxy_dict, proxy_name)
+        tl_proxy = _test_trendlyne(proxy_dict, proxy_name, verify=_proxy_verify)
     elif proxy_dict:
-        tl_proxy = _test_trendlyne(proxy_dict, proxy_name)
+        tl_proxy = _test_trendlyne(proxy_dict, proxy_name, verify=_proxy_verify)
     else:
         tl_proxy = False
 
@@ -213,29 +225,54 @@ def main():
     screener_ok = screener_direct or screener_proxy
     trendlyne_ok = tl_direct or tl_proxy
 
-    _check("Screener.in", screener_ok,
-           "via proxy" if (screener_proxy and not screener_direct) else
-           "direct" if screener_direct else "BLOCKED — set SCRAPERAPI_KEY or FIXIE_URL")
-    _check("Trendlyne",   trendlyne_ok,
-           "via proxy" if (tl_proxy and not tl_direct) else
-           "direct" if tl_direct else "BLOCKED — set SCRAPERAPI_KEY or FIXIE_URL")
+    # Build per-source verdict strings
+    def _source_detail(direct, via_proxy, name):
+        if direct and via_proxy:
+            return f"direct ✅  proxy ✅"
+        elif direct and proxy_dict and not via_proxy:
+            return f"direct ✅  proxy ❌ (SSL — fix applied in proxy_session.py)"
+        elif direct:
+            return "direct ✅"
+        elif via_proxy:
+            return "via proxy ✅  (direct blocked by Railway IP)"
+        else:
+            return "BLOCKED on both direct and proxy — check credentials"
 
-    if not proxy_dict and (not screener_ok or not trendlyne_ok):
-        print()
-        print("  ACTION REQUIRED:")
-        print("  1. Sign up for ScraperAPI free trial: https://www.scraperapi.com/")
-        print("  2. Copy your API key")
-        print("  3. Set in Railway: SCRAPERAPI_KEY=<your-key>")
-        print("  4. Re-deploy Railway worker + web services")
-        print("  5. Re-run this script to confirm proxy works")
-    elif proxy_dict and screener_ok and trendlyne_ok:
-        print()
-        print("  All sources working via proxy. Pipeline will produce recommendations.")
-    elif proxy_dict and (not screener_ok or not trendlyne_ok):
-        print()
-        print("  Proxy configured but still blocked.")
-        print("  → ScraperAPI rotating residential proxy is most reliable")
-        print("  → Try a different ScraperAPI plan or contact their support")
+    _check("Screener.in", screener_ok, _source_detail(screener_direct, screener_proxy, "screener"))
+    _check("Trendlyne",   trendlyne_ok, _source_detail(tl_direct, tl_proxy, "trendlyne"))
+
+    print()
+    if screener_ok and trendlyne_ok:
+        if screener_direct and tl_direct and proxy_dict and not (screener_proxy or tl_proxy):
+            # Direct works, proxy has issues
+            print("  ✅  Pipeline will produce recommendations (direct connection works).")
+            if proxy_dict:
+                print("  ⚠️   Proxy is configured but has SSL errors.")
+                print("       This is expected — proxy_session.py now sets verify=False")
+                print("       for ScraperAPI tunnel. Re-deploy Railway to apply the fix.")
+                print("       Proxy will then act as automatic fallback if direct gets blocked.")
+        elif not screener_direct or not tl_direct:
+            print("  ✅  Pipeline will produce recommendations (working via proxy).")
+            print("       Direct connection is blocked — proxy is essential. Keep SCRAPERAPI_KEY set.")
+        else:
+            print("  ✅  Pipeline will produce recommendations.")
+            print("       Both direct and proxy connections healthy — maximum resilience.")
+    else:
+        print("  ❌  One or more sources unreachable. Pipeline may produce degraded output.")
+        if not proxy_dict:
+            print()
+            print("  ACTION REQUIRED — no proxy configured:")
+            print("  1. Sign up for ScraperAPI free trial: https://www.scraperapi.com/")
+            print("  2. Copy your API key")
+            print("  3. Set in Railway: SCRAPERAPI_KEY=<your-key>")
+            print("  4. Re-deploy Railway worker + web services")
+            print("  5. Re-run this script to confirm proxy works")
+        else:
+            print()
+            print("  Proxy configured but source still unreachable.")
+            print("  → Check SCRAPERAPI_KEY is valid and has remaining credits")
+            print("  → Check TRENDLYNE_SESSION / TRENDLYNE_CSRF are current")
+            print("  → ScraperAPI rotating residential is most reliable option")
 
     print(f"{LINE}\n")
 

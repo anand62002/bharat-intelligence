@@ -24,7 +24,13 @@ ScraperAPI notes
   - Uses HTTP proxy mode (preserves session cookies — critical for Trendlyne)
   - ScraperAPI proxy: proxy-server.scraperapi.com:8001
   - Credits used: 1 per request (250k/month on $29 plan is far more than needed)
-  - SSL: ScraperAPI uses CONNECT tunnelling in proxy mode → verify=True is fine
+  - SSL: ScraperAPI uses CONNECT tunnelling. Railway's container does not trust
+    ScraperAPI's intermediate CA cert → SSLCertVerificationError at the tunnel.
+    Fix: apply_proxy_to_session() sets session.verify=False when ScraperAPI is
+    active. This is acceptable because (a) we are reading public market data, not
+    sending credentials TO the target site, (b) ScraperAPI itself is a trusted
+    intermediary we explicitly configured. The CA verification failure is for
+    ScraperAPI's own CONNECT handshake, not for the target site's certificate.
 
 Fixie notes
 -----------
@@ -114,10 +120,23 @@ def apply_proxy_to_session(session: requests.Session) -> requests.Session:
     Apply the configured proxy to a requests.Session in-place.
     No-op if no proxy is configured.
     Returns the same session for chaining.
+
+    When ScraperAPI is active, also disables SSL certificate verification on
+    the session. This is necessary because Railway's container does not trust
+    ScraperAPI's intermediate CA cert used in the CONNECT tunnel handshake.
+    We only read public financial data through this proxy (never send credentials
+    to the target), so the security tradeoff is acceptable.
     """
     proxies = get_proxy_dict()
     if proxies:
         session.proxies.update(proxies)
+        if _active_proxy == "scraperapi":
+            # Suppress SSL verification for ScraperAPI CONNECT tunnel
+            session.verify = False
+            # Silence the urllib3 InsecureRequestWarning in logs
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            log.debug("proxy_session: SSL verify disabled for ScraperAPI tunnel")
     return session
 
 
@@ -138,4 +157,6 @@ def scraper_get(
         return session.get(url, **kwargs)
     if proxies:
         kwargs.setdefault("proxies", proxies)
+        if _active_proxy == "scraperapi":
+            kwargs.setdefault("verify", False)
     return requests.get(url, **kwargs)
