@@ -950,8 +950,8 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.9 — 2026-05-17 (P5-C seeder + P6-D news intelligence plan)*  
-*Next milestone: P5-D/E outcome attribution → P6-C morning brief → P6-D elite news engine*
+*Document version: 4.0 — 2026-05-17 (P5-C seeder + P6-D news intelligence plan + P6-D-7 GIFT Nifty signal layer)*  
+*Next milestone: P5-D/E outcome attribution → P6-C morning brief → P6-D-7 GIFT Nifty → P6-D elite news engine*
 
 ---
 
@@ -1087,7 +1087,8 @@ This creates the reinforcement loop from Adaptive NIFTY paper.
 | P6-D-4 | FinBERT local integration (transformers pip package) | M | ₹0 (open-source) |
 | P6-D-5 | spaCy NER entity-centric aggregation | M | ₹0 (open-source) |
 | P6-D-6 | Hindi RSS + deep-translator pipeline | S | ₹0 (free tier) |
-| P6-D-7 | Signal validation loop (sentiment_accuracy table) | M | ₹0 |
+| P6-D-7 | GIFT Nifty pre-market signal layer (see below) | S | ₹0 (public data) |
+| P6-D-8 | Signal validation loop (sentiment_accuracy table) | M | ₹0 |
 
 **Total additional cost: ₹0** — FinBERT + spaCy + deep-translator are all open-source. The batch Haiku approach actually reduces Anthropic API cost vs current per-headline calls.
 
@@ -1124,4 +1125,158 @@ CREATE TABLE sentiment_accuracy (
 | CN-Buzz2Portfolio (Chen et al., Mar 2026) | News-to-sector-rotation signals |
 | Transformer CoVaR (Chen et al., Feb 2026) | News + price + KG cross-modal fusion |
 
-> **Expected improvement:** Direction accuracy of news-based signal: current ~52% (near random) → target 62-67% (matching Janus-Q benchmark) after P6-D-1 through P6-D-4. Measurable via P6-D-7 sentiment_accuracy table within 90 days of deployment.
+> **Expected improvement:** Direction accuracy of news-based signal: current ~52% (near random) → target 62-67% (matching Janus-Q benchmark) after P6-D-1 through P6-D-4. Measurable via P6-D-8 sentiment_accuracy table within 90 days of deployment.
+
+---
+
+### P6-D-7: GIFT Nifty Pre-Market Signal Layer
+
+#### What is GIFT Nifty?
+GIFT Nifty (formerly SGX Nifty, rebranded July 3 2023) is the **NIFTY 50 futures contract** traded on NSE IFSC (International Financial Services Centre) at GIFT City, Gujarat. It trades on an extended session: **Monday–Friday 6:30 AM – 11:30 PM IST**, giving ~3 hours of pre-market price discovery before the NSE cash market opens at 09:15 IST.
+
+**Why it matters:**
+- GIFT Nifty reflects **overnight US & Asian market sentiment** before domestic trading starts
+- FII futures activity in GIFT city creates directional bias that propagates to NSE open
+- Premium vs previous NIFTY 50 close = market consensus on gap-up / gap-down
+- Historically: GIFT ±0.5% at 08:30 IST correctly predicts NSE open direction ~72% of sessions (vs 52% for random)
+- Portfolio monitor can fire pre-open alerts if large negative signal detected (e.g., −1.5% = pause new entries)
+
+#### Data Sources (in priority order)
+| Source | URL / Method | Auth needed? | Notes |
+|---|---|---|---|
+| NSE IFSC official | `https://www.nseindia.com/api/GiftNifty` | None (public JSON) | Official, but NSE blocks server-side requests (bot detection) |
+| Investing.com RSS / API | `https://api.investing.com/api/financialdata/assets/quotes?pairs=17425` | None / rate-limited | Reliable, but scraping risk |
+| Moneycontrol scrape | `https://www.moneycontrol.com/mc/widget/sgxnifty/nifty-futures.html` | None | DOM scraping, fragile |
+| Google Finance scrape | `https://www.google.com/finance/quote/NIFTY50:NSE` | None | Proxy via yfinance `^NSEI` for previous close |
+| **yfinance `GC=F` proxy** | `yf.download("NIFTY50.NS", period="1d")` for prev close | None | **Primary approach**: fetch GIFT Nifty via NSE IFSC + compute delta vs yfinance prev close |
+
+**Recommended implementation:** NSE IFSC JSON (attempt with rotation of User-Agent headers) → Moneycontrol HTML fallback → Investing.com fallback. Previous NIFTY 50 close always from yfinance `^NSEI`.
+
+#### Signal Computation
+```python
+# data/gift_nifty_fetcher.py
+
+def get_gift_nifty_signal() -> dict:
+    """
+    Returns pre-market GIFT Nifty directional signal.
+    
+    Output:
+    {
+        "gift_price": 24350.0,       # Current GIFT Nifty futures price
+        "prev_nifty_close": 24180.0, # Previous NSE NIFTY 50 close
+        "premium_pts": 170.0,        # gift_price - prev_close
+        "premium_pct": 0.70,         # premium as % of prev close
+        "signal": "POSITIVE_OPEN",   # POSITIVE_OPEN | NEGATIVE_OPEN | FLAT
+        "signal_strength": "STRONG", # STRONG (>1%) | MODERATE (0.5–1%) | WEAK (<0.5%)
+        "source": "nseindia",        # data source used
+        "fetched_at": "2026-05-17T08:31:00+05:30",
+        "market_note": "GIFT Nifty +0.70% → bullish gap-up expected at open"
+    }
+    """
+```
+
+**Signal thresholds:**
+| Condition | Signal | Strength | Interpretation |
+|---|---|---|---|
+| premium_pct ≥ +1.0% | POSITIVE_OPEN | STRONG | Significant gap-up; FII/global buying overnight |
+| premium_pct +0.5% to +1.0% | POSITIVE_OPEN | MODERATE | Mild positive bias |
+| premium_pct -0.5% to +0.5% | FLAT | WEAK | No directional edge |
+| premium_pct -0.5% to -1.0% | NEGATIVE_OPEN | MODERATE | Mild selling pressure expected |
+| premium_pct ≤ -1.0% | NEGATIVE_OPEN | STRONG | Gap-down; consider pre-open alerts |
+
+#### Integration Points
+
+**1. `agents/macro.py` — pre-market enrichment**
+```python
+# In macro.analyse() — add GIFT Nifty as a sub-signal
+from data.gift_nifty_fetcher import get_gift_nifty_signal
+
+gift = get_gift_nifty_signal()
+# Adjust macro score by ±3 pts based on GIFT signal (morning runs only)
+if gift["signal"] == "POSITIVE_OPEN" and gift["signal_strength"] == "STRONG":
+    score += 3
+elif gift["signal"] == "NEGATIVE_OPEN" and gift["signal_strength"] == "STRONG":
+    score -= 3
+
+result["gift_nifty"] = gift  # exposed at top level of macro result
+```
+
+**2. `scheduler/portfolio_monitor.py` — pre-open alert**
+```python
+# In portfolio_monitor.py — fire WARNING alert when GIFT Nifty is strongly negative
+gift = get_gift_nifty_signal()
+if gift["signal"] == "NEGATIVE_OPEN" and gift["premium_pct"] <= -1.0:
+    _create_alert(client, severity="WARNING", alert_type="GIFT_NIFTY_GAP_DOWN",
+                  title=f"GIFT Nifty signals {gift['premium_pct']:.1f}% gap-down",
+                  detail=gift["market_note"])
+```
+
+**3. `worker.py` — 08:30 IST fetch job**
+```python
+# New job: fetch GIFT Nifty at 08:30 IST (45 min before market open)
+# Cache result in Supabase market_regime table or new gift_nifty_snapshots table
+# Used by Morning Brief (P6-C) + portfolio monitor pre-open check
+scheduler.add_job(job_gift_nifty_fetch, CronTrigger(hour=8, minute=30, timezone=IST))
+```
+
+**4. `api/main.py` — `/api/market/pulse` enrichment**
+```python
+# Add gift_nifty sub-key to existing market pulse response
+# dashboard Markets tab can show "GIFT Nifty: +0.7% ▲" in the ticker bar
+```
+
+**5. `P6-C Morning Brief` — natural language context**
+The Morning Brief LLM prompt will receive `gift_nifty` dict and include it in the opening line:
+> *"GIFT Nifty is trading at +0.7% premium over yesterday's close, suggesting a positive gap-up open. US markets closed mixed overnight (S&P 500 +0.3%, Nasdaq -0.1%)..."*
+
+**6. ARIA chat context**
+```python
+# In ARIA system prompt context builder
+if gift_nifty and gift_nifty.get("signal") != "FLAT":
+    context += f"\nGIFT Nifty pre-market: {gift_nifty['market_note']}"
+```
+
+#### New File: `data/gift_nifty_fetcher.py`
+```
+data/
+└── gift_nifty_fetcher.py    # P6-D-7: GIFT Nifty pre-market signal
+    # get_gift_nifty_signal() → {gift_price, prev_close, premium_pct, signal, signal_strength, source, fetched_at, market_note}
+    # Sources: NSE IFSC JSON (primary) → Moneycontrol scrape → Investing.com fallback
+    # Prev close: yfinance ^NSEI (always)
+    # 30-min in-memory cache (relevant only during pre-market window)
+    # Returns signal="FLAT" with note if outside GIFT trading hours or all sources fail
+```
+
+#### Fetch Schedule
+| Time (IST) | Job | Purpose |
+|---|---|---|
+| 07:00 | `job_gift_nifty_fetch()` | Early signal for research agent + macro context |
+| 08:30 | `job_gift_nifty_fetch()` | Morning Brief input + portfolio pre-open alert check |
+| 09:00 | `job_gift_nifty_fetch()` | Final pre-open reading (15 min before NSE open) |
+
+#### Supabase Storage (optional — for backtesting signal accuracy)
+```sql
+-- Lightweight append-only log (can be in existing market_regime table)
+ALTER TABLE market_regime ADD COLUMN IF NOT EXISTS gift_nifty_premium_pct NUMERIC;
+ALTER TABLE market_regime ADD COLUMN IF NOT EXISTS gift_nifty_signal TEXT;
+-- Or as separate lightweight table:
+CREATE TABLE gift_nifty_snapshots (
+  snapshot_at   TIMESTAMPTZ PRIMARY KEY,
+  gift_price    NUMERIC,
+  prev_close    NUMERIC,
+  premium_pct   NUMERIC,
+  signal        TEXT,
+  source        TEXT
+);
+```
+
+#### Accuracy Expectation
+| Horizon | Expected accuracy | Basis |
+|---|---|---|
+| Predicts open direction (first 15 min) | ~72% | Historical SGX→NSE correlation studies |
+| Predicts intraday direction (full session) | ~58% | Decays as domestic factors dominate |
+| Useful for portfolio pre-open alerts (≥1% gap) | High precision | Large moves usually sustained at open |
+
+> **Implementation effort:** Small (S) — 1 new file (`data/gift_nifty_fetcher.py`), 4 minor integration edits (macro.py, portfolio_monitor.py, worker.py, api/main.py). All data is public — zero additional cost.
+
+---
