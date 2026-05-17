@@ -1779,12 +1779,12 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
     } else if(ariaContext.type==="daily_run"){
       const run=ariaContext.run;
       if(run){
-        const dateStr=(run.run_date||"today").slice(0,10);
-        const screened=run.total_screened||0;
-        const passed=run.total_passed||0;
-        const discovered=run.total_discoveries||0;
-        const topDisc=(run.discovery_symbols||[]).slice(0,5).join(", ")||"none";
-        const cov=run.coverage_stats||{};
+        const dateStr=(run.runDate||run.run_date||"today").slice(0,10);
+        const screened=run.totalScreened??run.total_screened??0;
+        const passed=run.totalPassed??run.total_passed??0;
+        const discovered=run.totalDiscoveries??run.total_discoveries??0;
+        const topDisc=(run.discoverySymbols||run.discovery_symbols||[]).slice(0,5).join(", ")||"none";
+        const cov=run.coverageStats||run.coverage_stats||{};
         intro=`Here's what the discovery engine ran on **${dateStr}**:\n\n• **${screened}** stocks screened from NSE universe\n• **${passed}** passed fundamental pre-screening filters\n• **${discovered}** promoted to discovery recommendations\n${topDisc!=="none"?`\nTop new finds: **${topDisc}**\n`:""}\nCoverage: ${cov.cycle_pct_complete||"?"}% of full NSE universe this cycle · ${cov.monthly_passes||"?"}× monthly passes\n\nWould you like me to explain the screening methodology, deep-dive on any of the new discoveries, or compare them to your portfolio?`;
       }else{
         intro="The discovery engine runs daily at **06:00 IST** — screening 200 stocks from the full NSE universe each day, rotating through ~9-day cycles for full coverage.\n\nRun data isn't available yet for today. Check back after 06:00 IST, or ask me about yesterday's discovered stocks from the Discovery tab.";
@@ -1803,7 +1803,7 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
   const discoverySummary=(_ariaDu||[]).map(s=>`${s.symbol}:${s.action} conf${s.confidence}% tgt${s.target} risk${s.riskScore}`).join("|")||"No discovery ideas loaded yet.";
   const latestRun=(_ariaRuns||[])[0];
   const runsSummary=latestRun
-    ?`Latest discovery run ${latestRun.run_date||""}: screened ${latestRun.total_screened||0} stocks, ${latestRun.total_passed||0} passed filters, ${latestRun.total_discoveries||0} new discoveries (${(latestRun.discovery_symbols||[]).slice(0,5).join(",")||"none"}). Cycle: ${latestRun.coverage_stats?.cycle_pct_complete||"?"}% complete.`
+    ?`Latest discovery run ${latestRun.runDate||latestRun.run_date||""}: screened ${latestRun.totalScreened??latestRun.total_screened??0} stocks, ${latestRun.totalPassed??latestRun.total_passed??0} passed filters, ${latestRun.totalDiscoveries??latestRun.total_discoveries??0} new discoveries (${(latestRun.discoverySymbols||latestRun.discovery_symbols||[]).slice(0,5).join(",")||"none"}). Cycle: ${(latestRun.coverageStats||latestRun.coverage_stats)?.cycle_pct_complete||"?"}% complete.`
     :"No discovery run data available yet.";
 
   const SYSTEM=`You are ARIA (Adaptive Research Intelligence Assistant) for Bharat Intelligence — Indian stock and commodity market multi-agent system.

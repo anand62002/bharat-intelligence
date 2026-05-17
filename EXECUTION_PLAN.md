@@ -64,12 +64,17 @@
 | BF-9 | Health panel daily_runs.status + agents_run column errors | Bug Fix | ✅ **DONE** | 2026-05-16 |
 | BF-10 | Governance WebSocket broadcaster pushing all 107 raw alerts (bypassing dedup) | Bug Fix | ✅ **DONE** | 2026-05-16 |
 | BF-11 | Synthesis 529 Overloaded — 3-attempt retry with 15s/45s backoff | Enhancement | ✅ **DONE** | 2026-05-16 |
+| BF-12 | ARIA "What ran today?" shows 0/0/0 — snake_case vs camelCase mismatch in daily_run ARIA intro | Bug Fix | ✅ **DONE** | 2026-05-17 |
 | P5-A | Enhanced outcome tracker + agent attribution | Phase 5 | ⬜ TODO | — |
 | P5-B | Paper portfolio simulation mode | Phase 5 | ⬜ TODO | — |
+| P5-C | Recommendation outcome seeder — backfill open recs into recommendation_outcomes table | Phase 5 | ⬜ TODO | — |
+| P5-D | Forward outcome poller — daily job prices recs at t+30/60/90 days, writes alpha vs NIFTY | Phase 5 | ⬜ TODO | — |
+| P5-E | Attribution dashboard — per-agent hit rate, avg alpha, best/worst calls over rolling 90d | Phase 5 | ⬜ TODO | — |
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
+| P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
 
-**Progress: 51 / 54 items complete (94%)**
+**Progress: 52 / 58 items complete (90%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -907,8 +912,12 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P4-D** | Replace Breeze with Angel One SmartAPI (live options) | Code | ₹0 (free with demat) | M | ⬜ TODO (lowest priority) |
 | **P5-A** | Enhanced outcome tracker + attribution | Code | None | L | ⬜ TODO |
 | **P5-B** | Paper portfolio simulation mode | Code | None | L | ⬜ TODO |
+| **P5-C** | Rec outcome seeder (backfill open recs into recommendation_outcomes) | Code | None | S | ⬜ TODO |
+| **P5-D** | Forward outcome poller — daily t+30/60/90 alpha vs NIFTY | Code | None | M | ⬜ TODO |
+| **P5-E** | Attribution dashboard — per-agent hit rate + alpha over rolling 90d | Code | None | M | ⬜ TODO |
 | **P6-A** | System performance dashboard tab | Code | None | M | ⬜ TODO |
 | **P6-B** | Backtest results dashboard panel | Code | None | S | ⬜ TODO |
+| **P6-C** | Market tab daily news digest (Morning Brief + Closing Digest, Claude+OpenAI) | Code | OpenAI API (existing) | L | ⬜ TODO |
 | **Always** | CLAUDE.md + EXECUTION_PLAN.md update | Doc | None | XS | 🔄 Recurring |
 
 *Effort: XS=<1hr · S=1-3hr · M=3-6hr · L=6-12hr · XL=12-24hr*
@@ -940,5 +949,5 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.7 — 2026-05-16 (P3-C-BE analyst targets + Trendlyne F&O + screener session warming + governance dedup + synthesis retry + discovery save fix)*  
-*Next milestone: P3-C remaining pillars — Pillar 1 (fundamentals fallback) is highest priority given screener.in Railway block*
+*Document version: 3.8 — 2026-05-17 (DB-10 Data Sheet parser rewrite + BF-12 ARIA daily_run camelCase fix + Phase 5 plan)*  
+*Next milestone: P5 — outcome tracker → attribution analysis → paper portfolio mode*
