@@ -719,39 +719,65 @@ def _fetch_prices_sync() -> dict[str, tuple[float, float]]:
     Fetches closing prices for all MARKET_SYMBOLS via yfinance.
     Returns {yf_symbol: (last_close, prev_close)}.
     Run via loop.run_in_executor to avoid blocking the event loop.
+
+    yfinance 1.2.x column-structure note:
+      Multi-ticker download returns (Price, Ticker) MultiIndex columns:
+        df["Close"]["^NSEI"]  — use this form
+      Older yfinance returned (Ticker, Price):
+        df["^NSEI"]["Close"]  — fallback tried if new form fails
     """
     syms = [sym for _, sym, _ in MARKET_SYMBOLS]
     out: dict[str, tuple[float, float]] = {}
+
+    def _extract(df, sym: str):
+        """Try yfinance 1.2.x column format first, then legacy format."""
+        for accessor in [
+            lambda: df["Close"][sym],         # yfinance 1.2.x: (Price, Ticker)
+            lambda: df[sym]["Close"],          # legacy: (Ticker, Price)
+            lambda: df["Close"],               # single-ticker flat
+        ]:
+            try:
+                s = accessor().dropna()
+                if len(s):
+                    return s
+            except Exception:
+                continue
+        return None
+
     try:
         df = yf.download(
             syms,
-            period    = "2d",
-            interval  = "1d",
+            period      = "2d",
+            interval    = "1d",
             auto_adjust = True,
-            progress  = False,
-            group_by  = "ticker",
+            # progress / group_by removed — deprecated/removed in yfinance 1.2.x
         )
         for sym in syms:
             try:
-                closes = (df["Close"] if len(syms) == 1 else df[sym]["Close"]).dropna()
-                if len(closes) >= 2:
+                closes = _extract(df, sym)
+                if closes is not None and len(closes) >= 2:
                     out[sym] = (float(closes.iloc[-1]), float(closes.iloc[-2]))
-                elif len(closes) == 1:
-                    out[sym] = (float(closes.iloc[-1]), float(closes.iloc[-1]))
+                elif closes is not None and len(closes) == 1:
+                    out[sym] = (float(closes.iloc[0]), float(closes.iloc[0]))
             except Exception:
                 pass
     except Exception as exc:
         log.warning("yfinance batch download failed: %s", exc)
-        # Fallback: try individual tickers
-        for sym in syms:
-            try:
-                closes = yf.Ticker(sym).history(period="2d")["Close"].dropna()
-                if len(closes) >= 2:
-                    out[sym] = (float(closes.iloc[-1]), float(closes.iloc[-2]))
-                elif len(closes) == 1:
-                    out[sym] = (float(closes.iloc[-1]), float(closes.iloc[-1]))
-            except Exception:
-                pass
+
+    # Per-symbol fallback for any sym not yet in out
+    missing = [s for s in syms if s not in out]
+    if missing:
+        log.debug("Market pulse: fetching %d symbols individually", len(missing))
+    for sym in missing:
+        try:
+            closes = yf.Ticker(sym).history(period="5d")["Close"].dropna()
+            if len(closes) >= 2:
+                out[sym] = (float(closes.iloc[-1]), float(closes.iloc[-2]))
+            elif len(closes) == 1:
+                out[sym] = (float(closes.iloc[0]), float(closes.iloc[0]))
+        except Exception:
+            pass
+
     return out
 
 
@@ -1550,10 +1576,10 @@ async def get_system_health(
 
     # ── Last daily pipeline run ───────────────────────────────────────────────
     # daily_runs schema: run_date, symbols_processed, errors (INTEGER count),
-    # duration_seconds, created_at.  No 'status' column — infer from error count.
+    # duration_seconds, status (OK | WARNING | DATA_DEGRADATION), created_at.
     try:
         run_rows = (db.table("daily_runs")
-                      .select("run_date, symbols_processed, errors, duration_seconds")
+                      .select("run_date, symbols_processed, errors, duration_seconds, status")
                       .order("run_date", desc=True)
                       .limit(1)
                       .execute()
@@ -1563,18 +1589,33 @@ async def get_system_health(
             run_date_str   = str(run.get("run_date", "?"))
             n_syms         = run.get("symbols_processed") or 0
             n_errors       = run.get("errors") or 0
+            run_status_col = run.get("status") or ("OK" if n_errors == 0 else "WARNING")
             duration       = run.get("duration_seconds")
             dur_str        = f" ({duration:.0f}s)" if duration else ""
             days_ago       = (date.today() - date.fromisoformat(run_date_str)).days \
                              if run_date_str != "?" else 99
-            run_status_str = "success" if n_errors == 0 else f"{n_errors} errors"
+
+            # Determine detail message based on status column
+            if run_status_col == "DATA_DEGRADATION":
+                run_status_str = f"{n_errors} symbols suppressed (data degradation)"
+                hint = ("All analyses suppressed — screener.in + Trendlyne were unreachable. "
+                        "Refresh TRENDLYNE_SESSION/TRENDLYNE_CSRF in Railway env vars. "
+                        "Tomorrow's run will retry automatically.")
+                check_fn = _warn
+            elif n_errors == 0:
+                run_status_str = "success"
+                hint = ""
+                check_fn = _ok
+            else:
+                run_status_str = f"{n_errors} errors"
+                hint = "Check Railway worker logs for synthesis errors"
+                check_fn = _warn
 
             if days_ago == 0:
-                check_fn = _ok if n_errors == 0 else _warn
                 checks.append(check_fn(
                     "Daily Pipeline",
                     f"Ran today ({run_date_str}){dur_str} — {n_syms} symbols, {run_status_str}",
-                    "Check Railway worker logs for synthesis errors" if n_errors else "",
+                    hint,
                 ))
             elif days_ago <= 1:
                 checks.append(_warn(
@@ -1588,8 +1629,7 @@ async def get_system_health(
                     f"Last run: {run_date_str} ({days_ago} days ago) — pipeline may not be running",
                     "Check Railway worker dyno is running. Run: python worker.py --now"
                 ))
-            # Screener.in sub-check: no error detail in daily_runs (it's a count),
-            # so just report OK here — detailed errors visible in Railway logs.
+            # Screener.in sub-check
             checks.append(_ok("Screener.in", f"Last run {run_date_str}: screener ran (check Railway logs for 403/fallback detail)"))
         else:
             checks.append(_warn("Daily Pipeline", "No daily_runs rows found — scheduler may not have run yet", "Deploy worker.py to Railway and verify it starts"))

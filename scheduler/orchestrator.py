@@ -1353,6 +1353,20 @@ async def log_run_node(state: OrchestratorState) -> dict:
         n_syms, n_recs, n_err, duration,
     )
 
+    # Detect full-blackout data-degradation days:
+    # when ALL symbols are suppressed and none produced recs, it's almost always
+    # because all external data sources (screener.in + Trendlyne) were down.
+    suppressed_count = sum(1 for e in state["errors"] if "SUPPRESSED" in e)
+    if n_recs == 0 and n_syms > 0 and suppressed_count == n_syms:
+        log.critical(
+            "DATA DEGRADATION DAY — all %d symbols SUPPRESSED. "
+            "Likely cause: screener.in + Trendlyne both unreachable from Railway. "
+            "Check: (1) screener.in network access from Railway "
+            "(2) TRENDLYNE_SESSION/TRENDLYNE_CSRF cookies still valid. "
+            "No recommendations written — this is intentional (low-quality data suppressed).",
+            n_syms,
+        )
+
     if state["dry_run"]:
         log.info("[DRY RUN] daily_runs table not updated")
         return {}
@@ -1361,13 +1375,23 @@ async def log_run_node(state: OrchestratorState) -> dict:
     if not client:
         return {}
 
+    # Status: DATA_DEGRADATION when all suppressed (external sources down),
+    # WARNING when some errors, OK when recs produced
+    if n_recs == 0 and suppressed_count == n_syms and n_syms > 0:
+        run_status = "DATA_DEGRADATION"
+    elif n_recs > 0:
+        run_status = "OK"
+    else:
+        run_status = "WARNING"
+
     try:
         client.table("daily_runs").insert({
             "symbols_processed": n_syms,
             "errors":            n_err,
             "duration_seconds":  duration,
+            "status":            run_status,
         }).execute()
-        log.info("daily_runs row logged")
+        log.info("daily_runs row logged (status=%s)", run_status)
     except Exception as exc:
         log.warning("daily_runs log failed: %s", exc)
 
