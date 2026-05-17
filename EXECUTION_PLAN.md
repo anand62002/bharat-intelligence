@@ -67,14 +67,14 @@
 | BF-12 | ARIA "What ran today?" shows 0/0/0 — snake_case vs camelCase mismatch in daily_run ARIA intro | Bug Fix | ✅ **DONE** | 2026-05-17 |
 | P5-A | Enhanced outcome tracker + agent attribution | Phase 5 | ⬜ TODO | — |
 | P5-B | Paper portfolio simulation mode | Phase 5 | ⬜ TODO | — |
-| P5-C | Recommendation outcome seeder — backfill open recs into recommendation_outcomes table | Phase 5 | ⬜ TODO | — |
+| P5-C | Recommendation outcome seeder — backfill open recs into recommendation_outcomes table | Phase 5 | ✅ **DONE** | 2026-05-17 |
 | P5-D | Forward outcome poller — daily job prices recs at t+30/60/90 days, writes alpha vs NIFTY | Phase 5 | ⬜ TODO | — |
 | P5-E | Attribution dashboard — per-agent hit rate, avg alpha, best/worst calls over rolling 90d | Phase 5 | ⬜ TODO | — |
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 | P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
 
-**Progress: 52 / 58 items complete (90%)**
+**Progress: 53 / 58 items complete (91%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |

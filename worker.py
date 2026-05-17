@@ -192,6 +192,22 @@ def job_regime_detector() -> None:
         log.error("Regime detector job failed: %s", exc, exc_info=True)
 
 
+def job_rec_outcome_seeder() -> None:
+    """06:55 IST — seed PENDING outcome rows for any new recommendations (P5-C)."""
+    log.info("-" * 50)
+    log.info("  JOB: Rec Outcome Seeder (06:55 IST)")
+    log.info("-" * 50)
+    try:
+        from agents.rec_outcome_seeder import run_seeder
+        result = run_seeder(dry_run=False, resolve_past=False)
+        log.info(
+            "Seeder done — seeded=%d skipped=%d errors=%d",
+            result.get("seeded", 0), result.get("skipped", 0), len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        log.error("Rec outcome seeder job failed: %s", exc, exc_info=True)
+
+
 def job_outcome_tracker() -> None:
     """18:30 IST — resolve pending recommendation outcomes at 90/180/365d horizons."""
     log.info("=" * 60)
@@ -421,6 +437,18 @@ def build_scheduler():
         misfire_grace_time=1800,
     )
 
+    # ── Rec outcome seeder — after orchestrator (P5-C) ───────────────────────
+    # Seeds PENDING rows for any new recs saved by the orchestrator (06:00).
+    # Runs at 06:55 so orchestrator + discovery (06:00) have time to finish.
+    scheduler.add_job(
+        job_rec_outcome_seeder,
+        CronTrigger(hour=6, minute=55, timezone=IST),
+        id="rec_outcome_seeder",
+        name="Rec Outcome Seeder",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # ── Outcome tracker — after market close ─────────────────────────────────
     scheduler.add_job(
         job_outcome_tracker,
@@ -517,6 +545,7 @@ def main() -> None:
         job_performance_tracker()
         job_research_agent()
         job_portfolio_monitor()
+        job_rec_outcome_seeder()
         job_outcome_tracker()
         job_options_snapshot()
         job_rag_refresh()
