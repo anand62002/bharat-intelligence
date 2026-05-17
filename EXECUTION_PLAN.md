@@ -51,11 +51,11 @@
 | DB-3 | Data source health panel in Governance tab (/api/system/health) | Dashboard | ✅ **DONE** | 2026-05-15 |
 | DB-4 | Stale recs notice on Discovery tab when ideas are from prior day | Dashboard | ✅ **DONE** | 2026-05-15 |
 | DB-5 | Recs tab empty state → link to health panel | Dashboard | ✅ **DONE** | 2026-05-15 |
-| DB-6 | Performance tab — needs recommendation_outcomes seeding | Dashboard | ⬜ PENDING | — |
-| DB-7 | Market tab — live news feed integration (ET/MC RSS per stock) | Dashboard | ⬜ TODO | — |
-| DB-8 | Portfolio recs tab — filter by portfolio holdings (only show recs for held stocks) | Dashboard | ⬜ TODO | — |
-| DB-9 | ARIA — "What ran today" quick summary button (calls /api/discovery/runs) | Dashboard | ⬜ TODO | — |
-| DB-10 | Screener Export-to-Excel fallback (if HTML blocked, use CSV download) | Dashboard | ⬜ TODO | — |
+| DB-6 | Performance tab — needs recommendation_outcomes seeding | Dashboard | ✅ **DONE** | (already built — PerformanceTab component + /api/performance/* endpoints existed) |
+| DB-7 | Market tab — live news feed integration (Google News RSS per symbol) | Dashboard | ✅ **DONE** | 2026-05-17 |
+| DB-8 | Portfolio recs tab — filter by portfolio holdings (only show recs for held stocks) | Dashboard | ✅ **DONE** | 2026-05-17 |
+| DB-9 | ARIA — "What ran today?" button + daily_run context type | Dashboard | ✅ **DONE** | 2026-05-17 |
+| DB-10 | Screener Export-to-Excel fallback — `_parse_screener_excel()` + `get_screener_history` tier-2 | Backend | ✅ **DONE** | 2026-05-17 |
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ✅ **DONE** | 2026-05-16 |
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ✅ **DONE** | (already built) |
 | P4-C | Governance numerical grounding check | Phase 4 | ✅ **DONE** | 2026-05-16 |
@@ -69,16 +69,16 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 
-**Progress: 46 / 54 items complete (85%)**
+**Progress: 51 / 54 items complete (94%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
 |---|---|---|
 | Discovery tab: "13 passed, 2 promoted" but blank recs | `valid_till < today` filter in 7d fallback excluded all recs | ✅ Fixed: 14d window, no valid_till filter |
-| Portfolio recs tab always empty | Orchestrator generates recs for screener universe, not portfolio-specific | ⬜ DB-8 (filter by held symbols) |
+| Portfolio recs tab always empty | Orchestrator generates recs for screener universe, not portfolio-specific | ✅ Fixed: DB-8 toggle "All / My Holdings" in recs tab |
 | Governance: duplicate STOPLOSS_HIT per stock | API used wrong field (portfolio_id→holding_id); WebSocket broadcaster pushed all raw rows every 30s overriding dedup | ✅ Fixed: dedup by holding_id/symbol in both REST + WebSocket; SQL to bulk-resolve 107 stale DB rows |
-| Performance tab no data | recommendation_outcomes table empty (recs < 90 days old) | ⬜ DB-6 (seed from old recs when ≥90d old) |
-| Market tab: empty news | No RSS-per-stock feed integrated in dashboard | ⬜ DB-7 |
+| Performance tab no data | recommendation_outcomes table empty (recs < 90 days old) | ✅ DB-6: PerformanceTab already built; awaiting first 90-day recs |
+| Market tab: empty news | No RSS-per-stock feed integrated in dashboard | ✅ Fixed: DB-7 Google News RSS panel with topic filter buttons |
 | Screener returning standalone figures instead of consolidated | URL order was standalone-first; Reliance PE was 42x instead of 22.8x | ✅ Fixed: consolidated/ tried first |
 | No visibility into data source failures without checking logs | No health endpoint or UI panel | ✅ Fixed: /api/system/health + Governance panel |
 

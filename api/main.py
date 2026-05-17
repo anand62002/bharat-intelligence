@@ -1990,6 +1990,75 @@ async def get_upcoming_earnings(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/news/{symbol}", tags=["market"])
+async def get_symbol_news(
+    symbol: str,
+    _: None = Depends(require_api_key),
+):
+    """
+    Fetch recent news headlines for a stock/index symbol via Google News RSS.
+    Returns up to 15 headlines (title, source, published, url).
+    No API key required — uses free Google News RSS feed.
+    Results are NOT cached (lightweight enough to call on demand).
+    """
+    try:
+        import feedparser
+        from urllib.parse import quote_plus
+
+        clean = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+
+        # Use two targeted queries for maximum coverage
+        queries = [
+            f"{clean} stock NSE India",
+            f"{clean} earnings revenue profit India",
+        ]
+
+        google_tmpl = (
+            "https://news.google.com/rss/search"
+            "?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+        )
+
+        seen: set[str] = set()
+        articles: list[dict] = []
+
+        for query in queries:
+            url = google_tmpl.format(query=quote_plus(query))
+            try:
+                feed = feedparser.parse(url)
+                if feed.bozo and not feed.entries:
+                    continue
+                for entry in feed.entries[:8]:
+                    title = (entry.get("title") or "").strip()
+                    if not title or title in seen:
+                        continue
+                    seen.add(title)
+                    published = entry.get("published", "")
+                    try:
+                        if entry.get("published_parsed"):
+                            published = str(
+                                datetime(*entry.published_parsed[:6]).date()
+                            )
+                    except Exception:
+                        pass
+                    articles.append({
+                        "title":     title,
+                        "source":    "Google News",
+                        "published": published,
+                        "url":       entry.get("link", ""),
+                    })
+            except Exception as exc:
+                log.debug("news RSS fetch error (symbol=%s, query=%r): %s", symbol, query, exc)
+
+        return {
+            "symbol":  clean,
+            "news":    articles[:15],
+            "count":   len(articles[:15]),
+        }
+    except Exception as exc:
+        log.warning("get_symbol_news(%s) failed: %s", symbol, exc)
+        return {"symbol": symbol.upper(), "news": [], "count": 0}
+
+
 @app.get("/api/market/regime", tags=["market"])
 async def get_market_regime(
     days: int = Query(30, description="Days of history to return"),

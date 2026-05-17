@@ -1413,6 +1413,204 @@ def get_india_vix() -> float | None:
 
 # ─── 8. SCREENER HISTORICAL DATA ─────────────────────────────────────────────
 
+def _parse_screener_excel(excel_bytes: bytes, symbol: str) -> dict | None:
+    """
+    Parse the Excel export from screener.in (/company/{slug}/export/) into the
+    same dict schema as get_screener_history().
+
+    Sheet layout (screener.in export format):
+      "Profit & Loss"  — rows: Revenue, OPM, Net Profit, EPS, Depreciation  (cols = years)
+      "Cash Flows"     — rows: includes investing cash flow (capex proxy)
+      "Ratios"         — rows: ROCE, ROE, Dividend Payout
+      "Shareholding"   — rows: Promoters (quarterly)
+
+    Returns None on parse failure.
+    """
+    try:
+        import io
+        import openpyxl  # type: ignore
+    except ImportError:
+        log.debug("_parse_screener_excel: openpyxl not installed — skipping Excel fallback")
+        return None
+
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes), read_only=True, data_only=True)
+    except Exception as exc:
+        log.warning("_parse_screener_excel(%s): failed to open workbook: %s", symbol, exc)
+        return None
+
+    def _sheet(names):
+        """Return first matching sheet (case-insensitive)."""
+        for name in names:
+            for sheet_name in wb.sheetnames:
+                if name.lower() in sheet_name.lower():
+                    return wb[sheet_name]
+        return None
+
+    def _to_float(v) -> Optional[float]:
+        if v is None:
+            return None
+        try:
+            return float(str(v).replace(",", "").replace("%", "").strip())
+        except (ValueError, TypeError):
+            return None
+
+    def _read_sheet_rows(ws) -> list[list]:
+        """Read all rows as lists of values."""
+        if ws is None:
+            return []
+        return [[cell.value for cell in row] for row in ws.iter_rows()]
+
+    # ── Profit & Loss ─────────────────────────────────────────────────────────
+    pnl_ws   = _sheet(["profit", "p&l", "pnl"])
+    pnl_rows = _read_sheet_rows(pnl_ws)
+
+    years: list[str] = []
+    revenue_history: list[Optional[float]] = []
+    ebitda_margins: list[Optional[float]] = []
+    pat_history: list[Optional[float]] = []
+    eps_history: list[Optional[float]] = []
+    depreciation_history: list[Optional[float]] = []
+
+    if pnl_rows:
+        # First non-empty row with a year-like header gives us column indices
+        header_row = None
+        header_idx = 0
+        for i, row in enumerate(pnl_rows[:5]):
+            if row and len(row) > 2 and any(
+                str(v or "").strip().startswith(("Mar", "Sep", "20", "19"))
+                for v in row[1:]
+            ):
+                header_row = row
+                header_idx = i
+                break
+        if header_row:
+            years = [str(v).strip() for v in header_row[1:] if v is not None]
+            n_cols = len(years)
+            for row in pnl_rows[header_idx + 1:]:
+                if not row:
+                    continue
+                label = str(row[0] or "").lower()
+                vals  = [_to_float(row[j + 1]) if j + 1 < len(row) else None for j in range(n_cols)]
+                if "sales" in label or "revenue" in label or "net sales" in label:
+                    revenue_history = vals
+                elif "opm" in label or "operating profit margin" in label:
+                    ebitda_margins = vals
+                elif "net profit" in label and "%" not in label:
+                    pat_history = vals
+                elif "eps" in label and "%" not in label:
+                    eps_history = vals
+                elif "depreciation" in label:
+                    depreciation_history = vals
+
+    # ── Cash Flows ────────────────────────────────────────────────────────────
+    cf_ws    = _sheet(["cash flow", "cashflow"])
+    cf_rows  = _read_sheet_rows(cf_ws)
+    capex_history: list[Optional[float]] = []
+
+    if cf_rows and years:
+        n_cols = len(years)
+        # Find header row offset (same year column structure)
+        cf_offset = 0
+        for i, row in enumerate(cf_rows[:5]):
+            if row and any(
+                str(v or "").strip().startswith(("Mar", "Sep", "20", "19"))
+                for v in (row[1:] if len(row) > 1 else [])
+            ):
+                cf_offset = i
+                break
+        for row in cf_rows[cf_offset + 1:]:
+            if not row:
+                continue
+            label = str(row[0] or "").lower()
+            if "invest" in label and ("capex" in label or "fixed" in label or "assets" in label):
+                vals = [_to_float(row[j + 1]) if j + 1 < len(row) else None for j in range(n_cols)]
+                capex_history = [abs(v) if v is not None else None for v in vals]
+                break
+
+    # ── Ratios ─────────────────────────────────────────────────────────────────
+    ratio_ws   = _sheet(["ratio"])
+    ratio_rows = _read_sheet_rows(ratio_ws)
+    roce_history: list[Optional[float]] = []
+    roe_history:  list[Optional[float]] = []
+    div_payout:   list[Optional[float]] = []
+
+    if ratio_rows and years:
+        n_cols = len(years)
+        r_offset = 0
+        for i, row in enumerate(ratio_rows[:5]):
+            if row and any(
+                str(v or "").strip().startswith(("Mar", "Sep", "20", "19"))
+                for v in (row[1:] if len(row) > 1 else [])
+            ):
+                r_offset = i
+                break
+        for row in ratio_rows[r_offset + 1:]:
+            if not row:
+                continue
+            label = str(row[0] or "").lower()
+            vals  = [_to_float(row[j + 1]) if j + 1 < len(row) else None for j in range(n_cols)]
+            if "roce" in label:
+                roce_history = vals
+            elif "roe" in label:
+                roe_history = vals
+            elif "dividend payout" in label:
+                div_payout = vals
+
+    # ── Shareholding ──────────────────────────────────────────────────────────
+    sh_ws    = _sheet(["shareholding", "share holding"])
+    sh_rows  = _read_sheet_rows(sh_ws)
+    promoter_history:  list[Optional[float]] = []
+    promoter_quarters: list[str] = []
+
+    if sh_rows:
+        q_header: list[str] = []
+        for i, row in enumerate(sh_rows[:5]):
+            if row and any(
+                str(v or "").strip().startswith(("Mar", "Jun", "Sep", "Dec"))
+                for v in (row[1:] if len(row) > 1 else [])
+            ):
+                q_header = [str(v).strip() for v in row[1:] if v is not None]
+                break
+        if q_header:
+            promoter_quarters = q_header
+            n_q = len(q_header)
+            for row in sh_rows:
+                if not row:
+                    continue
+                label = str(row[0] or "").lower()
+                if "promoter" in label and "pledge" not in label:
+                    promoter_history = [
+                        _to_float(row[j + 1]) if j + 1 < len(row) else None
+                        for j in range(n_q)
+                    ]
+                    break
+
+    if not years:
+        log.warning("_parse_screener_excel(%s): no year headers found in P&L sheet", symbol)
+        return None
+
+    log.info(
+        "_parse_screener_excel(%s): parsed %d years from Excel export",
+        symbol, len(years),
+    )
+    return {
+        "years":                    years,
+        "revenue_history":          revenue_history,
+        "ebitda_margins":           ebitda_margins,
+        "pat_history":              pat_history,
+        "eps_history":              eps_history,
+        "depreciation_history":     depreciation_history,
+        "capex_history":            capex_history,
+        "roce_history":             roce_history,
+        "roe_history":              roe_history,
+        "dividend_payout_history":  div_payout,
+        "promoter_holding_history": promoter_history,
+        "promoter_holding_quarters": promoter_quarters,
+        "years_available":          len(years),
+    }
+
+
 def get_screener_history(symbol: str) -> dict | None:
     """
     Fetch multi-year historical financial data from screener.in for a company.
@@ -1494,9 +1692,46 @@ def get_screener_history(symbol: str) -> dict | None:
             break
 
     if resp is None:
-        log.error(
-            "get_screener_history(%s): all URL variants failed (last status: %s)",
+        log.warning(
+            "get_screener_history(%s): HTML variants failed (last status: %s) "
+            "— trying screener.in Excel export fallback",
             symbol, _last_status,
+        )
+        # ── Excel export fallback (DB-10) ─────────────────────────────────────
+        # screener.in /export/ endpoint uses the same session cookies but a
+        # different URL pattern — may succeed when HTML scraping is rate-limited.
+        for candidate in candidates:
+            for variant in ("consolidated/", ""):
+                export_url = f"https://www.screener.in/company/{candidate}/{variant}export/"
+                try:
+                    r = session.get(
+                        export_url,
+                        headers=_screener_headers({
+                            "Referer": f"https://www.screener.in/company/{candidate}/{variant}",
+                            "User-Agent": random.choice(_SCREENER_USER_AGENTS),
+                            "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,*/*",
+                        }),
+                        timeout=20,
+                    )
+                    if r.status_code == 200 and len(r.content) > 1000:
+                        log.info(
+                            "get_screener_history(%s): Excel export returned %d bytes from %s",
+                            symbol, len(r.content), export_url,
+                        )
+                        result = _parse_screener_excel(r.content, symbol)
+                        if result:
+                            return result
+                    else:
+                        log.debug(
+                            "get_screener_history(%s): export HTTP %s from %s",
+                            symbol, r.status_code, export_url,
+                        )
+                except Exception as exc:
+                    log.debug("get_screener_history(%s): export error %s: %s", symbol, export_url, exc)
+            # Break after first candidate that returns content
+        log.error(
+            "get_screener_history(%s): all variants including Excel export failed",
+            symbol,
         )
         return None
 

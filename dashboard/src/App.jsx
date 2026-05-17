@@ -881,7 +881,7 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
 }
 
 // ─── RESEARCH DISCOVERY TAB ───────────────────────────────────────────────────
-function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discoveryUniverse: _du, discoveryRuns: _dr, apiLoaded, valuationCache, setValuationCache}){
+function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRunSummary, discoveryUniverse: _du, discoveryRuns: _dr, apiLoaded, valuationCache, setValuationCache}){
   const _universe = Array.isArray(_du) ? _du : [];
   const _runs     = Array.isArray(_dr) ? _dr : [];
   const [selectedId, setSelectedId] = useState(_universe[0]?.id || null);
@@ -918,9 +918,10 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, discover
           </div>
           <div style={{fontSize:10,color:C.muted}}>Stocks NOT in your portfolio — surfaced daily by the agent network scanning NSE/BSE universe · {_universe.length} ideas today</div>
         </div>
-        <button onClick={()=>onOpenARIA("discovery")} style={{background:C.purple+"22",border:`1px solid ${C.purple}44`,borderRadius:7,padding:"6px 12px",color:C.purple,fontSize:11,fontWeight:700,cursor:"pointer"}}>
-          ✦ Ask ARIA
-        </button>
+        <div style={{display:"flex",gap:6}}>
+          {onOpenRunSummary&&<button onClick={onOpenRunSummary} style={{background:C.orange+"22",border:`1px solid ${C.orange}44`,borderRadius:7,padding:"6px 12px",color:C.orange,fontSize:11,fontWeight:700,cursor:"pointer"}}>📊 What ran today?</button>}
+          <button onClick={()=>onOpenARIA("discovery")} style={{background:C.purple+"22",border:`1px solid ${C.purple}44`,borderRadius:7,padding:"6px 12px",color:C.purple,fontSize:11,fontWeight:700,cursor:"pointer"}}>✦ Ask ARIA</button>
+        </div>
       </div>
 
       {/* How it works */}
@@ -1745,7 +1746,7 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBrok
 }
 
 // ─── ARIA PANEL ───────────────────────────────────────────────────────────────
-function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolioUpdate,discoveryStock,discoveryUniverse:_ariaDu,marketPulse:_mktPulse}){
+function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolioUpdate,discoveryStock,discoveryUniverse:_ariaDu,discoveryRuns:_ariaRuns,marketPulse:_mktPulse}){
   const _mktStr = (_mktPulse&&_mktPulse.length>0)
     ? _mktPulse.map(m=>`${m.key} ${m.value} (${m.change})`).join(", ")
     : "Market data unavailable — do not cite specific index or price values.";
@@ -1775,6 +1776,19 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
       intro=`This proposal is currently **tied in agent debate** — your vote is the tiebreaker.\n\n**${p.title}**\n\nThe core disagreement:\n• **FOR camp**: ${forAgents.length?forAgents.join(", "):"agents voting for this change"} argue it improves system accuracy\n• **AGAINST camp**: ${againstAgents.length?againstAgents.join(", "):"agents voting against"} raise concerns about latency or complexity\n\nTell me "approve", "reject", or ask me to walk through each side's argument before you decide.`;
     } else if(ariaContext.type==="research_approved"&&ariaContext.paper){
       intro=`This enhancement has been **approved by the agents**: **${ariaContext.paper.title}**\n\nReady to walk through the implementation steps. Cost: **${ariaContext.paper.costImpact}**\n\nShall I begin with Step 1?`;
+    } else if(ariaContext.type==="daily_run"){
+      const run=ariaContext.run;
+      if(run){
+        const dateStr=(run.run_date||"today").slice(0,10);
+        const screened=run.total_screened||0;
+        const passed=run.total_passed||0;
+        const discovered=run.total_discoveries||0;
+        const topDisc=(run.discovery_symbols||[]).slice(0,5).join(", ")||"none";
+        const cov=run.coverage_stats||{};
+        intro=`Here's what the discovery engine ran on **${dateStr}**:\n\n• **${screened}** stocks screened from NSE universe\n• **${passed}** passed fundamental pre-screening filters\n• **${discovered}** promoted to discovery recommendations\n${topDisc!=="none"?`\nTop new finds: **${topDisc}**\n`:""}\nCoverage: ${cov.cycle_pct_complete||"?"}% of full NSE universe this cycle · ${cov.monthly_passes||"?"}× monthly passes\n\nWould you like me to explain the screening methodology, deep-dive on any of the new discoveries, or compare them to your portfolio?`;
+      }else{
+        intro="The discovery engine runs daily at **06:00 IST** — screening 200 stocks from the full NSE universe each day, rotating through ~9-day cycles for full coverage.\n\nRun data isn't available yet for today. Check back after 06:00 IST, or ask me about yesterday's discovered stocks from the Discovery tab.";
+      }
     } else if(ariaContext.type==="portfolio"){
       intro=`Portfolio context open. Your ${portfolio.length} holdings have a total value of ₹${portfolio.reduce((s,h)=>s+(h.currentPrice*h.qty),0).toLocaleString("en-IN",{maximumFractionDigits:0})}.\n\nYou can:\n• Tell me about a trade ("I bought DIXON at 15,800 — 20 shares")\n• Ask me to analyse any position\n• Tell me you've exited ("Sold my GOLDBEES at 6,100")\n\nWhat would you like to do?`;
     } else if(ariaContext.type==="holding"&&ariaContext.holding){
@@ -1787,6 +1801,10 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
 
   const portfolioSummary=(portfolio||[]).map(h=>`${h.symbol}:${h.qty}@₹${h.avgBuy}(now ₹${h.currentPrice},${((h.currentPrice-h.avgBuy)/h.avgBuy*100).toFixed(1)}%),tgt₹${h.targetPrice},stop₹${h.stoplossPrice}`).join("|");
   const discoverySummary=(_ariaDu||[]).map(s=>`${s.symbol}:${s.action} conf${s.confidence}% tgt${s.target} risk${s.riskScore}`).join("|")||"No discovery ideas loaded yet.";
+  const latestRun=(_ariaRuns||[])[0];
+  const runsSummary=latestRun
+    ?`Latest discovery run ${latestRun.run_date||""}: screened ${latestRun.total_screened||0} stocks, ${latestRun.total_passed||0} passed filters, ${latestRun.total_discoveries||0} new discoveries (${(latestRun.discovery_symbols||[]).slice(0,5).join(",")||"none"}). Cycle: ${latestRun.coverage_stats?.cycle_pct_complete||"?"}% complete.`
+    :"No discovery run data available yet.";
 
   const SYSTEM=`You are ARIA (Adaptive Research Intelligence Assistant) for Bharat Intelligence — Indian stock and commodity market multi-agent system.
 
@@ -1849,6 +1867,7 @@ When the user asks to "analyse [stock] like Buffett", "what would Jhunjhunwala t
 
 CURRENT PORTFOLIO: ${portfolioSummary||"None"}
 DISCOVERY IDEAS TODAY: ${discoverySummary}
+TODAY'S SCREENER RUN: ${runsSummary}
 ACTIVE CONTEXT: ${ariaContext?JSON.stringify({type:ariaContext.type,paper:ariaContext.paper?.title,holding:ariaContext.holding?.symbol,discovery:discoveryStock?.symbol}):"none"}
 Market snapshot: ${_mktStr}.
 
@@ -1927,7 +1946,9 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
     ?["Summarise the paper","Walk me through the debate","Approve this change","What's the implementation cost?"]
     :ariaContext?.type==="holding"
     ?["Should I hold or sell?","How close is my stop-loss?","I sold this today","Add more at current price?","Explain the WarrenBot score","Would Buffett buy this?","What does the moat score mean?"]
-    :["Show me today's discovery ideas","Analyse my portfolio","What's the best new opportunity?","Explain a governance proposal"];
+    :ariaContext?.type==="daily_run"
+    ?["Explain the screening methodology","Which new find looks best?","Compare discoveries to my portfolio","How many stocks are left in this cycle?","Show me the top discovery idea"]
+    :["Show me today's discovery ideas","Analyse my portfolio","What's the best new opportunity?","Explain a governance proposal","What ran today?"];
 
   const renderMsg=txt=>txt.split('\n').map((line,i)=>{
     const parts=line.split(/(\*\*[^*]+\*\*)/g);
@@ -1950,6 +1971,7 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
             {ariaContext.type?.includes("research")&&ariaContext.paper&&<Tag color={C.purple} small>📄 Research</Tag>}
             {ariaContext.type==="holding"&&ariaContext.holding&&<Tag color={C.teal} small>💼 {ariaContext.holding.symbol}</Tag>}
             {ariaContext.type==="portfolio"&&<Tag color={C.teal} small>💼 Portfolio</Tag>}
+            {ariaContext.type==="daily_run"&&<Tag color={C.orange} small>📊 Today's Run</Tag>}
             <button onClick={onClearContext} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:10,marginLeft:"auto"}}>✕</button>
           </div>
         )}
@@ -2215,6 +2237,7 @@ export default function App(){
   const [discoveryRuns,     setDiscoveryRuns]     = useState([]);
   const [brokenSymbols,     setBrokenSymbols]     = useState([]);
   const [portfolioRecs,     setPortfolioRecs]     = useState(IS_LIVE ? [] : PORTFOLIO_RECOMMENDATIONS);
+  const [recsPortfolioFilter, setRecsPortfolioFilter] = useState(false); // DB-8: filter recs to held symbols only
   const [marketPulse,       setMarketPulse]       = useState(IS_LIVE ? [] : MARKET_PULSE);
   const [govAlerts,         setGovAlerts]         = useState(IS_LIVE ? [] : GOV_ALERTS);
   const [researchFeed,      setResearchFeed]      = useState(IS_LIVE ? [] : AI_RESEARCH_FEED);
@@ -2228,6 +2251,8 @@ export default function App(){
   const [optionsSignal,     setOptionsSignal]     = useState(null);
   const [valuationCache,    setValuationCache]    = useState({});   // keyed by symbol
   const [systemHealth,      setSystemHealth]      = useState(null); // /api/system/health
+  const [marketNews,        setMarketNews]        = useState([]);   // DB-7: India market news
+  const [newsSymbol,        setNewsSymbol]        = useState("NIFTY"); // DB-7: which symbol's news to show
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -2289,6 +2314,9 @@ export default function App(){
       apiFetch("/api/system/health")
         .then(d=>{ if(d?.checks) setSystemHealth(d); })
         .catch(()=>{}),
+      apiFetch("/api/news/NIFTY")   // DB-7: pre-fetch market news
+        .then(d=>{ if(d?.news) setMarketNews(d.news); })
+        .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
     // Refresh market pulse every 60 s
@@ -2332,6 +2360,26 @@ export default function App(){
     else if(type==="portfolio"){setAriaContext({type:"portfolio",id:"portfolio",alert:extra});}
     setAriaOpen(true);
   },[selDiscoveryId]);
+
+  // DB-9: "What ran today?" — fetch latest discovery run and open ARIA with context
+  const openARIAWithRun=useCallback(()=>{
+    const latest=discoveryRuns&&discoveryRuns[0];
+    if(latest){
+      setAriaContext({type:"daily_run",run:latest});
+      setAriaOpen(true);
+    }else if(API_URL){
+      apiFetch("/api/discovery/runs?days=1")
+        .then(d=>{
+          const run=Array.isArray(d)&&d[0];
+          setAriaContext({type:"daily_run",run:run||null});
+          setAriaOpen(true);
+        })
+        .catch(()=>{setAriaContext({type:"daily_run",run:null});setAriaOpen(true);});
+    }else{
+      setAriaContext({type:"daily_run",run:null});
+      setAriaOpen(true);
+    }
+  },[discoveryRuns]);
 
   const handlePortfolioUpdate=useCallback(action=>{
     if(action.action==="add"){
@@ -2546,23 +2594,48 @@ export default function App(){
                   setAriaOpen(true);
                 }}
                 onOpenARIA={(type,extra)=>openARIA(type,extra)}
+                onOpenRunSummary={IS_LIVE?openARIAWithRun:null}
               />
             )}
 
             {/* PORTFOLIO RECOMMENDATIONS */}
-            {tab==="recommendations"&&(
+            {tab==="recommendations"&&(()=>{
+              const heldSymbols=new Set((portfolio||[]).filter(h=>h.status==="holding").map(h=>h.symbol));
+              const filteredRecs=recsPortfolioFilter&&heldSymbols.size>0
+                ?portfolioRecs.filter(r=>heldSymbols.has(r.symbol))
+                :portfolioRecs;
+              return(
               <div style={{animation:"fadeUp .3s ease"}}>
-                <div style={{marginBottom:12}}>
-                  <div style={{fontSize:13,fontWeight:700,color:"white"}}>Portfolio Stock Recommendations</div>
-                  <div style={{fontSize:9,color:C.muted,marginTop:1}}>Ongoing signals for stocks you already hold · Updated daily by the agent network</div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                  <div>
+                    <div style={{fontSize:13,fontWeight:700,color:"white"}}>Stock Recommendations</div>
+                    <div style={{fontSize:9,color:C.muted,marginTop:1}}>Agent signals for NSE stocks · Updated daily at 06:00 IST</div>
+                  </div>
+                  {heldSymbols.size>0&&(
+                    <div style={{display:"flex",alignItems:"center",gap:6,background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:"5px 10px"}}>
+                      <span style={{fontSize:9,color:C.muted}}>Filter:</span>
+                      <button
+                        onClick={()=>setRecsPortfolioFilter(false)}
+                        style={{background:!recsPortfolioFilter?C.accent+"22":"none",border:`1px solid ${!recsPortfolioFilter?C.accent+"66":"transparent"}`,borderRadius:4,padding:"2px 8px",color:!recsPortfolioFilter?C.accent:C.muted,fontSize:9,cursor:"pointer",fontWeight:!recsPortfolioFilter?700:400}}
+                      >All</button>
+                      <button
+                        onClick={()=>setRecsPortfolioFilter(true)}
+                        style={{background:recsPortfolioFilter?C.teal+"22":"none",border:`1px solid ${recsPortfolioFilter?C.teal+"66":"transparent"}`,borderRadius:4,padding:"2px 8px",color:recsPortfolioFilter?C.teal:C.muted,fontSize:9,cursor:"pointer",fontWeight:recsPortfolioFilter?700:400}}
+                      >📌 My Holdings</button>
+                    </div>
+                  )}
                 </div>
                 {IS_LIVE && apiLoaded && portfolioRecs.length===0 && (
                   <EmptyState icon="🎯" title="No recommendations yet"
                     sub="The orchestrator generates BUY/HOLD/SELL signals daily at 06:00 IST for a rotating set of NSE symbols. If no recs appear, check the Governance tab → Data Source Health to confirm the pipeline ran successfully today." />
                 )}
-                {portfolioRecs.length>0&&<div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:14}}>
+                {recsPortfolioFilter&&heldSymbols.size>0&&filteredRecs.length===0&&portfolioRecs.length>0&&(
+                  <EmptyState icon="📌" title="No recommendations for your holdings yet"
+                    sub={`The screener cycles through ~200 stocks/day from the NSE universe. Signals for your ${heldSymbols.size} held stocks will appear once the screener reaches them (typically within 1–9 days). Switch to "All" to see all available recommendations.`} />
+                )}
+                {filteredRecs.length>0&&<div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:14}}>
                   <div>
-                    {portfolioRecs.map(r=>{
+                    {filteredRecs.map(r=>{
                       const ac=r.action==="BUY"?C.green:r.action==="SELL"?C.red:C.accent;
                       const inPort=portfolio.some(h=>h.symbol===r.symbol&&h.status==="holding");
                       return(
@@ -2629,9 +2702,10 @@ export default function App(){
                       </>);})()}
                     </div>
                   )}
-                </div>}{/* closes portfolioRecs.length>0 wrapper */}
+                </div>}{/* closes filteredRecs.length>0 wrapper */}
               </div>
-            )}
+              );
+            })()}
 
             {tab==="portfolio"&&<PortfolioTab
               portfolio={portfolio}
@@ -2658,7 +2732,14 @@ export default function App(){
 
             {tab==="market"&&(
               <div style={{animation:"fadeUp .3s ease"}}>
-                <div style={{fontSize:12,fontWeight:700,color:"white",marginBottom:11}}>Live Market Pulse</div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:11}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"white"}}>Live Market Pulse</div>
+                  {IS_LIVE&&(
+                    <button onClick={openARIAWithRun} style={{background:C.orange+"22",border:`1px solid ${C.orange}44`,borderRadius:7,padding:"5px 11px",color:C.orange,fontSize:10,fontWeight:700,cursor:"pointer"}}>
+                      📊 What ran today?
+                    </button>
+                  )}
+                </div>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
                   {marketPulse.map(m=>(
                     <div key={m.key} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:9}}>
@@ -2668,9 +2749,52 @@ export default function App(){
                     </div>
                   ))}
                 </div>
-                <div style={{fontSize:11,fontWeight:700,color:"white",marginBottom:7}}>📰 Today's News</div>
-                <EmptyState icon="📰" title="Live news feed not yet connected"
-                  sub="A real-time NSE/BSE news integration is on the roadmap. For now, use ARIA to ask about any stock or sector news." />
+                {/* DB-7: India Market News Feed */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div style={{fontSize:11,fontWeight:700,color:"white"}}>📰 India Market News</div>
+                  <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                    {["NIFTY","SENSEX","FII","RBI","BUDGET"].map(sym=>(
+                      <button key={sym} onClick={()=>{
+                        setNewsSymbol(sym);
+                        apiFetch(`/api/news/${sym}`)
+                          .then(d=>{if(d?.news)setMarketNews(d.news);})
+                          .catch(()=>{});
+                      }} style={{
+                        background:newsSymbol===sym?C.accent+"22":"none",
+                        border:`1px solid ${newsSymbol===sym?C.accent+"55":C.border}`,
+                        borderRadius:4,padding:"2px 8px",
+                        color:newsSymbol===sym?C.accent:C.muted,
+                        fontSize:9,cursor:"pointer",fontWeight:newsSymbol===sym?700:400,
+                      }}>{sym}</button>
+                    ))}
+                  </div>
+                </div>
+                {marketNews.length>0?(
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {marketNews.map((item,i)=>(
+                      <a key={i} href={item.url} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}>
+                        <div style={{
+                          background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,
+                          padding:"9px 12px",cursor:"pointer",
+                          transition:"border-color 0.15s",
+                        }}
+                          onMouseEnter={e=>e.currentTarget.style.borderColor=C.accent+"55"}
+                          onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}
+                        >
+                          <div style={{fontSize:11,color:"white",lineHeight:1.4,marginBottom:4}}>{item.title}</div>
+                          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                            <span style={{fontSize:8,color:C.muted}}>{item.source}</span>
+                            {item.published&&<span style={{fontSize:8,color:C.muted}}>· {item.published}</span>}
+                            <span style={{fontSize:8,color:C.accent,marginLeft:"auto"}}>↗ Read</span>
+                          </div>
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                ):(
+                  <EmptyState icon="📰" title="No news loaded yet"
+                    sub={IS_LIVE?"Click a topic above to fetch headlines from Google News.":"News feed requires a live backend connection."} />
+                )}
               </div>
             )}
 
@@ -2720,6 +2844,7 @@ export default function App(){
               portfolio={portfolio||[]}
               onPortfolioUpdate={handlePortfolioUpdate}
               discoveryUniverse={discoveryUniverse||[]}
+              discoveryRuns={discoveryRuns||[]}
               marketPulse={marketPulse}
               discoveryStock={ariaContext?.type==="discovery"?discoveryStock:null}
             />

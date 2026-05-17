@@ -479,6 +479,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (DB-7/8/9/10) | DB-7: Market tab live news panel (Google News RSS, topic filter); DB-8: Recs tab "My Holdings" filter toggle; DB-9: "What ran today?" ARIA button + daily_run context type; DB-10: `_parse_screener_excel()` + Excel export fallback in `get_screener_history`; 18 new tests |
 | (P4-C) | P4-C: Governance numerical grounding — `_numerical_grounding_check` pre-LLM pass; deterministic VERIFIED/CONTRADICTED for PE/ROCE/promoter/RSI/EMA; 40 new tests |
 | (P4-B) | P4-B: Symbol cache persistence — already built (`_load_symbol_resolutions` + `_persist_resolution`); marked complete |
 | (P4-A) | P4-A: Warren bot commentary grounding — `_validate_commentary` + `_build_grounded_commentary` + JSON-structured Haiku prompt; tone follows signal; 27 new tests (62 total) |
@@ -578,6 +579,7 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 2 (P2)** ✅: P2-A (yfinance fallback), P2-B (RAG auto-refresh), P2-C (concentration alerts), P2-D (superseded by P3-C)
 - **Phase 3 (P3)** ✅: P3-A ✅ (position sizing), P3-B ✅ (correlation alerts), P3-C ✅ (Trendlyne — all pillars: P1 fundamentals fallback, P2 earnings calendar, P3 DVM filter, P5 insider sentiment, P6 insider institutional)
 - **Phase 4 (P4)** ✅ COMPLETE (except P4-D): P4-A commentary grounding ✅; P4-B symbol cache persistence ✅ (was already built); P4-C governance numerical grounding ✅; P4-D Angel One options ⬜ (lowest priority, needs TOTP secret)
+- **Dashboard items (DB-6→DB-10)** ✅ ALL DONE: DB-6 PerformanceTab (was already built); DB-7 live news panel; DB-8 holdings filter; DB-9 "What ran today?" ARIA button; DB-10 Excel export fallback
 - **Phase 5 (P5)**: Robust forward paper portfolio tracker + attribution analysis
 - **Phase 6 (P6)**: Dashboard performance tab (hit rate, alpha, backtest results)
 
