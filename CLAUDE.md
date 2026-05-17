@@ -69,6 +69,12 @@ Stock analysis/
 ├── data/
 │   ├── fetchers.py             # India market data fetchers (NSE, BSE, RBI, SEBI)
 │   │                           # + get_screener_history() — 10yr annual time series
+│   │                           # + _parse_screener_excel() — DB-10: parses 'Data Sheet' tab from
+│   │                           #   screener.in Excel export (POST /user/company/export/{id}/).
+│   │                           #   Visual sheets (P&L, Balance Sheet) use merged cells → unusable.
+│   │                           #   Data Sheet: datetime Report Date row → years; computes OPM% &
+│   │                           #   EPS from raw fields. ROCE/ROE/Promoter not in export (→ []).
+│   │                           #   Export triggered when HTML parsing gives < 5 years of data.
 │   ├── symbol_map.py           # NSE → yfinance symbol resolution (YF_SYMBOL_MAP)
 │   │                           # Single source of truth for all agents.
 │   │                           # Also has SCREENER_SLUG_MAP for screener.in slugs.
@@ -480,7 +486,8 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
-| (DB-7/8/9/10) | DB-7: Market tab live news panel (Google News RSS, topic filter); DB-8: Recs tab "My Holdings" filter toggle; DB-9: "What ran today?" ARIA button + daily_run context type; DB-10: `_parse_screener_excel()` + Excel export fallback in `get_screener_history`; 18 new tests |
+| (DB-10 rewrite) | DB-10 complete rewrite: `_parse_screener_excel()` now parses `Data Sheet` tab (visual sheets use merged cells → all None); extracts years from `datetime` Report Date row, computes OPM% = (PBT+Interest+Depr−OtherIncome)/Sales×100, EPS = NetProfit/AdjustedEquityShares; export triggered via POST to `/user/company/export/{export_id}/` (id from page `formaction`), CSRF from `csrftoken` cookie via `X-CSRFToken` header; 31 tests (all pass); live test: RELIANCE 10yr clean |
+| (DB-7/8/9/10) | DB-7: Market tab live news panel (Google News RSS, topic filter); DB-8: Recs tab "My Holdings" filter toggle; DB-9: "What ran today?" ARIA button + daily_run context type; DB-10: `_parse_screener_excel()` scaffold + Excel export wiring in `get_screener_history` |
 | (P4-C) | P4-C: Governance numerical grounding — `_numerical_grounding_check` pre-LLM pass; deterministic VERIFIED/CONTRADICTED for PE/ROCE/promoter/RSI/EMA; 40 new tests |
 | (P4-B) | P4-B: Symbol cache persistence — already built (`_load_symbol_resolutions` + `_persist_resolution`); marked complete |
 | (P4-A) | P4-A: Warren bot commentary grounding — `_validate_commentary` + `_build_grounded_commentary` + JSON-structured Haiku prompt; tone follows signal; 27 new tests (62 total) |

@@ -1,6 +1,6 @@
 # Bharat Intelligence — Investment-Grade Execution Plan
 ### Target: 6.0 → 8.8 / 10 System Robustness
-*Last updated: 2026-05-16*
+*Last updated: 2026-05-17*
 
 > **Standing rules (apply after every build):**
 > 1. Update `CLAUDE.md` — new files, tables, endpoints, env vars, resolved issues
@@ -55,7 +55,7 @@
 | DB-7 | Market tab — live news feed integration (Google News RSS per symbol) | Dashboard | ✅ **DONE** | 2026-05-17 |
 | DB-8 | Portfolio recs tab — filter by portfolio holdings (only show recs for held stocks) | Dashboard | ✅ **DONE** | 2026-05-17 |
 | DB-9 | ARIA — "What ran today?" button + daily_run context type | Dashboard | ✅ **DONE** | 2026-05-17 |
-| DB-10 | Screener Export-to-Excel fallback — `_parse_screener_excel()` + `get_screener_history` tier-2 | Backend | ✅ **DONE** | 2026-05-17 |
+| DB-10 | Screener Export-to-Excel fallback — `_parse_screener_excel()` rewrites `Data Sheet` parser; POST to `/user/company/export/{id}/`; OPM% + EPS computed from raw fields; 31 tests; RELIANCE 10yr verified | Backend | ✅ **DONE** | 2026-05-17 |
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ✅ **DONE** | 2026-05-16 |
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ✅ **DONE** | (already built) |
 | P4-C | Governance numerical grounding check | Phase 4 | ✅ **DONE** | 2026-05-16 |
