@@ -80,7 +80,7 @@
 | P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
 | P6-D | Elite News Intelligence Engine — FinBERT semantic layer + event classification (Janus-Q) + temporal decay + entity-centric aggregation + LLM ensemble (Claude+FinBERT) + India-native sources + backtesting loop | Phase 6 | ⬜ TODO | — |
 
-**Progress: 59 / 63 items complete (94%) — OPS-1 review due 2026-05-20**
+**Progress: 59 / 72 items complete (82%) — OPS-1 review due 2026-05-20 — Phase 7 + Phase 8 added**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -924,6 +924,15 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P6-A** | System performance dashboard tab | Code | None | M | ⬜ TODO |
 | **P6-B** | Backtest results dashboard panel | Code | None | S | ⬜ TODO |
 | **P6-C** | Market tab daily news digest (Morning Brief + Closing Digest, Claude+OpenAI) | Code | OpenAI API (existing) | L | ⬜ TODO |
+| **P7-A** | Live trading agent — signal + Telegram alert engine | Code | None (Telegram free) | L | ⬜ TODO |
+| **P7-B** | Paper-to-live promotion gate — 60d paper validation before live signals | Code | None | M | ⬜ TODO |
+| **P7-C** | T+1 India settlement awareness + order timing logic | Code | None | S | ⬜ TODO |
+| **P7-D** | Kite Connect / Zerodha demat API integration (optional, Phase 7 final step) | Code + Service | ₹0 Kite (free with demat) | XL | ⬜ TODO |
+| **P8-A** | Architecture audit — map all agents + tools to MCP servers | Design | None | M | ⬜ TODO |
+| **P8-B** | Supervisor agent (Claude Agent SDK) — replaces LangGraph orchestrator | Code | None | XL | ⬜ TODO |
+| **P8-C** | MCP server suite — Supabase, Kite, Telegram, Firecrawl, yfinance | Code | None | XL | ⬜ TODO |
+| **P8-D** | Specialist sub-agents — 10 analysis agents rewritten as Agent SDK tools | Code | None | XL | ⬜ TODO |
+| **P8-E** | Migration + parallel-run validation — v1 vs v2 signal comparison | Code | None | L | ⬜ TODO |
 | **Always** | CLAUDE.md + EXECUTION_PLAN.md update | Doc | None | XS | 🔄 Recurring |
 
 *Effort: XS=<1hr · S=1-3hr · M=3-6hr · L=6-12hr · XL=12-24hr*
@@ -955,8 +964,304 @@ After every build session, before closing:
 
 ---
 
-*Document version: 4.1 — 2026-05-18 (BF-13/14/15/15b complete + OPS-1 ScraperAPI subscription review by 2026-05-20)*  
-*Next milestone: P5-D/E outcome attribution → P6-C morning brief → P6-D-7 GIFT Nifty → P6-D elite news engine*
+*Document version: 4.2 — 2026-05-18 (Phase 7 live trading + Phase 8 Agent SDK architecture added)*  
+*Next milestone: P5-D/E outcome attribution → P6-C morning brief → P6-D-7 GIFT Nifty → P6-D elite news engine → P7 live trading (after 60d paper validation)*
+
+---
+
+## ⬜ PHASE 7 — Live Trading Agent ("Bharat Intelligence" End Vision)
+
+> **Prerequisite:** Paper portfolio (P5-B) must demonstrate consistent positive alpha vs Nifty 50 over a minimum 60-day live window before any live trading signal is enabled. Do not skip this gate.
+
+### Vision
+
+An autonomous agent that monitors BUY signals from the existing 10-agent pipeline and notifies the user via Telegram with a structured trade brief. The user confirms and executes the trade manually (or via demat API in P7-D). The agent tracks open positions, monitors stoploss / target / horizon exits, and sends exit alerts with the same latency.
+
+Eventually (P7-D): agent connects to Kite Connect API and executes orders directly without user intervention, subject to a hard daily loss limit and position-size cap.
+
+---
+
+### P7-A: Signal + Telegram Alert Engine
+
+**What it does:**
+- Listens for new `recommendations` rows with `action = 'BUY'` and `position_label != 'Avoid'`
+- Constructs a structured Telegram message for each qualifying signal
+- Sends to a configured `TELEGRAM_CHAT_ID` (personal chat or private group)
+- Tracks which signals have been notified (deduplication via `paper_portfolio_positions.status`)
+
+**Telegram message format (entry alert):**
+```
+🟢 ENTRY SIGNAL — RELIANCE
+Tier: Half position (₹5,000)
+Entry zone: ₹2,850 – ₹2,920
+Target: ₹3,800 (+32%)  |  Stoploss: ₹2,499 (-15%)
+Horizon: 6–12 months
+Confidence: 71%  |  Agents agreed: Technical ✅ Fundamental ✅ Macro ⚠
+
+Basis: Trading at 18× trailing PE vs sector avg 24×. ROCE 22% accelerating.
+Warren Bot: QUALITY_BUY (score 74/100, MoS 28%)
+
+📋 Paper portfolio opened ₹5,000 paper position — tracking live alpha.
+Execute when ready. Reply /done RELIANCE 15 2870 to confirm.
+```
+
+**Telegram message format (exit alert):**
+```
+🔴 EXIT SIGNAL — RELIANCE
+Reason: TARGET HIT (₹3,812 vs ₹3,800 target)
+P&L: +33.8%  |  Alpha vs Nifty: +19.2%
+Holding period: 63 days
+
+Paper portfolio closed at +33.8%. Confirm exit: /sold RELIANCE 15 3812
+```
+
+**Key design decisions:**
+- Notifications fire from `job_paper_portfolio_open` (07:05 IST) and `job_paper_portfolio_update` (16:15 IST) — no new scheduler job needed
+- T+1 India settlement rule is already enforced in paper portfolio — same logic applies to live alerts (no exit alert within 1 trading day of entry)
+- Delay tolerance: if user acts on signal 30–60 min after Telegram notification, entry price may have drifted. Message includes a zone (entry_low / entry_high) not a single price, which naturally accommodates this
+
+**New env vars:**
+| Variable | Description |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | BotFather token — create at t.me/BotFather |
+| `TELEGRAM_CHAT_ID` | Your personal chat ID or private group ID — get from @userinfobot |
+
+**Files to create/modify:**
+- `agents/telegram_notifier.py` — NEW: `send_entry_alert(rec, position)`, `send_exit_alert(position)`, `send_daily_summary(snapshot)`; uses `python-telegram-bot` or direct `requests` to Bot API
+- `agents/paper_portfolio.py` — call `send_entry_alert` after successful INSERT in `open_new_positions`; call `send_exit_alert` after close in `update_open_positions`
+- `requirements.txt` — add `python-telegram-bot>=20.0` (async) or use raw `requests` to avoid async complexity
+
+**Effort:** L (6–12 hrs)
+
+---
+
+### P7-B: Paper-to-Live Promotion Gate
+
+**Purpose:** Ensure the system has demonstrated real edge before any live capital is risked.
+
+**Promotion criteria (all must be met over rolling 60-calendar-day window):**
+- At least 10 closed paper positions (not counting AVOID-skipped)
+- Win rate ≥ 50% (more trades end at target/horizon-positive than stoploss)
+- Average alpha vs Nifty 50 > 0% across closed positions
+- No single position loss > 30% (data quality / outlier check)
+- Paper portfolio Sharpe (mean trade alpha / std dev) > 0.3
+
+**Implementation:** `agents/paper_portfolio.py` → `check_promotion_gate(client) -> dict` returns `{eligible: bool, reasons: list, metrics: dict}`. Called daily at 07:05 IST after `open_new_positions`. If newly eligible, sends Telegram notification: *"✅ Paper portfolio has passed the 60-day gate. System is ready for live signal mode. Set LIVE_TRADING_ENABLED=true to activate."*
+
+**Files:**
+- `agents/paper_portfolio.py` — add `check_promotion_gate()`
+- `worker.py` — call gate check after `job_paper_portfolio_open`
+- New env var: `LIVE_TRADING_ENABLED=false` — explicit opt-in flag, defaults false
+
+**Effort:** M (3–6 hrs)
+
+---
+
+### P7-C: T+1 Settlement + Order Timing Logic
+
+**India-specific trading rules (SEBI / NSE effective Jan 2023):**
+- **T+1 settlement**: All NSE/BSE equity trades settle the next trading day. Shares bought on Monday are available to sell from Tuesday open. Selling before T+1 settlement is not permitted (cannot do intraday and deliver-sell the same day on delivery trades).
+- **No same-day exit**: Paper portfolio already enforces this (T+1 check in `update_open_positions`). Live alerts must honour the same rule — no exit Telegram alert within 1 trading day of the entry alert.
+- **Intraday vs CNC**: System operates in CNC (Cash and Carry) delivery mode only. Intraday MIS orders are out of scope.
+- **Pre-open session**: NSE pre-open order matching runs 09:00–09:08 IST. Entry alerts sent at 07:05 IST can be placed in the pre-open session for better fills at IEP (Indicative Equilibrium Price). Exit alerts at 16:15 IST are for the next day.
+- **Upper/lower circuits**: If a stock hits circuit on entry day, it may not be tradeable. Alert should note if circuit risk exists (price within 5% of circuit).
+
+**Implementation:** Already mostly done in paper portfolio. For live alerts add:
+- `_is_t1_eligible(entry_date)` already exists — reuse in Telegram notifier
+- Circuit check: add optional `circuit_warning` field to entry alert if `current_price > previous_close * 0.95` or `< previous_close * 0.80`
+
+**Effort:** S (1–3 hrs — mostly already done in paper portfolio code)
+
+---
+
+### P7-D: Kite Connect / Zerodha Demat API Integration *(Optional — Phase 7 final step)*
+
+**Purpose:** Allow the agent to place orders automatically without user manually executing them.
+
+**Design:**
+- User sets `AUTO_EXECUTE=true` env var as explicit opt-in
+- Hard guards that cannot be overridden by agent logic:
+  - Maximum single order value: ₹10,000 (one position tier max)
+  - Maximum daily deployed capital: `DAILY_DEPLOY_LIMIT_INR` (default ₹20,000)
+  - Maximum concurrent open positions: 10
+  - Hard daily loss limit: `DAILY_LOSS_LIMIT_INR` (default ₹3,000) — if paper portfolio unrealised loss exceeds this, auto-execute pauses and sends Telegram alert
+- Every auto-executed order sends a Telegram confirmation with order ID within 5 seconds
+
+**Kite Connect setup:**
+- Free with Zerodha demat account (no API subscription needed for basic order placement)
+- Login: `kiteconnect.login_url()` → browser redirect → user pastes access token daily (or automate via Playwright headless browser)
+- `pip install kiteconnect`
+- Daily token refresh at 08:15 IST (similar to current Breeze pattern)
+
+**New env vars:**
+| Variable | Description |
+|---|---|
+| `KITE_API_KEY` | From Zerodha Kite developer console |
+| `KITE_API_SECRET` | Kite API secret |
+| `KITE_ACCESS_TOKEN` | Daily session token (refresh job or manual) |
+| `AUTO_EXECUTE` | `false` by default — must explicitly set `true` to enable |
+| `DAILY_DEPLOY_LIMIT_INR` | Max INR to deploy in new positions per day (default `20000`) |
+| `DAILY_LOSS_LIMIT_INR` | Hard stop: pause auto-execute if daily paper loss exceeds this (default `3000`) |
+
+**Files to create:**
+- `data/kite_fetcher.py` — NEW: session manager, `place_order(symbol, qty, price, order_type)`, `get_positions()`, `cancel_order(order_id)`
+- `agents/live_trader.py` — NEW: `execute_entry(rec, position)`, `execute_exit(position, reason)`, wraps kite_fetcher with all guard checks
+
+**Effort:** XL (12–24 hrs) — session management + guard logic + error handling is complex  
+**Priority:** Lowest within Phase 7. Manual execution via Telegram alerts (P7-A) covers the use case adequately.
+
+---
+
+## ⬜ PHASE 8 — Agent SDK + MCP Infrastructure Rewrite ("Bharat Intelligence v2")
+
+> **Prerequisite:** Complete Phases 0–7 and have 6+ months of production data from the current architecture. Do not start Phase 8 until the current system is validated and stable.
+
+### Why rewrite?
+
+The current architecture uses LangGraph for orchestration with direct Python calls between agents. This works but has limits:
+
+| Current limitation | Phase 8 solution |
+|---|---|
+| Single-process orchestrator — all agents run sequentially | Supervisor agent dispatches sub-agents in parallel via Agent SDK |
+| Tool calls are Python function calls — no observability | MCP servers provide structured tool call logs, retries, auth |
+| Agents cannot call each other dynamically | Sub-agents can request other sub-agents via the supervisor |
+| No natural language reasoning at the orchestration layer | Supervisor uses Claude reasoning to prioritise which agents to run and how to weight conflicting signals |
+| Hard-coded pipeline graph (LangGraph nodes) | Dynamic task planning — supervisor decides which agents are relevant for each symbol |
+| Telegram / Kite / Supabase are raw API calls scattered across files | Dedicated MCP servers with typed schemas, auth, and retry logic |
+
+---
+
+### P8-A: Architecture Audit + Design
+
+**Map every current component to its Phase 8 equivalent:**
+
+| Current | Phase 8 equivalent |
+|---|---|
+| `scheduler/orchestrator.py` (LangGraph) | Supervisor agent (Claude Agent SDK, `claude-opus-4-7`) |
+| `agents/technical.py` | Technical analysis sub-agent (tool: `run_technical_analysis`) |
+| `agents/fundamental.py` | Fundamental analysis sub-agent |
+| `agents/sentiment.py` | Sentiment sub-agent |
+| `agents/macro.py` | Macro sub-agent |
+| `agents/institutional.py` | Institutional flow sub-agent |
+| `agents/warren_bot.py` | Warren Bot sub-agent (quality gate) |
+| `agents/discovery_screener.py` | Discovery sub-agent (parallel over 200-symbol slice) |
+| `agents/position_sizer.py` | Position sizing tool (called by supervisor post-synthesis) |
+| `governance/fact_checker.py` | Governance sub-agent |
+| `data/fetchers.py` | **Supabase MCP server** + **yfinance MCP server** |
+| `agents/paper_portfolio.py` | Paper portfolio tool (called by supervisor) |
+| `agents/telegram_notifier.py` | **Telegram MCP server** |
+| Kite Connect orders | **Kite MCP server** |
+| Web scraping (screener.in, Trendlyne) | **Firecrawl MCP server** (handles JS rendering, proxy rotation, rate limits) |
+
+**Output of P8-A:** Architecture design document in `docs/phase8_architecture.md` with:
+- Component diagram
+- MCP server list with tool schemas
+- Sub-agent prompt templates
+- Migration strategy (parallel-run plan)
+
+**Effort:** M (3–6 hrs design, no code)
+
+---
+
+### P8-B: Supervisor Agent (Replaces LangGraph Orchestrator)
+
+**The supervisor agent is a Claude Opus instance that:**
+1. Receives a symbol + market context as input
+2. Reasons about which analysis agents are most relevant (e.g. skip macro for defensive FMCG stocks in stable regimes)
+3. Dispatches sub-agents in parallel via `Agent SDK` tool calls
+4. Synthesises conflicting signals using natural language reasoning (not weighted averages)
+5. Applies governance checks via governance sub-agent
+6. Decides BUY / HOLD / AVOID with explicit written reasoning
+7. Saves to Supabase via Supabase MCP server
+
+**Key design difference from current system:** The supervisor can say *"I'm skipping the macro agent for TITAN because it's a pure domestic consumption play and today's macro signal is irrelevant noise"* — something hard-coded LangGraph cannot do.
+
+**Model choice:** `claude-opus-4-7` for the supervisor (reasoning quality matters here). Sub-agents use `claude-haiku-4-5` for speed and cost.
+
+**Files:**
+- `scheduler/supervisor_agent.py` — NEW: main supervisor loop
+- `scheduler/orchestrator.py` — DEPRECATED (keep for parallel-run comparison)
+
+**Effort:** XL (12–24 hrs)
+
+---
+
+### P8-C: MCP Server Suite
+
+Five dedicated MCP servers, each running as a separate Railway service or as in-process servers:
+
+#### 1. Supabase MCP Server
+- Tools: `query_table`, `insert_row`, `upsert_row`, `run_sql`
+- Auth: `SUPABASE_SERVICE_KEY` held server-side — never exposed to agents
+- Benefit: all DB access goes through typed schemas; no raw SQL injection risk from LLM-generated queries
+
+#### 2. Market Data MCP Server (replaces `data/fetchers.py`)
+- Tools: `get_ohlcv(symbol, period)`, `get_screener_data(symbol)`, `get_trendlyne_fundamentals(symbol)`, `get_nse_fii_flows()`, `get_sector_pe()`
+- Handles proxy rotation, caching, fallback chain internally
+- Agents call `get_ohlcv` — they never need to know about yfinance vs Breeze vs fallback
+
+#### 3. Telegram MCP Server
+- Tools: `send_message(chat_id, text)`, `send_alert(level, title, body)`, `send_trade_signal(rec)`
+- Deduplication built-in (tracks last N message hashes)
+- Benefit: all Telegram notifications go through one typed interface; easy to add formatting rules, rate limits
+
+#### 4. Kite MCP Server *(P7-D prerequisite)*
+- Tools: `place_order(symbol, qty, price, order_type)`, `get_positions()`, `cancel_order(order_id)`, `get_account_balance()`
+- Hard guards enforced server-side (daily limit, position cap) — agent cannot bypass them
+- Auth: `KITE_API_KEY` + `KITE_ACCESS_TOKEN` held server-side
+
+#### 5. Firecrawl MCP Server *(optional — replaces proxy_session.py)*
+- Tools: `scrape_url(url, css_selector)`, `search_web(query)`, `extract_structured(url, schema)`
+- Handles JS rendering, rotating residential proxies, CAPTCHA — screener.in and Trendlyne work reliably
+- Cost: Firecrawl Cloud ~$16/month (1000 pages/month) — evaluate vs current ScraperAPI cost
+
+**Effort:** XL per server (total 3–5 weeks for all five)
+
+---
+
+### P8-D: Specialist Sub-Agents (10 Analysis Agents Rewritten)
+
+Each current agent becomes an Agent SDK sub-agent with:
+- A focused system prompt describing its analysis domain
+- A fixed set of MCP tool calls it is allowed to make
+- Structured output schema (JSON) returned to supervisor
+- No direct Supabase access — all reads/writes go through MCP server
+
+**Example — Technical Analysis Sub-Agent:**
+```python
+technical_agent = Agent(
+    model="claude-haiku-4-5",
+    system_prompt=TECHNICAL_SYSTEM_PROMPT,  # RSI, EMA, MACD, volume analysis
+    tools=[market_data_mcp.get_ohlcv],      # only tool it needs
+    output_schema=TechnicalSignalSchema,
+)
+```
+
+**Benefit:** Each sub-agent is independently testable, replaceable, and observable. Swapping the technical agent's model or prompt doesn't require touching orchestrator logic.
+
+**Effort:** XL (full rewrite — do last, after MCP servers are stable)
+
+---
+
+### P8-E: Migration + Parallel-Run Validation
+
+**Strategy:** Run v1 (LangGraph) and v2 (Agent SDK) in parallel for 30 days before switching.
+
+- v1 writes to `recommendations` table as normal
+- v2 writes to `recommendations_v2` table (same schema)
+- Daily comparison job: `python -m scripts.compare_signals` — for each symbol where both ran, log agreement rate, signal divergence, confidence delta
+- Promotion criterion: v2 and v1 agree on BUY/HOLD/AVOID ≥ 85% of the time AND v2 paper alpha ≥ v1 paper alpha over 30 days
+
+**Files:**
+- `scripts/compare_signals.py` — NEW: daily comparison job
+- `db/migrations/create_recommendations_v2.sql` — NEW: mirror table for v2 signals
+
+**Effort:** L (6–12 hrs comparison infrastructure + 30-day observation period)
+
+---
+
+*Document version: 4.2 — 2026-05-18 (Phase 7 live trading + Phase 8 Agent SDK architecture added)*  
+*Next milestone: P5-D/E outcome attribution → P6-C morning brief → P6-D-7 GIFT Nifty → P6-D elite news engine → P7 live trading (after 60d paper validation)*
 
 ---
 
