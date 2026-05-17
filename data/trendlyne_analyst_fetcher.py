@@ -83,7 +83,7 @@ _cookies_refreshed_this_process = False  # attempt once per process
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _make_session() -> requests.Session:
-    """Build a requests.Session pre-loaded with Trendlyne cookies."""
+    """Build a requests.Session pre-loaded with Trendlyne cookies and proxy."""
     global _TL_SESS, _TL_CSRF
     # Re-read env vars so a process-level refresh is picked up
     _TL_SESS = os.getenv("TRENDLYNE_SESSION", _TL_SESS)
@@ -100,6 +100,20 @@ def _make_session() -> requests.Session:
         s.cookies.set(".trendlyne", _TL_SESS, domain="trendlyne.com")
     if _TL_CSRF:
         s.cookies.set("csrftoken", _TL_CSRF, domain="trendlyne.com")
+
+    # Apply outbound proxy (SCRAPERAPI_KEY / FIXIE_URL / HTTPS_PROXY)
+    # Bypasses Railway IP blocks — session cookies are preserved in proxy mode
+    try:
+        from data.proxy_session import apply_proxy_to_session, proxy_configured
+        apply_proxy_to_session(s)
+        if not proxy_configured():
+            logger.warning(
+                "Trendlyne session: no proxy configured — may be blocked from "
+                "Railway (set SCRAPERAPI_KEY or FIXIE_URL env var)"
+            )
+    except ImportError:
+        pass
+
     return s
 
 
@@ -222,12 +236,55 @@ def _fetch_page(url: str, *, retry_on_login: bool = True) -> Optional[str]:
             logger.debug("Trendlyne 404: %s", url)
             return None
 
+        if resp.status_code == 405:
+            # 405 = Method Not Allowed on a GET request means either:
+            # (a) Railway IP is blocked by Trendlyne WAF (returns 405 to confuse scrapers)
+            # (b) URL structure changed on Trendlyne's side
+            # Try alternative URL patterns before giving up.
+            logger.warning("Trendlyne HTTP 405 for %s — trying alternative URL patterns", url)
+            alt_urls = _get_alt_urls(url)
+            for alt_url in alt_urls:
+                try:
+                    alt_resp = s.get(alt_url, timeout=20, allow_redirects=True)
+                    if alt_resp.status_code == 200:
+                        logger.info("Trendlyne alt URL worked: %s", alt_url)
+                        return alt_resp.text
+                    logger.debug("Trendlyne alt URL %s → %d", alt_url, alt_resp.status_code)
+                except Exception:
+                    pass
+            logger.warning(
+                "Trendlyne HTTP 405 — all URL patterns failed. "
+                "IP likely blocked by Railway. Set SCRAPERAPI_KEY or FIXIE_URL."
+            )
+            return None
+
         logger.warning("Trendlyne HTTP %d for %s", resp.status_code, url)
         return None
 
     except requests.RequestException as exc:
         logger.warning("Trendlyne request failed for %s: %s", url, exc)
         return None
+
+
+def _get_alt_urls(original_url: str) -> list[str]:
+    """
+    Generate alternative URL patterns to try when original returns 405.
+    Trendlyne occasionally restructures their equity page URLs.
+    """
+    # Extract symbol from URL like https://trendlyne.com/equity/RELIANCE/NSE/
+    import re
+    m = re.search(r"/equity/([^/]+)/NSE/?", original_url)
+    if not m:
+        return []
+    symbol = m.group(1)
+    return [
+        # With trailing slash vs without
+        f"https://trendlyne.com/equity/{symbol}/NSE",
+        # Analyst targets sub-page (sometimes works when equity root is blocked)
+        f"https://trendlyne.com/equity/{symbol}/analyst-targets/",
+        # Alternative path structure used in some Trendlyne versions
+        f"https://trendlyne.com/stocks/{symbol}/NSE/",
+    ]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

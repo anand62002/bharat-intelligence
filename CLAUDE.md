@@ -99,6 +99,11 @@ Stock analysis/
 │   │                           # Data: screener_history (trend) → screener_snapshot → trendlyne_snapshot
 │   │                           # Used by: sentiment.py (+5/-10 pts) + institutional.py (+8 pts ACCUMULATING)
 │   ├── forward_estimates.py    # yfinance forward EPS/PE estimates (24h Supabase cache)
+│   ├── proxy_session.py        # BF-15: Outbound proxy abstraction for Railway IP blocks
+│   │                           # apply_proxy_to_session(session) — routes via SCRAPERAPI_KEY
+│   │                           # (rotating residential, $29/mo) or FIXIE_URL (static, $25/mo)
+│   │                           # Used by: fetchers.py (screener.in) + trendlyne_analyst_fetcher.py
+│   │                           # proxy_configured() → bool; get_proxy_dict() → dict|None
 │   └── breeze_auth.py          # ICICI Breeze Connect — DEPRECATED (P4-D: scheduled for removal)
 │   #                             Superseded by trendlyne_fno_fetcher (current primary).
 │   #                             P4-D will replace with Angel One SmartAPI as new live tier-1 source.
@@ -333,6 +338,8 @@ Uses `ANTHROPIC_API_KEY` env var server-side (never exposed to browser).
 | `TRENDLYNE_USER` | *(Optional)* Trendlyne login email — enables auto-cookie-refresh when session expires |
 | `SCREENER_SESSION` | *(Optional)* screener.in `sessionid` cookie — enables Excel export fallback in `get_screener_history` (DB-10). Get it: log in at screener.in via Google → DevTools → Application → Cookies → screener.in → copy `sessionid` value. Refreshed manually when it expires. |
 | `TRENDLYNE_PASS` | *(Optional)* Trendlyne login password — enables auto-cookie-refresh |
+| `SCRAPERAPI_KEY` | **Recommended for Railway** — ScraperAPI rotating residential proxy ($29/month, 250k req). Bypasses screener.in + Trendlyne IP blocks. Get key at scraperapi.com. Applied automatically to all screener.in + Trendlyne requests via `data/proxy_session.py`. |
+| `FIXIE_URL` | *(Optional, free Railway add-on)* Fixie HTTP proxy URL — alternative to ScraperAPI. Static residential IP. Format: `http://user:pass@proxy.usefixie.com:80`. Business plan ($25/month) needed for 25k req/month. |
 
 ### Vercel (frontend)
 | Variable | Description |
@@ -486,6 +493,8 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (BF-15) | BF-15: Railway IP block fix — `data/proxy_session.py` proxy abstraction; apply_proxy_to_session() wired into screener.in + Trendlyne sessions; SCRAPERAPI_KEY / FIXIE_URL env vars; /api/debug/scraper-health endpoint; scripts/test_scraper_connectivity.py; Trendlyne 405 retry with alt URL patterns |
+| (BF-13/14) | BF-13: market pulse dashes — yfinance 1.2.x column format fix (df["Close"][sym]); BF-14: DATA_DEGRADATION status in daily_runs when all symbols suppressed |
 | (P5-C) | P5-C: `agents/rec_outcome_seeder.py` — backfill all recs into recommendation_outcomes; `run_seeder(dry_run, resolve_past)`; wired into worker.py at 06:55 IST; 17 tests |
 | (DB-10 rewrite) | DB-10 complete rewrite: `_parse_screener_excel()` now parses `Data Sheet` tab (visual sheets use merged cells → all None); extracts years from `datetime` Report Date row, computes OPM% = (PBT+Interest+Depr−OtherIncome)/Sales×100, EPS = NetProfit/AdjustedEquityShares; export triggered via POST to `/user/company/export/{export_id}/` (id from page `formaction`), CSRF from `csrftoken` cookie via `X-CSRFToken` header; 31 tests (all pass); live test: RELIANCE 10yr clean |
 | (DB-7/8/9/10) | DB-7: Market tab live news panel (Google News RSS, topic filter); DB-8: Recs tab "My Holdings" filter toggle; DB-9: "What ran today?" ARIA button + daily_run context type; DB-10: `_parse_screener_excel()` scaffold + Excel export wiring in `get_screener_history` |
@@ -545,6 +554,8 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | ICICI Breeze primary IP update due ~May 18 | MEDIUM | Railway env | 🔲 Update primary IP to `52.5.155.132` on ICICI Direct portal |
 | No portfolio-level concentration alerts (sector overlap, macro cluster) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P2-C) — SECTOR_CONCENTRATION + MACRO_CLUSTER alerts added |
 | No correlation-aware alerts (hidden concentration in same-direction movers) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P3-B) — CORR_CLUSTER alert: 60-day Pearson r>0.75, ≥2 pairs, 7-day dedup |
+| screener.in + Trendlyne blocked from Railway (Errno 101 ENETUNREACHABLE / HTTP 405) | CRITICAL | `data/fetchers.py`, `data/trendlyne_analyst_fetcher.py` | 🔲 BF-15: `data/proxy_session.py` proxy layer built (SCRAPERAPI_KEY / FIXIE_URL). **Set SCRAPERAPI_KEY in Railway env vars** — all analyses fall back to yfinance-only without it |
+| Market pulse cards showing "—" (all dashes) — yfinance 1.2.x column format change | HIGH | `api/main.py` `_fetch_prices_sync` | ✅ Fixed BF-13 — removed deprecated group_by/progress params, fixed column access pattern |
 
 ---
 

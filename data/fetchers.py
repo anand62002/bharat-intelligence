@@ -121,8 +121,15 @@ def _get_screener_session() -> requests.Session:
     global _screener_session, _screener_session_warmed, _screener_session_logged_in
 
     if _screener_session is None:
+        from data.proxy_session import apply_proxy_to_session, proxy_configured
         _screener_session = requests.Session()
         _screener_session.headers.update(_screener_headers())
+        apply_proxy_to_session(_screener_session)   # routes via SCRAPERAPI/Fixie if configured
+        if not proxy_configured():
+            log.warning(
+                "_get_screener_session: no proxy configured — screener.in may be "
+                "blocked from Railway (set SCRAPERAPI_KEY or FIXIE_URL env var)"
+            )
 
     if not _screener_session_warmed:
         try:

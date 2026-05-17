@@ -1944,6 +1944,141 @@ async def debug_screener(
     }
 
 
+# ── Trendlyne + proxy health debug endpoint ───────────────────────────────────
+
+@app.get("/api/debug/scraper-health", tags=["governance"])
+async def debug_scraper_health(
+    _: None = Depends(require_api_key),
+):
+    """
+    Combined scraper health check — tests screener.in, Trendlyne, and proxy config.
+
+    Call this from a browser or curl to confirm whether Railway can reach these
+    data sources. Use after setting SCRAPERAPI_KEY or FIXIE_URL to verify the
+    proxy is working.
+
+    Returns a clear BLOCKED / WORKING status per source, plus proxy details.
+    """
+    import time as _time
+    import requests as _req
+
+    results: dict = {
+        "proxy": {},
+        "screener_in": {},
+        "trendlyne": {},
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # ── Proxy status ──────────────────────────────────────────────────────────
+    try:
+        from data.proxy_session import proxy_configured, get_proxy_dict, _active_proxy
+        results["proxy"] = {
+            "configured": proxy_configured(),
+            "mode": _active_proxy or "none (direct connection)",
+            "recommendation": (
+                "Proxy active — should bypass Railway IP blocks"
+                if proxy_configured() else
+                "No proxy configured. Set SCRAPERAPI_KEY (recommended, $29/month) "
+                "or FIXIE_URL (Railway add-on) to bypass Railway IP blocks on "
+                "screener.in and Trendlyne."
+            ),
+        }
+    except Exception as exc:
+        results["proxy"] = {"error": str(exc)}
+
+    # ── Screener.in probe ─────────────────────────────────────────────────────
+    try:
+        from data.proxy_session import get_proxy_dict
+        proxies = get_proxy_dict() or {}
+        t0 = _time.time()
+        r = _req.get(
+            "https://screener.in/",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36"},
+            proxies=proxies,
+            timeout=10,
+            allow_redirects=True,
+        )
+        elapsed = round((_time.time() - t0) * 1000)
+        results["screener_in"] = {
+            "status": r.status_code,
+            "elapsed_ms": elapsed,
+            "working": r.status_code == 200,
+            "diagnosis": "WORKING" if r.status_code == 200 else f"BLOCKED (HTTP {r.status_code})",
+        }
+    except Exception as exc:
+        results["screener_in"] = {
+            "status": None,
+            "working": False,
+            "error": str(exc)[:200],
+            "diagnosis": "BLOCKED (network unreachable — IP-level block or no proxy configured)",
+        }
+
+    # ── Trendlyne probe ───────────────────────────────────────────────────────
+    try:
+        from data.proxy_session import get_proxy_dict
+        import os
+        proxies = get_proxy_dict() or {}
+        tl_sess = os.getenv("TRENDLYNE_SESSION", "")
+        tl_csrf = os.getenv("TRENDLYNE_CSRF", "")
+        s = _req.Session()
+        s.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
+            "Referer": "https://trendlyne.com/",
+        })
+        if tl_sess:
+            s.cookies.set(".trendlyne", tl_sess, domain="trendlyne.com")
+        if tl_csrf:
+            s.cookies.set("csrftoken", tl_csrf, domain="trendlyne.com")
+        if proxies:
+            s.proxies.update(proxies)
+
+        t0 = _time.time()
+        r = s.get("https://trendlyne.com/equity/RELIANCE/NSE/", timeout=15, allow_redirects=True)
+        elapsed = round((_time.time() - t0) * 1000)
+        is_data_page = r.status_code == 200 and ("data-metrics" in r.text or "Reliance" in r.text)
+        results["trendlyne"] = {
+            "status": r.status_code,
+            "elapsed_ms": elapsed,
+            "working": is_data_page,
+            "has_session_cookie": bool(tl_sess),
+            "diagnosis": (
+                "WORKING — data page returned"
+                if is_data_page else
+                f"BLOCKED (HTTP {r.status_code}) — " + (
+                    "IP blocked by Trendlyne WAF. Set SCRAPERAPI_KEY or FIXIE_URL."
+                    if r.status_code == 405 else
+                    "Session expired — update TRENDLYNE_SESSION cookie."
+                    if r.status_code in (302, 401, 403) else
+                    f"Unexpected response"
+                )
+            ),
+        }
+    except Exception as exc:
+        results["trendlyne"] = {
+            "status": None,
+            "working": False,
+            "error": str(exc)[:200],
+            "diagnosis": "BLOCKED (network error — IP-level block or no proxy)",
+        }
+
+    # ── Overall recommendation ────────────────────────────────────────────────
+    screener_ok = results["screener_in"].get("working", False)
+    trendlyne_ok = results["trendlyne"].get("working", False)
+    proxy_active = results["proxy"].get("configured", False)
+
+    if screener_ok and trendlyne_ok:
+        overall = "ALL SOURCES WORKING"
+    elif proxy_active and (not screener_ok or not trendlyne_ok):
+        overall = "PROXY ACTIVE BUT STILL BLOCKED — proxy IP may also be in blocklist, try ScraperAPI"
+    elif not proxy_active and (not screener_ok or not trendlyne_ok):
+        overall = "SOURCES BLOCKED — set SCRAPERAPI_KEY in Railway env vars to fix permanently"
+    else:
+        overall = "PARTIAL — check individual source results"
+
+    results["overall"] = overall
+    return results
+
+
 # ── 7. Research proposals ──────────────────────────────────────────────────────
 
 @app.get("/api/governance/research", tags=["governance"])
