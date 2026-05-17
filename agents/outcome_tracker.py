@@ -404,6 +404,129 @@ def run_outcome_tracking(dry_run: bool = False) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# P5-A: Per-agent attribution analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_agent_attribution(rows: list[dict]) -> list[dict]:
+    """
+    Unpack agent_signals JSONB from resolved recommendation_outcome rows and
+    compute per-agent accuracy metrics.
+
+    Each row's agent_signals looks like:
+      { "technical": {"signal": "BULLISH", "score": 72, "weight": 0.25}, ... }
+
+    Returns a list of dicts sorted by hit_rate_90d desc:
+      [ { agent_name, signal_count, bullish_count, hit_rate_90d,
+          avg_alpha_90d, avg_score_bullish, contribution_score }, ... ]
+    """
+    from collections import defaultdict
+
+    # Only use rows where we have a resolved 90d outcome and agent_signals
+    resolved = [
+        r for r in rows
+        if r.get("outcome_t90") not in (None, "PENDING")
+        and r.get("agent_signals")
+        and isinstance(r["agent_signals"], dict)
+    ]
+
+    if not resolved:
+        return []
+
+    # Accumulate per-agent stats
+    agent_stats: dict[str, dict] = defaultdict(lambda: {
+        "signals": [],          # list of (was_bullish, outcome, alpha)
+        "scores":  [],          # score when bullish
+    })
+
+    for row in resolved:
+        outcome_90 = row.get("outcome_t90")
+        alpha_90   = row.get("alpha_t90")
+        signals    = row["agent_signals"]
+
+        for agent_name, sig_data in signals.items():
+            if not isinstance(sig_data, dict):
+                continue
+            signal = (sig_data.get("signal") or "").upper()
+            score  = sig_data.get("score")
+
+            # Treat BULLISH / STRONG_BUY / BUY as "bullish"
+            is_bullish = signal in ("BULLISH", "STRONG_BUY", "BUY", "STRONG_BULLISH")
+
+            agent_stats[agent_name]["signals"].append({
+                "bullish":   is_bullish,
+                "outcome":   outcome_90,
+                "alpha":     alpha_90,
+                "score":     score,
+            })
+            if is_bullish and score is not None:
+                try:
+                    agent_stats[agent_name]["scores"].append(float(score))
+                except (TypeError, ValueError):
+                    pass
+
+    results: list[dict] = []
+    for agent_name, data in agent_stats.items():
+        sigs        = data["signals"]
+        bullish     = [s for s in sigs if s["bullish"]]
+        hits_when_bullish = sum(
+            1 for s in bullish if s["outcome"] == "HIT"
+        )
+        alpha_vals  = [
+            float(s["alpha"]) * 100
+            for s in bullish
+            if s.get("alpha") is not None
+        ]
+        avg_scores  = data["scores"]
+
+        hit_rate    = round(hits_when_bullish / len(bullish) * 100, 1) if bullish else None
+        avg_alpha   = round(sum(alpha_vals) / len(alpha_vals), 2) if alpha_vals else None
+        avg_score   = round(sum(avg_scores) / len(avg_scores), 1) if avg_scores else None
+
+        # Contribution score: agents that vote bullish AND are right most often rank highest
+        # Penalise low signal frequency (< 5 signals = less reliable)
+        freq_weight = min(1.0, len(bullish) / 20)
+        contribution = (
+            (hit_rate or 0) * freq_weight
+            + (avg_alpha or 0) * 2
+        ) if hit_rate is not None else 0.0
+
+        results.append({
+            "agent_name":         agent_name,
+            "signal_count":       len(sigs),
+            "bullish_count":      len(bullish),
+            "hit_rate_90d":       hit_rate,
+            "avg_alpha_90d":      avg_alpha,
+            "avg_score_bullish":  avg_score,
+            "contribution_score": round(contribution, 2),
+        })
+
+    return sorted(results, key=lambda x: x["contribution_score"], reverse=True)
+
+
+def run_attribution_analysis() -> list[dict]:
+    """
+    Fetch all resolved recommendation_outcome rows and return per-agent
+    attribution stats. Entry point for the API endpoint.
+    """
+    client = _supabase()
+    if not client:
+        return []
+    try:
+        rows = (
+            client
+            .table("recommendation_outcomes")
+            .select("outcome_t90,alpha_t90,agent_signals")
+            .not_.is_("outcome_t90", "null")
+            .execute()
+            .data or []
+        )
+    except Exception as exc:
+        log.error("Attribution analysis fetch failed: %s", exc)
+        return []
+    return compute_agent_attribution(rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Accuracy report helper
 # ─────────────────────────────────────────────────────────────────────────────
 

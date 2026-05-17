@@ -229,6 +229,53 @@ def job_outcome_tracker() -> None:
         log.error("Outcome tracker job failed: %s", exc, exc_info=True)
 
 
+def job_paper_portfolio_open() -> None:
+    """07:05 IST — open paper positions for any new BUY recs (P5-B)."""
+    log.info("-" * 50)
+    log.info("  JOB START: Paper Portfolio Open (07:05 IST)")
+    log.info("-" * 50)
+    try:
+        from agents.paper_portfolio import open_new_positions
+        from supabase import create_client
+        import os
+        client = create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_KEY", ""))
+        result = open_new_positions(client, dry_run=False)
+        log.info(
+            "Paper portfolio open done — opened=%d skipped=%d errors=%d",
+            result.get("opened", 0), result.get("skipped", 0), len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        log.error("Paper portfolio open job failed: %s", exc, exc_info=True)
+
+
+def job_paper_portfolio_update() -> None:
+    """16:15 IST — update open paper positions (price refresh + exit checks) + daily snapshot (P5-B)."""
+    log.info("-" * 50)
+    log.info("  JOB START: Paper Portfolio Update (16:15 IST)")
+    log.info("-" * 50)
+    try:
+        from agents.paper_portfolio import update_open_positions, save_daily_snapshot
+        from supabase import create_client
+        import os
+        client = create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_KEY", ""))
+        upd = update_open_positions(client, dry_run=False)
+        log.info(
+            "Paper portfolio update done — updated=%d closed=%d errors=%d",
+            upd.get("updated", 0), upd.get("closed", 0), len(upd.get("errors", [])),
+        )
+        for cd in upd.get("closed_details", []):
+            log.info(
+                "  Closed %s (%s): pnl=%.1f%% alpha=%s",
+                cd["symbol"], cd["exit_reason"],
+                cd.get("realized_pnl_pct", 0),
+                f"{cd['alpha_pct']:.1f}%" if cd.get("alpha_pct") is not None else "N/A",
+            )
+        save_daily_snapshot(client, dry_run=False)
+        log.info("Daily snapshot saved")
+    except Exception as exc:
+        log.error("Paper portfolio update job failed: %s", exc, exc_info=True)
+
+
 def job_portfolio_risk() -> None:
     """16:00 IST — compute portfolio-level risk metrics after market close."""
     log.info("-" * 50)
@@ -437,6 +484,32 @@ def build_scheduler():
         misfire_grace_time=1800,
     )
 
+    # ── Paper portfolio — open new positions after orchestrator (P5-B) ──────
+    # Runs at 07:05 — after rec_outcome_seeder (06:55) which seeds PENDING rows.
+    # Opens paper positions for any new BUY recs from today's orchestrator run.
+    scheduler.add_job(
+        job_paper_portfolio_open,
+        CronTrigger(hour=7, minute=5, timezone=IST),
+        id="paper_portfolio_open",
+        name="Paper Portfolio Open (07:05 IST)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+    )
+
+    # ── Paper portfolio — price update + exits after market close (P5-B) ────
+    # Runs at 16:15 — after market close (15:30), after portfolio_risk (16:00).
+    # Refreshes prices, checks stoploss/target/horizon exits, saves daily snapshot.
+    scheduler.add_job(
+        job_paper_portfolio_update,
+        CronTrigger(hour=16, minute=15, timezone=IST),
+        id="paper_portfolio_update",
+        name="Paper Portfolio Update (16:15 IST)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+    )
+
     # ── Rec outcome seeder — after orchestrator (P5-C) ───────────────────────
     # Seeds PENDING rows for any new recs saved by the orchestrator (06:00).
     # Runs at 06:55 so orchestrator + discovery (06:00) have time to finish.
@@ -546,7 +619,9 @@ def main() -> None:
         job_research_agent()
         job_portfolio_monitor()
         job_rec_outcome_seeder()
+        job_paper_portfolio_open()
         job_outcome_tracker()
+        job_paper_portfolio_update()
         job_options_snapshot()
         job_rag_refresh()
         log.info("--now run complete. Starting scheduler...")
@@ -574,6 +649,8 @@ def main() -> None:
     log.info("    15:15  Portfolio Monitor")
     log.info("    15:45  Options Market Snapshot")
     log.info("    16:00  Portfolio Risk")
+    log.info("    07:05  Paper Portfolio Open (P5-B)")
+    log.info("    16:15  Paper Portfolio Update (P5-B)")
     log.info("    18:30  Outcome Tracker")
     log.info("    07:45 (1st/month)  Monthly Backtest")
     log.info("    08:15 (1st/month)  RAG Corpus Auto-Refresh")

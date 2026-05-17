@@ -33,7 +33,15 @@ Stock analysis/
 │   ├── discovery_screener.py   # Proactive stock discovery — full NSE EQ universe
 │   │                           # daily slice rotation (200/day → 9-day full cycle)
 │   ├── warren_bot.py           # Long-term business quality (Buffett+Jhunjhunwala)
-│   └── position_sizer.py       # P3-A: 4-tier Kelly position sizing (FULL 5%/HALF 2.5%/QUARTER 1.25%/AVOID 0%)
+│   ├── position_sizer.py       # P3-A: 4-tier Kelly position sizing (FULL 5%/HALF 2.5%/QUARTER 1.25%/AVOID 0%)
+│   ├── paper_portfolio.py      # P5-B: Paper portfolio simulation — auto-follows BUY signals, tracks P&L vs Nifty 50
+│   │                           # open_new_positions() seeds paper positions for every new BUY rec (07:05 IST daily)
+│   │                           # update_open_positions() refreshes prices + checks SL/target/horizon exits (16:15 IST)
+│   │                           # save_daily_snapshot() persists portfolio-level P&L metrics for charting
+│   │                           # Allocation: FULL=₹10k, HALF=₹5k, QUARTER=₹2.5k; exit: SL 15%, target 40%, horizon 90d
+│   │                           # CLI: python -m agents.paper_portfolio [--run] [--backfill] [--report]
+│   └── outcome_tracker.py      # P5-A enhancement: compute_agent_attribution() + run_attribution_analysis()
+│   #   (original) daily 90/180/365d outcome resolver + (P5-A new) per-agent hit rate / avg alpha attribution
 │   #                             calc_position_size(upside_pct, confidence, action, mos_pct, warren_score)
 │   #                             MOS source: warren_bot DCF (primary) → upside_pct proxy (fallback)
 │   #                             FULL tier requires DCF MOS — proxy cannot qualify (quality gate)
@@ -147,7 +155,8 @@ Stock analysis/
 │       ├── create_discovery_runs.sql           # daily screened-symbol log
 │       ├── create_earnings_calendar.sql        # earnings dates for earnings_guard
 │       ├── create_portfolio_risk_snapshots.sql # portfolio risk snapshot table
-│       └── create_backtest_results.sql         # ← NEW: walk-forward backtest results (P1-A)
+│       ├── create_backtest_results.sql         # walk-forward backtest results (P1-A)
+│       └── create_paper_portfolio.sql          # ← NEW: paper_portfolio_positions + paper_portfolio_snapshots (P5-B)
 │
 ├── tests/                      # pytest — one test file per module
 ├── requirements.txt
@@ -178,8 +187,11 @@ Stock analysis/
 | `market_regime` | Daily market regime | `regime_date (unique), regime, confidence, nifty_trend, vix_state, fii_trend, breadth_state, momentum_state, raw_signals (jsonb)` |
 | `earnings_calendar` | Earnings dates for pre-earnings guard | `symbol, earnings_date, quarter, source, confirmed` |
 | `backtest_results` | Walk-forward backtest runs | `run_date, universe, period_start/end, split_type (TRAIN/TEST/FULL), hit_rate_90d, avg_alpha_90d/180d, sharpe_ratio, max_drawdown, win_loss_ratio, signal_details (jsonb)` |
+| `paper_portfolio_positions` | P5-B paper trade log | `rec_id, symbol, yf_symbol, entry_date, entry_price, quantity, allocation_inr, position_label, stoploss_price, target_price, nifty_entry, current_price, current_value, unrealized_pnl, unrealized_pnl_pct, status (OPEN/CLOSED/SKIPPED), exit_date, exit_price, nifty_exit, realized_pnl, realized_pnl_pct, alpha_pct, exit_reason` |
+| `paper_portfolio_snapshots` | P5-B daily portfolio P&L | `snapshot_date (unique), total_invested, total_current_value, unrealized_pnl, realized_pnl, total_pnl, total_pnl_pct, open_positions, closed_positions, nifty_value, nifty_return_pct, alpha_pct` |
 
 > **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results)
+> **⚠ PENDING: run `db/migrations/create_paper_portfolio.sql` in Supabase SQL Editor before first paper portfolio job runs.**
 
 ---
 
@@ -202,6 +214,9 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/api/market/pulse` | Live yfinance prices (NIFTY, SENSEX, GOLD, CRUDE, VIX, FII) — 60s cache |
 | GET | `/api/warren_bot/{symbol}` | On-demand Buffett/Jhunjhunwala quality score — 24h Supabase cache |
 | GET | `/api/backtest/summary` | Walk-forward backtest summary from `backtest_results` — `?split=TEST\|TRAIN\|FULL&limit=5` |
+| GET | `/api/paper/portfolio` | P5-B: paper portfolio — open positions, recent closed, summary stats, win rate, avg alpha |
+| GET | `/api/paper/history` | P5-B: daily `paper_portfolio_snapshots` for P&L vs Nifty chart — `?days=180` |
+| GET | `/api/attribution/agents` | P5-A: per-agent hit rate + avg alpha derived from resolved recommendation_outcomes |
 | WS | `/ws/alerts` | WebSocket — broadcasts DANGER/CRITICAL alerts every 30s |
 
 **Auth:** `x-api-key: <DASHBOARD_API_KEY>` header on all HTTP. `?api_key=<key>` on WebSocket.
@@ -495,6 +510,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (P5-A/B) | P5-A: `compute_agent_attribution()` + `run_attribution_analysis()` added to `agents/outcome_tracker.py`; `GET /api/attribution/agents` endpoint — per-agent hit rate + avg alpha from resolved recommendation_outcomes. P5-B: `agents/paper_portfolio.py` — auto-follows BUY recs (FULL=₹10k/HALF=₹5k/QUARTER=₹2.5k), SL/target/horizon exits, daily snapshot; `db/migrations/create_paper_portfolio.sql`; worker jobs 07:05/16:15 IST; `GET /api/paper/portfolio` + `GET /api/paper/history` endpoints; PaperPortfolioPanel + AgentAttributionPanel in dashboard; 49 tests |
 | (BF-15b) | BF-15b: ScraperAPI SSL cert fix — `session.verify=False` for CONNECT tunnel in Railway container; urllib3 warning suppressed; `test_scraper_connectivity.py` summary fixed (now correctly shows direct✅/proxy✅ separately); OPS-1 reminder added to EXECUTION_PLAN.md |
 | (BF-15) | BF-15: Railway IP block fix — `data/proxy_session.py` proxy abstraction; apply_proxy_to_session() wired into screener.in + Trendlyne sessions; SCRAPERAPI_KEY / FIXIE_URL env vars; /api/debug/scraper-health endpoint; scripts/test_scraper_connectivity.py; Trendlyne 405 retry with alt URL patterns |
 | (BF-13/14) | BF-13: market pulse dashes — yfinance 1.2.x column format fix (df["Close"][sym]); BF-14: DATA_DEGRADATION status in daily_runs when all symbols suppressed |

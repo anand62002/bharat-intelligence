@@ -70,8 +70,8 @@
 | BF-15 | Railway IP blocked by screener.in Cloudflare + Trendlyne WAF — `data/proxy_session.py` proxy abstraction; SCRAPERAPI_KEY / FIXIE_URL env vars; `/api/debug/scraper-health` endpoint; test script | Enhancement | ✅ **DONE** | 2026-05-18 |
 | BF-15b | ScraperAPI SSL cert error in Railway container — `session.verify=False` for ScraperAPI CONNECT tunnel; fixed misleading test summary | Bug Fix | ✅ **DONE** | 2026-05-18 |
 | ⏳ **OPS-1** | **ScraperAPI subscription** — currently on free tier. Monitor 2026-05-18 + 2026-05-19 full pipeline runs. If screener.in / Trendlyne reach directly (no 405/Errno101), proxy is background insurance only. **Buy $29/month plan if direct gets blocked again.** URL: https://www.scraperapi.com/ → Residential plan | Ops | 🔔 **REVIEW BY 2026-05-20** | — |
-| P5-A | Enhanced outcome tracker + agent attribution | Phase 5 | ⬜ TODO | — |
-| P5-B | Paper portfolio simulation mode | Phase 5 | ⬜ TODO | — |
+| P5-A | Enhanced outcome tracker + agent attribution | Phase 5 | ✅ **DONE** | 2026-05-18 |
+| P5-B | Paper portfolio simulation mode | Phase 5 | ✅ **DONE** | 2026-05-18 |
 | P5-C | Recommendation outcome seeder — backfill open recs into recommendation_outcomes table | Phase 5 | ✅ **DONE** | 2026-05-17 |
 | P5-D | Forward outcome poller — daily job prices recs at t+30/60/90 days, writes alpha vs NIFTY | Phase 5 | ⬜ TODO | — |
 | P5-E | Attribution dashboard — per-agent hit rate, avg alpha, best/worst calls over rolling 90d | Phase 5 | ⬜ TODO | — |
@@ -80,7 +80,7 @@
 | P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
 | P6-D | Elite News Intelligence Engine — FinBERT semantic layer + event classification (Janus-Q) + temporal decay + entity-centric aggregation + LLM ensemble (Claude+FinBERT) + India-native sources + backtesting loop | Phase 6 | ⬜ TODO | — |
 
-**Progress: 57 / 63 items complete (90%) — OPS-1 review due 2026-05-20**
+**Progress: 59 / 63 items complete (94%) — OPS-1 review due 2026-05-20**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |

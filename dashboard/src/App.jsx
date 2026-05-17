@@ -1607,7 +1607,7 @@ function PortfolioRiskPanel({risk}){
   );
 }
 
-function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBroken,portfolioRisk,optionsSignal}){
+function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBroken,portfolioRisk,optionsSignal,paperPortfolio,paperHistory,apiLoaded}){
   const alerts=computePortfolioAlerts(portfolio);
   const dangerHoldings=portfolio.filter(isCriticalDanger);
   // Sort portfolio: danger holdings first
@@ -1741,6 +1741,9 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBrok
           </div>
         </div>
       </div>
+
+      {/* Paper Portfolio Panel (P5-B) */}
+      <PaperPortfolioPanel data={paperPortfolio} history={paperHistory} apiLoaded={apiLoaded}/>
     </div>
   );
 }
@@ -2066,8 +2069,234 @@ function SystemHealthPanel({health}){
   );
 }
 
+// ─── PAPER PORTFOLIO PANEL (P5-B) ────────────────────────────────────────────
+function PaperPortfolioPanel({data, history, apiLoaded}){
+  const [expanded, setExpanded] = React.useState(false);
+  const snap   = data?.summary   || {};
+  const open   = data?.open_positions || [];
+  const closed = data?.trade_history   || [];
+  const pnlPct = snap.total_pnl_pct ?? null;
+  const alpha  = snap.alpha_pct       ?? null;
+  const pnlCol = v => v == null ? C.muted : v >= 0 ? C.green : C.red;
+  const fmt    = v => v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+
+  return(
+    <div style={{border:`1px solid ${C.border}`,borderRadius:8,marginTop:14,overflow:"hidden"}}>
+      <button
+        onClick={()=>setExpanded(e=>!e)}
+        style={{width:"100%",background:C.surface,border:"none",padding:"9px 12px",
+          display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}
+      >
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:10,fontWeight:700,color:C.purple}}>📋 Paper Portfolio (Simulation)</span>
+          <span style={{fontSize:8,color:C.muted}}>auto-follows BUY signals · validates system before live trading</span>
+        </div>
+        <div style={{display:"flex",gap:12,alignItems:"center"}}>
+          {pnlPct!=null&&<span style={{fontSize:9,fontWeight:700,color:pnlCol(pnlPct),fontFamily:"JetBrains Mono"}}>{fmt(pnlPct)} unrealized</span>}
+          {alpha!=null&&<span style={{fontSize:9,color:pnlCol(alpha),fontFamily:"JetBrains Mono"}}>alpha {fmt(alpha)}</span>}
+          {data?.win_rate!=null&&<span style={{fontSize:9,color:C.muted}}>{data.win_rate.toFixed(0)}% win rate</span>}
+          <span style={{fontSize:9,color:C.muted}}>{expanded?"▲":"▼"}</span>
+        </div>
+      </button>
+
+      {expanded&&(
+        <div style={{padding:"10px 12px",background:C.bg}}>
+          {!apiLoaded&&<div style={{fontSize:9,color:C.muted,textAlign:"center",padding:16}}>Loading paper portfolio…</div>}
+          {apiLoaded&&!snap.total_invested&&open.length===0&&(
+            <EmptyState icon="📋" title="Paper portfolio initialising"
+              sub="Paper positions open automatically for each new BUY recommendation. Run: python -m agents.paper_portfolio --run --backfill to seed historical recs." />
+          )}
+
+          {/* Summary stats row */}
+          {snap.total_invested>0&&(
+            <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,marginBottom:12}}>
+              {[
+                ["Invested",`₹${(snap.total_invested||0).toLocaleString("en-IN",{maximumFractionDigits:0})}`,C.text],
+                ["Unrealized P&L",fmt(pnlPct),pnlCol(pnlPct)],
+                ["Realized P&L",`₹${(snap.realized_pnl||0).toLocaleString("en-IN",{maximumFractionDigits:0})}`,pnlCol(snap.realized_pnl)],
+                ["vs Nifty (alpha)",fmt(alpha),pnlCol(alpha)],
+                ["Win Rate",data?.win_rate!=null?`${data.win_rate.toFixed(0)}%`:"—",data?.win_rate>=50?C.green:C.red],
+              ].map(([l,v,col])=>(
+                <div key={l} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px"}}>
+                  <div style={{fontSize:7,color:C.muted,textTransform:"uppercase",marginBottom:2}}>{l}</div>
+                  <div style={{fontSize:13,fontWeight:800,color:col,fontFamily:"JetBrains Mono"}}>{v}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* P&L chart — simple bar representation */}
+          {Array.isArray(history?.snapshots)&&history.snapshots.length>1&&(()=>{
+            const snaps = history.snapshots;
+            const maxAbs = Math.max(...snaps.map(s=>Math.abs(s.total_pnl_pct||0)), 0.1);
+            return(
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:9,fontWeight:700,color:C.muted,marginBottom:6}}>Portfolio P&L vs Nifty</div>
+                <div style={{display:"flex",gap:1,alignItems:"flex-end",height:40}}>
+                  {snaps.slice(-60).map((s,i)=>{
+                    const pct = s.total_pnl_pct || 0;
+                    const nif = s.nifty_return_pct || 0;
+                    const h   = Math.min(36, Math.abs(pct) / maxAbs * 36);
+                    const hn  = Math.min(36, Math.abs(nif) / maxAbs * 36);
+                    return(
+                      <div key={i} title={`${s.snapshot_date}: P&L ${fmt(pct)}, Nifty ${fmt(nif)}`}
+                        style={{flex:1,display:"flex",flexDirection:"column",justifyContent:"flex-end",gap:1,cursor:"help"}}>
+                        <div style={{height:h,background:pct>=0?C.green:C.red,borderRadius:"1px 1px 0 0",opacity:0.8}}/>
+                        <div style={{height:hn,background:C.muted,borderRadius:"1px 1px 0 0",opacity:0.3}}/>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
+                  <span style={{fontSize:7,color:C.muted}}>{snaps[0]?.snapshot_date}</span>
+                  <div style={{display:"flex",gap:8}}>
+                    <span style={{fontSize:7,color:C.green}}>■ Portfolio</span>
+                    <span style={{fontSize:7,color:C.muted}}>■ Nifty</span>
+                  </div>
+                  <span style={{fontSize:7,color:C.muted}}>{snaps[snaps.length-1]?.snapshot_date}</span>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Open positions */}
+          {open.length>0&&(
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:9,fontWeight:700,color:C.muted,marginBottom:5,textTransform:"uppercase"}}>Open Positions ({open.length})</div>
+              <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 55px 65px 65px 70px 80px",background:C.panel,padding:"5px 9px",gap:4}}>
+                  {["Symbol","Qty","Entry","Current","P&L%","Tier"].map(h=>(
+                    <div key={h} style={{fontSize:7,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</div>
+                  ))}
+                </div>
+                {open.slice(0,10).map((p,i)=>{
+                  const pct = p.unrealized_pnl_pct??0;
+                  return(
+                    <div key={p.id} style={{
+                      display:"grid",gridTemplateColumns:"1fr 55px 65px 65px 70px 80px",
+                      padding:"5px 9px",gap:4,alignItems:"center",
+                      background:i%2===0?C.bg:C.surface,
+                      borderTop:`1px solid ${C.border}`,
+                    }}>
+                      <div style={{fontSize:9,fontWeight:600,color:"white"}}>{p.symbol}</div>
+                      <div style={{fontSize:9,color:C.muted,fontFamily:"JetBrains Mono"}}>{p.quantity}</div>
+                      <div style={{fontSize:9,color:C.muted,fontFamily:"JetBrains Mono"}}>₹{(p.entry_price||0).toLocaleString("en-IN",{maximumFractionDigits:0})}</div>
+                      <div style={{fontSize:9,color:"white",fontFamily:"JetBrains Mono"}}>₹{(p.current_price||0).toLocaleString("en-IN",{maximumFractionDigits:0})}</div>
+                      <div style={{fontSize:9,fontWeight:700,color:pnlCol(pct),fontFamily:"JetBrains Mono"}}>{fmt(pct)}</div>
+                      <div style={{fontSize:7,color:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{(p.position_label||"").replace(" position","").replace(" (5%)","").replace(" (2.5%)","").replace(" (1.25%","")}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Trade history table */}
+          {closed.length>0&&(
+            <div>
+              <div style={{fontSize:9,fontWeight:700,color:C.muted,marginBottom:5,textTransform:"uppercase"}}>
+                Trade History ({closed.length})
+              </div>
+              <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
+                <div style={{overflowX:"auto",maxHeight:320,overflowY:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:9,fontFamily:"JetBrains Mono"}}>
+                    <thead>
+                      <tr style={{background:C.panel,position:"sticky",top:0,zIndex:1}}>
+                        {["Symbol","Entry","Exit","Entry ₹","Exit ₹","P&L%","Alpha","Alloc ₹","Reason"].map(h=>(
+                          <th key={h} style={{padding:"5px 8px",textAlign:"left",fontSize:7,color:C.muted,
+                            fontWeight:700,textTransform:"uppercase",whiteSpace:"nowrap",borderBottom:`1px solid ${C.border}`}}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {closed.map((p,i)=>{
+                        const pct = p.realized_pnl_pct??0;
+                        const alp = p.alpha_pct;
+                        const entryD = p.entry_date ? p.entry_date.slice(0,10) : "—";
+                        const exitD  = p.exit_date  ? p.exit_date.slice(0,10)  : "—";
+                        const entryP = p.entry_price ? `₹${Number(p.entry_price).toLocaleString("en-IN",{maximumFractionDigits:0})}` : "—";
+                        const exitP  = p.exit_price  ? `₹${Number(p.exit_price).toLocaleString("en-IN",{maximumFractionDigits:0})}`  : "—";
+                        const alloc  = p.allocation_inr ? `₹${Number(p.allocation_inr).toLocaleString("en-IN",{maximumFractionDigits:0})}` : "—";
+                        const reason = (p.exit_reason||"").replace("_"," ").toLowerCase();
+                        return(
+                          <tr key={p.symbol+(p.exit_date||i)}
+                            style={{background:i%2===0?C.bg:C.surface,borderTop:`1px solid ${C.border}`}}>
+                            <td style={{padding:"5px 8px",fontWeight:700,color:"white",whiteSpace:"nowrap"}}>{p.symbol}</td>
+                            <td style={{padding:"5px 8px",color:C.muted,whiteSpace:"nowrap"}}>{entryD}</td>
+                            <td style={{padding:"5px 8px",color:C.muted,whiteSpace:"nowrap"}}>{exitD}</td>
+                            <td style={{padding:"5px 8px",color:C.muted}}>{entryP}</td>
+                            <td style={{padding:"5px 8px",color:"white"}}>{exitP}</td>
+                            <td style={{padding:"5px 8px",fontWeight:700,color:pnlCol(pct)}}>{fmt(pct)}</td>
+                            <td style={{padding:"5px 8px",color:alp!=null?pnlCol(alp):C.muted}}>{alp!=null?fmt(alp):"—"}</td>
+                            <td style={{padding:"5px 8px",color:C.muted}}>{alloc}</td>
+                            <td style={{padding:"5px 8px",color:C.muted,fontSize:8,whiteSpace:"nowrap"}}>{reason||"—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ─── AGENT ATTRIBUTION PANEL (P5-A) ──────────────────────────────────────────
+function AgentAttributionPanel({attribution}){
+  const agents = attribution?.agents || [];
+  if(!agents.length) return(
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:12}}>
+      <div style={{fontSize:10,fontWeight:700,color:C.muted,marginBottom:4}}>Agent Attribution</div>
+      <div style={{fontSize:9,color:C.textDim}}>Attribution data will populate after recommendations are 90+ days old. Each agent's hit rate and average alpha will be shown here.</div>
+    </div>
+  );
+  return(
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:12}}>
+      <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:2}}>Agent Attribution</div>
+      <div style={{fontSize:8,color:C.muted,marginBottom:8}}>{attribution?.note}</div>
+      <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 70px 80px",background:C.panel,padding:"5px 9px",gap:4}}>
+          {["Agent","Signals","Bullish","Hit Rate","Avg Alpha"].map(h=>(
+            <div key={h} style={{fontSize:7,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</div>
+          ))}
+        </div>
+        {agents.map((a,i)=>{
+          const hr  = a.hit_rate_90d;
+          const alp = a.avg_alpha_90d;
+          const hrCol = hr==null?C.muted:hr>=55?C.green:hr>=45?C.orange:C.red;
+          const alpCol= alp==null?C.muted:alp>=0?C.green:C.red;
+          return(
+            <div key={a.agent_name} style={{
+              display:"grid",gridTemplateColumns:"1fr 60px 60px 70px 80px",
+              padding:"5px 9px",gap:4,alignItems:"center",
+              background:i%2===0?C.bg:C.surface,
+              borderTop:`1px solid ${C.border}`,
+            }}>
+              <div style={{fontSize:9,fontWeight:600,color:"white",textTransform:"capitalize"}}>
+                {a.agent_name.replace(/_/g," ")}
+                {i===0&&<span style={{marginLeft:5,fontSize:7,background:C.green+"22",color:C.green,borderRadius:3,padding:"1px 5px"}}>top</span>}
+              </div>
+              <div style={{fontSize:9,color:C.muted,fontFamily:"JetBrains Mono"}}>{a.signal_count}</div>
+              <div style={{fontSize:9,color:C.muted,fontFamily:"JetBrains Mono"}}>{a.bullish_count}</div>
+              <div style={{fontSize:9,fontWeight:700,color:hrCol,fontFamily:"JetBrains Mono"}}>{hr!=null?`${hr.toFixed(0)}%`:"—"}</div>
+              <div style={{fontSize:9,fontWeight:700,color:alpCol,fontFamily:"JetBrains Mono"}}>{alp!=null?`${alp>=0?"+":""}${alp.toFixed(1)}%`:"—"}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{fontSize:7,color:C.textDim,marginTop:5}}>Hit rate = % of BULLISH votes where stock beat Nifty 50 at 90 days. Target: ≥55%.</div>
+    </div>
+  );
+}
+
+
 // ─── PERFORMANCE TAB ─────────────────────────────────────────────────────────
-function PerformanceTab({accuracy, outcomes, alphaChart, apiLoaded}){
+function PerformanceTab({accuracy, outcomes, alphaChart, attribution, apiLoaded}){
   const byAction = accuracy?.by_action || {};
   const total    = accuracy?.total_tracked || 0;
   const ACTIONS  = ["BUY","HOLD","SELL","AVOID"];
@@ -2177,6 +2406,9 @@ function PerformanceTab({accuracy, outcomes, alphaChart, apiLoaded}){
         </div>
       )}
 
+      {/* Agent Attribution (P5-A) */}
+      <AgentAttributionPanel attribution={attribution} />
+
       {/* Recent outcomes table */}
       {recent.length > 0 && (
         <div>
@@ -2253,6 +2485,11 @@ export default function App(){
   const [systemHealth,      setSystemHealth]      = useState(null); // /api/system/health
   const [marketNews,        setMarketNews]        = useState([]);   // DB-7: India market news
   const [newsSymbol,        setNewsSymbol]        = useState("NIFTY"); // DB-7: which symbol's news to show
+  // P5-B: Paper portfolio simulation
+  const [paperPortfolio,    setPaperPortfolio]    = useState(null);
+  const [paperHistory,      setPaperHistory]      = useState(null);
+  // P5-A: Agent attribution
+  const [agentAttribution,  setAgentAttribution]  = useState(null);
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -2316,6 +2553,15 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/news/NIFTY")   // DB-7: pre-fetch market news
         .then(d=>{ if(d?.news) setMarketNews(d.news); })
+        .catch(()=>{}),
+      apiFetch("/api/paper/portfolio")    // P5-B: paper portfolio
+        .then(d=>{ if(d) setPaperPortfolio(d); })
+        .catch(()=>{}),
+      apiFetch("/api/paper/history?days=180")  // P5-B: paper P&L history
+        .then(d=>{ if(d) setPaperHistory(d); })
+        .catch(()=>{}),
+      apiFetch("/api/attribution/agents")  // P5-A: agent attribution
+        .then(d=>{ if(d) setAgentAttribution(d); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -2714,6 +2960,9 @@ export default function App(){
               brokenSymbols={brokenSymbols}
               portfolioRisk={portfolioRisk}
               optionsSignal={optionsSignal}
+              paperPortfolio={paperPortfolio}
+              paperHistory={paperHistory}
+              apiLoaded={apiLoaded}
               onFixBroken={()=>{
                 // Re-fetch portfolio prices and broken-symbols list after a fix
                 apiFetch("/api/portfolio").then(d=>{ if(Array.isArray(d)) setPortfolio(d); }).catch(()=>{});
@@ -2726,6 +2975,7 @@ export default function App(){
                 accuracy={perfAccuracy}
                 outcomes={perfOutcomes}
                 alphaChart={perfAlphaChart}
+                attribution={agentAttribution}
                 apiLoaded={apiLoaded}
               />
             )}

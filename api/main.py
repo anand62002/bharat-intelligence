@@ -2674,7 +2674,116 @@ async def get_valuation_scenarios(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-# ── 12. WebSocket — real-time critical alerts ──────────────────────────────────
+# ── 12. Paper Portfolio (P5-B) ────────────────────────────────────────────────
+
+@app.get("/api/paper/portfolio", tags=["paper_portfolio"])
+async def get_paper_portfolio(
+    _: None = Depends(require_api_key),
+):
+    """
+    Current paper portfolio: open positions, recent closed trades, summary metrics.
+
+    Returns:
+      {
+        open_positions: [...],
+        recent_closed:  [...],
+        closed_count:   int,
+        summary:        { total_invested, unrealized_pnl, realized_pnl, total_pnl_pct,
+                          nifty_return_pct, alpha_pct, open_positions, closed_positions },
+        win_rate:       float | null,
+        avg_alpha_closed: float | null,
+      }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        loop = asyncio.get_event_loop()
+        def _run():
+            from agents.paper_portfolio import get_portfolio_summary
+            return get_portfolio_summary(_supabase)
+        result = await loop.run_in_executor(None, _run)
+        return _sanitise_floats(result)
+    except Exception as exc:
+        log.error("paper/portfolio error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/paper/history", tags=["paper_portfolio"])
+async def get_paper_portfolio_history(
+    days: int  = Query(180, description="History window in days"),
+    _:    None = Depends(require_api_key),
+):
+    """
+    Daily paper portfolio snapshots for the P&L chart.
+
+    Returns:
+      { snapshots: [ { snapshot_date, total_pnl_pct, nifty_return_pct, alpha_pct,
+                       total_invested, open_positions, closed_positions }, ... ] }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        cutoff = str(date.today() - timedelta(days=days))
+        rows = (
+            _supabase
+            .table("paper_portfolio_snapshots")
+            .select("snapshot_date,total_invested,total_current_value,unrealized_pnl,"
+                    "realized_pnl,total_pnl,total_pnl_pct,open_positions,closed_positions,"
+                    "nifty_value,nifty_return_pct,alpha_pct")
+            .gte("snapshot_date", cutoff)
+            .order("snapshot_date", desc=False)
+            .execute()
+            .data or []
+        )
+        return _sanitise_floats({"snapshots": rows, "total": len(rows)})
+    except Exception as exc:
+        log.error("paper/history error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── 13. Agent Attribution (P5-A) ───────────────────────────────────────────────
+
+@app.get("/api/attribution/agents", tags=["performance"])
+async def get_agent_attribution(
+    _: None = Depends(require_api_key),
+):
+    """
+    Per-agent accuracy attribution derived from resolved recommendation_outcomes.
+
+    For each agent that voted BULLISH on a recommendation, computes hit rate and
+    average alpha at 90 days — shows which agents are adding signal vs noise.
+
+    Returns:
+      { agents: [ { agent_name, signal_count, bullish_count,
+                    hit_rate_90d, avg_alpha_90d, avg_score_bullish,
+                    contribution_score }, ... ],
+        total_resolved: int,
+        note: str }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        loop = asyncio.get_event_loop()
+        def _run():
+            from agents.outcome_tracker import run_attribution_analysis
+            return run_attribution_analysis()
+        agents = await loop.run_in_executor(None, _run)
+        note = (
+            "Attribution data will populate after recommendations are 90+ days old."
+            if not agents else
+            f"Attribution based on {sum(a['signal_count'] for a in agents)} resolved signal votes."
+        )
+        return _sanitise_floats({
+            "agents":         agents,
+            "total_resolved": len(agents),
+            "note":           note,
+        })
+    except Exception as exc:
+        log.error("attribution/agents error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── 14. WebSocket — real-time critical alerts ──────────────────────────────────
 
 @app.websocket("/ws/alerts")
 async def websocket_alerts(
