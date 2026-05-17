@@ -67,86 +67,42 @@ _screener_session_warmed: bool = False
 _screener_session_logged_in: bool = False   # True once login POST succeeded
 
 
-def _screener_login(session: "requests.Session") -> bool:
+def _screener_inject_session(session: "requests.Session") -> bool:
     """
-    Attempt to log in to screener.in using SCREENER_USER / SCREENER_PASS env vars.
+    Inject a pre-existing screener.in session cookie into the requests session.
 
-    Login flow (standard Django CSRF POST):
-      1. GET /login/ → picks up csrftoken cookie
-      2. POST /login/ with {username, password, csrfmiddlewaretoken, next=/}
-      3. Successful login gives a sessionid cookie; session is then authenticated.
+    screener.in supports Google OAuth login (and email/password login), both of
+    which complete in a browser — there is no server-side credentials flow we can
+    automate.  Instead, the user copies the ``sessionid`` cookie from their browser
+    after logging in via Google and stores it in the ``SCREENER_SESSION`` env var.
+    This is the same pattern used for Trendlyne (TRENDLYNE_SESSION).
 
-    Export endpoint (/company/{slug}/export/) requires a logged-in session.
-    Without credentials the export returns 404; HTML scraping still works
-    unauthenticated.
+    How to get the cookie:
+      1. Log in at https://www.screener.in (via Google or email)
+      2. Open DevTools → Application → Cookies → screener.in
+      3. Copy the value of the ``sessionid`` cookie
+      4. Set ``SCREENER_SESSION=<value>`` on Railway (and in your local .env)
 
-    Returns True on success, False otherwise.  Non-fatal — caller continues
-    with the unauthenticated session if login fails.
+    The cookie typically stays valid for several weeks.  If exports start
+    returning 403/404 again, refresh it using the same steps.
+
+    Returns True if the cookie was injected, False if not configured.
     """
-    user = os.environ.get("SCREENER_USER", "").strip()
-    pwd  = os.environ.get("SCREENER_PASS", "").strip()
-    if not user or not pwd:
-        log.debug("_screener_login: SCREENER_USER/SCREENER_PASS not set — skipping login")
+    sid = os.environ.get("SCREENER_SESSION", "").strip()
+    if not sid:
+        log.debug(
+            "_screener_inject_session: SCREENER_SESSION not set "
+            "— Excel export fallback disabled (HTML scraping still works)"
+        )
         return False
 
-    try:
-        # Step 1: GET login page to obtain CSRF token
-        login_get = session.get(
-            "https://screener.in/login/",
-            headers=_screener_headers({
-                "User-Agent": random.choice(_SCREENER_USER_AGENTS),
-                "Referer":    "https://screener.in/",
-            }),
-            timeout=12,
-        )
-        if login_get.status_code != 200:
-            log.warning("_screener_login: GET /login/ returned HTTP %s", login_get.status_code)
-            return False
-
-        csrf = session.cookies.get("csrftoken", "")
-        if not csrf:
-            log.warning("_screener_login: no csrftoken cookie after GET /login/")
-            return False
-
-        # Step 2: POST credentials
-        login_post = session.post(
-            "https://screener.in/login/",
-            data={
-                "csrfmiddlewaretoken": csrf,
-                "username":            user,
-                "password":            pwd,
-                "next":                "/",
-            },
-            headers=_screener_headers({
-                "User-Agent":   random.choice(_SCREENER_USER_AGENTS),
-                "Referer":      "https://screener.in/login/",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Origin":       "https://screener.in",
-            }),
-            timeout=15,
-            allow_redirects=True,
-        )
-        # Successful login: Django redirects to / (final URL is homepage)
-        # and sets a sessionid cookie.
-        has_session = bool(session.cookies.get("sessionid"))
-        log.info(
-            "_screener_login: POST /login/ → HTTP %s, sessionid=%s",
-            login_post.status_code,
-            "yes" if has_session else "no",
-        )
-        if has_session:
-            log.info("_screener_login: authenticated as %s", user)
-            return True
-        else:
-            log.warning(
-                "_screener_login: login POST returned HTTP %s but no sessionid cookie "
-                "— check SCREENER_USER/SCREENER_PASS are correct",
-                login_post.status_code,
-            )
-            return False
-    except Exception as exc:
-        log.warning("_screener_login: exception during login: %s", exc)
-        return False
+    # Inject the session cookie so all subsequent requests are authenticated
+    session.cookies.set("sessionid", sid, domain="screener.in")
+    log.info(
+        "_screener_inject_session: sessionid injected (%.8s...) — export fallback enabled",
+        sid,
+    )
+    return True
 
 
 def _get_screener_session() -> requests.Session:
@@ -154,10 +110,11 @@ def _get_screener_session() -> requests.Session:
     Return a warmed requests.Session for screener.in.
 
     The first call does:
-      GET https://screener.in/  → picks up csrftoken + sessionid cookies
+      GET https://screener.in/  → picks up csrftoken cookie
 
-    If SCREENER_USER + SCREENER_PASS env vars are set, also attempts login
-    so that the export endpoint (/company/{slug}/export/) becomes accessible.
+    If SCREENER_SESSION env var is set (the ``sessionid`` cookie copied from a
+    browser session), it is injected so that authenticated endpoints like the
+    Excel export (/company/{slug}/export/) become accessible.
 
     Subsequent calls reuse the same session object.
     """
@@ -181,9 +138,9 @@ def _get_screener_session() -> requests.Session:
                     "_get_screener_session: warmup OK — cookies: %s",
                     list(_screener_session.cookies.keys()),
                 )
-                # Attempt login if credentials are configured (non-fatal)
+                # Inject session cookie if SCREENER_SESSION is configured (non-fatal)
                 if not _screener_session_logged_in:
-                    _screener_session_logged_in = _screener_login(_screener_session)
+                    _screener_session_logged_in = _screener_inject_session(_screener_session)
             else:
                 log.warning(
                     "_get_screener_session: warmup returned HTTP %s",
@@ -1796,8 +1753,9 @@ def get_screener_history(symbol: str) -> dict | None:
         # hasn't configured credentials.
         if not _screener_session_logged_in:
             log.info(
-                "get_screener_history(%s): Excel export skipped (no login — set "
-                "SCREENER_USER + SCREENER_PASS to enable export fallback)",
+                "get_screener_history(%s): Excel export skipped (no session cookie — "
+                "set SCREENER_SESSION env var to enable export fallback; "
+                "get it from DevTools → Application → Cookies → screener.in → sessionid)",
                 symbol,
             )
             log.error(

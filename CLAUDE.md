@@ -325,8 +325,7 @@ Uses `ANTHROPIC_API_KEY` env var server-side (never exposed to browser).
 | `TRENDLYNE_SESSION` | `.trendlyne` cookie value — required for F&O Excel download + analyst targets scraper |
 | `TRENDLYNE_CSRF` | `csrftoken` cookie value — required alongside TRENDLYNE_SESSION |
 | `TRENDLYNE_USER` | *(Optional)* Trendlyne login email — enables auto-cookie-refresh when session expires |
-| `SCREENER_USER` | *(Optional)* screener.in login email — enables Excel export fallback in `get_screener_history` (DB-10) |
-| `SCREENER_PASS` | *(Optional)* screener.in login password — paired with SCREENER_USER; session auto-logs in on startup |
+| `SCREENER_SESSION` | *(Optional)* screener.in `sessionid` cookie — enables Excel export fallback in `get_screener_history` (DB-10). Get it: log in at screener.in via Google → DevTools → Application → Cookies → screener.in → copy `sessionid` value. Refreshed manually when it expires. |
 | `TRENDLYNE_PASS` | *(Optional)* Trendlyne login password — enables auto-cookie-refresh |
 
 ### Vercel (frontend)
