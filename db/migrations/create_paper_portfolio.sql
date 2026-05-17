@@ -69,3 +69,13 @@ CREATE TABLE IF NOT EXISTS paper_portfolio_snapshots (
 CREATE INDEX IF NOT EXISTS idx_pp_snapshots_date ON paper_portfolio_snapshots (snapshot_date);
 
 GRANT ALL ON paper_portfolio_snapshots TO service_role;
+
+-- RLS: allow service_role full access (required even with GRANT ALL when RLS is enabled)
+ALTER TABLE paper_portfolio_positions  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE paper_portfolio_snapshots  ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "service_role full access positions"
+  ON paper_portfolio_positions FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+CREATE POLICY "service_role full access snapshots"
+  ON paper_portfolio_snapshots FOR ALL TO service_role USING (true) WITH CHECK (true);
