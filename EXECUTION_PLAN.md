@@ -73,8 +73,9 @@
 | P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
 | P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
 | P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
+| P6-D | Elite News Intelligence Engine — FinBERT semantic layer + event classification (Janus-Q) + temporal decay + entity-centric aggregation + LLM ensemble (Claude+FinBERT) + India-native sources + backtesting loop | Phase 6 | ⬜ TODO | — |
 
-**Progress: 53 / 58 items complete (91%)**
+**Progress: 53 / 59 items complete (90%)**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -949,5 +950,178 @@ After every build session, before closing:
 
 ---
 
-*Document version: 3.8 — 2026-05-17 (DB-10 Data Sheet parser rewrite + BF-12 ARIA daily_run camelCase fix + Phase 5 plan)*  
-*Next milestone: P5 — outcome tracker → attribution analysis → paper portfolio mode*
+*Document version: 3.9 — 2026-05-17 (P5-C seeder + P6-D news intelligence plan)*  
+*Next milestone: P5-D/E outcome attribution → P6-C morning brief → P6-D elite news engine*
+
+---
+
+## ⭐ P6-D: Elite News Intelligence Engine — Full Design
+
+> **Objective:** Upgrade `agents/sentiment.py` and `agents/macro.py` from keyword-matching prototypes to an industry-grade, multi-layer news intelligence system. Target: beat passive NIFTY 50 alpha from news signal alone, measurably via P5-D outcome tracker.
+
+### Current State Audit (2026-05-17)
+
+| Layer | Current | Gap |
+|---|---|---|
+| **Data sources** | ET Markets, Moneycontrol, Google News RSS (5 feeds), NewsAPI | Missing: Hindi/regional news, BSE XML filings, earnings transcripts, options flow |
+| **Sentiment NLP** | Claude Haiku (10-call cap) → keyword fallback dictionary | No semantic understanding, rate-capped, keyword misses nuanced language |
+| **Macro news** | Pure keyword match (±10pt) — no LLM | Budget announcement ≡ routine inflation data to the model |
+| **Deduplication** | MD5 fingerprint (same-text only) | Cross-domain same-story → counted 3× |
+| **Temporal weighting** | None — 48h window, flat weight | 12h-old article = 2s-old article |
+| **Entity resolution** | Symbol string match only | "Reliance" in headline about Reliance Jio ≠ RELIANCE.NS |
+| **Backtesting** | None — sentiment signal never validated vs actual returns | Signal improvement cycle impossible |
+| **India-specific** | Partially — some Hindi sources attempted but blocked | SEBI filings, BSE corporate announcements, Trendlyne events not used |
+
+**Verdict: Functional but shallow.** The system is news-aware but not news-intelligent. It registers headlines exist; it cannot distinguish market-moving events from noise.
+
+---
+
+### Target Architecture (Research-Backed)
+
+Based on: **Janus-Q** (Feb 2026, +17.5% direction accuracy via event-centric RL scoring), **Adaptive NIFTY Sentiment** (Dec 2025, instruction-tuned LLaMA for NSE), **LabelFusion** (Dec 2025, Claude+FinBERT 96% F1 ensemble), **MASFIN** multi-agent bias mitigation (Dec 2024), **CN-Buzz2Portfolio** (Mar 2026, news→sector rotation).
+
+#### Layer 1 — Data Enrichment
+```
+Current: 5 RSS feeds + NewsAPI
+Target:
+  + BSE corporate announcements XML (free, real-time)    → event-level alerts
+  + NSE circular feed (free)                             → regulatory signals  
+  + Trendlyne BSE filings (already integrated, P3-C-P5)  → insider events
+  + Screener.in concall notes (HTML scrape, authenticated)→ management guidance
+  + Google News Hindi RSS (Navbharat Times, ABP Live)     → retail sentiment
+  + Reddit r/IndiaInvestments RSS                         → retail sentiment
+```
+
+#### Layer 2 — Event Classification (Janus-Q pattern)
+```
+BEFORE sentiment scoring, classify each headline into:
+  EARNINGS_SURPRISE     — beat/miss vs consensus
+  REGULATORY_SHOCK      — SEBI order, RBI circular, ED/IT raid
+  M&A_SIGNAL            — acquisition, merger, stake sale
+  MACRO_CATALYST        — budget, rate decision, PMI, CPI
+  ANALYST_ACTION        — upgrade/downgrade/target change
+  MANAGEMENT_SIGNAL     — concall guidance, promoter buy/sell
+  SECTOR_CATALYST       — PLI scheme, import duty, price hike
+  ROUTINE               — earnings in-line, dividend, AGM date
+
+Event class drives amplification multiplier (REGULATORY_SHOCK ×3, ROUTINE ×0.5)
+```
+**Implementation:** Claude Haiku batch classify (single prompt, all headlines → JSONL output) — replaces per-headline calls, removes 10-call cap bottleneck.
+
+#### Layer 3 — Semantic Scoring (LabelFusion / FinBERT ensemble)
+```
+Signal = 0.6 × FinBERT_score + 0.4 × Claude_Haiku_score
+
+FinBERT (ProsusAI/finbert, HuggingFace, open-source, no API cost):
+  - 3-class: positive/negative/neutral + probability
+  - Runs locally via transformers library or via HF Inference API (free tier)
+  - Trained on Financial PhraseBank — 97% accuracy on financial text
+
+Claude Haiku (existing):
+  - Context-aware reasoning ("this headline is positive because Reliance 
+    beat PAT by 15% vs analyst estimate of 8%")
+  - Zero-shot generalisation for novel event types
+```
+
+#### Layer 4 — Temporal Decay
+```
+weight(article) = exp(-λ × age_hours)
+  where λ = ln(2) / half_life_hours
+
+half_life:
+  EARNINGS_SURPRISE  → 6h  (impact absorbed fast)
+  REGULATORY_SHOCK   → 48h (lingers, uncertain resolution)
+  MACRO_CATALYST     → 12h (market digests during session)
+  ROUTINE            → 2h  (stale immediately)
+
+Replaces flat 48h window; recent news dominates composite score naturally.
+```
+
+#### Layer 5 — Entity-Centric Aggregation (NER)
+```
+Current: headline contains "RELIANCE" → attributed to RELIANCE.NS
+Problem: "Reliance Jio tariff hike" ≠ RELIANCE.NS earnings news
+
+Solution: spaCy NER (free, local) → extract ORG entities → 
+  map via company_aliases dict (Reliance Jio → RELIANCE.NS, 
+  Jio Platforms → RELIANCE.NS, Tata Sons → TATAMOTORS.NS + TATASTEEL.NS)
+  
+Also enables: sector-level aggregation (news hitting 3+ companies in 
+  same sector → sector catalyst signal, not individual signal)
+```
+
+#### Layer 6 — Cross-Lingual Hindi Sentiment
+```
+Hindi Google News RSS → Google Translate API (free tier: 500K chars/month)
+  or deep-translator library (free, no API key) → translated headline →
+  into FinBERT + event classifier pipeline
+
+Rationale: Hindi business news (Nav Bharat Times, Amar Ujala, Zee Business 
+  Hindi) often breaks retail-sentiment-moving stories 2-4h before English 
+  media picks them up. Retail investors in India primary consume Hindi media.
+```
+
+#### Layer 7 — Signal Validation Loop (closes the feedback cycle)
+```
+Daily at 18:30 IST (alongside outcome_tracker):
+  1. For each recommendation_outcomes row resolved today (t+90 HIT/MISS)
+  2. Fetch the sentiment.py signal recorded on rec_date  
+  3. Compute correlation: sentiment_score vs actual alpha_t90
+  4. Write to new table: sentiment_accuracy (date, symbol, sentiment_score,
+     actual_alpha, correct_direction)
+  5. If rolling-30d accuracy < 52% direction: auto-flag agent_performance 
+     row as DEGRADING → surfaces in Governance tab
+
+This creates the reinforcement loop from Adaptive NIFTY paper.
+```
+
+---
+
+### Implementation Phases
+
+| Sub-phase | Work | Effort | Cost |
+|---|---|---|---|
+| P6-D-1 | BSE/NSE XML feeds + Trendlyne filing events → Layer 1 | S | ₹0 |
+| P6-D-2 | Event classifier (batch Haiku) replaces per-headline calls | M | ₹0 (existing Anthropic key) |
+| P6-D-3 | Temporal decay implementation (sentiment.py) | S | ₹0 |
+| P6-D-4 | FinBERT local integration (transformers pip package) | M | ₹0 (open-source) |
+| P6-D-5 | spaCy NER entity-centric aggregation | M | ₹0 (open-source) |
+| P6-D-6 | Hindi RSS + deep-translator pipeline | S | ₹0 (free tier) |
+| P6-D-7 | Signal validation loop (sentiment_accuracy table) | M | ₹0 |
+
+**Total additional cost: ₹0** — FinBERT + spaCy + deep-translator are all open-source. The batch Haiku approach actually reduces Anthropic API cost vs current per-headline calls.
+
+**New pip dependencies:**
+```
+transformers>=4.40.0      # FinBERT (HuggingFace)
+torch>=2.1.0              # FinBERT inference (CPU ok for our batch size)
+spacy>=3.7.0              # NER entity extraction
+deep-translator>=1.11.0   # Hindi → English (no API key needed)
+```
+
+**New Supabase table:**
+```sql
+CREATE TABLE sentiment_accuracy (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  symbol      TEXT NOT NULL,
+  rec_date    DATE NOT NULL,
+  sentiment_score     NUMERIC,
+  sentiment_signal    TEXT,
+  event_class         TEXT,
+  actual_alpha_t90    NUMERIC,
+  correct_direction   BOOLEAN,
+  created_at  TIMESTAMPTZ DEFAULT now()
+);
+```
+
+### Research References
+| Paper | Technique Borrowed |
+|---|---|
+| Janus-Q (Li et al., arXiv Feb 2026) | Event-centric classification; RL-based event importance scoring |
+| Adaptive NIFTY Sentiment (Chaithra et al., Dec 2025) | India-native LLM fine-tuning; RL feedback loop closing |
+| LabelFusion (Dec 2025, 96% F1) | Claude + FinBERT ensemble; hybrid scoring formula |
+| MASFIN multi-agent bias mitigation (Dec 2024) | Cross-agent news fact verification; bias detection |
+| CN-Buzz2Portfolio (Chen et al., Mar 2026) | News-to-sector-rotation signals |
+| Transformer CoVaR (Chen et al., Feb 2026) | News + price + KG cross-modal fusion |
+
+> **Expected improvement:** Direction accuracy of news-based signal: current ~52% (near random) → target 62-67% (matching Janus-Q benchmark) after P6-D-1 through P6-D-4. Measurable via P6-D-7 sentiment_accuracy table within 90 days of deployment.
