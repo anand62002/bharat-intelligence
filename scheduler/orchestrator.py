@@ -1233,6 +1233,7 @@ async def save_recs_node(state: OrchestratorState) -> dict:
         "headline", "summary", "agent_signals", "is_discovery",
         "valid_till", "gov_check",
         "suggested_position_pct", "position_label",   # P3-A position sizing
+        "metadata",                                   # discovery context bag (price, sector, risks, etc.)
     }
 
     saved_ids: list[str] = []
