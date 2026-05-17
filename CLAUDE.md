@@ -99,9 +99,11 @@ Stock analysis/
 │   │                           # Data: screener_history (trend) → screener_snapshot → trendlyne_snapshot
 │   │                           # Used by: sentiment.py (+5/-10 pts) + institutional.py (+8 pts ACCUMULATING)
 │   ├── forward_estimates.py    # yfinance forward EPS/PE estimates (24h Supabase cache)
-│   ├── proxy_session.py        # BF-15: Outbound proxy abstraction for Railway IP blocks
+│   ├── proxy_session.py        # BF-15/15b: Outbound proxy abstraction for Railway IP blocks
 │   │                           # apply_proxy_to_session(session) — routes via SCRAPERAPI_KEY
 │   │                           # (rotating residential, $29/mo) or FIXIE_URL (static, $25/mo)
+│   │                           # ScraperAPI: sets session.verify=False (SSL CONNECT cert not trusted
+│   │                           #   by Railway CA bundle — safe for read-only public market data)
 │   │                           # Used by: fetchers.py (screener.in) + trendlyne_analyst_fetcher.py
 │   │                           # proxy_configured() → bool; get_proxy_dict() → dict|None
 │   └── breeze_auth.py          # ICICI Breeze Connect — DEPRECATED (P4-D: scheduled for removal)
@@ -493,6 +495,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (BF-15b) | BF-15b: ScraperAPI SSL cert fix — `session.verify=False` for CONNECT tunnel in Railway container; urllib3 warning suppressed; `test_scraper_connectivity.py` summary fixed (now correctly shows direct✅/proxy✅ separately); OPS-1 reminder added to EXECUTION_PLAN.md |
 | (BF-15) | BF-15: Railway IP block fix — `data/proxy_session.py` proxy abstraction; apply_proxy_to_session() wired into screener.in + Trendlyne sessions; SCRAPERAPI_KEY / FIXIE_URL env vars; /api/debug/scraper-health endpoint; scripts/test_scraper_connectivity.py; Trendlyne 405 retry with alt URL patterns |
 | (BF-13/14) | BF-13: market pulse dashes — yfinance 1.2.x column format fix (df["Close"][sym]); BF-14: DATA_DEGRADATION status in daily_runs when all symbols suppressed |
 | (P5-C) | P5-C: `agents/rec_outcome_seeder.py` — backfill all recs into recommendation_outcomes; `run_seeder(dry_run, resolve_past)`; wired into worker.py at 06:55 IST; 17 tests |
@@ -554,7 +557,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | ICICI Breeze primary IP update due ~May 18 | MEDIUM | Railway env | 🔲 Update primary IP to `52.5.155.132` on ICICI Direct portal |
 | No portfolio-level concentration alerts (sector overlap, macro cluster) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P2-C) — SECTOR_CONCENTRATION + MACRO_CLUSTER alerts added |
 | No correlation-aware alerts (hidden concentration in same-direction movers) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P3-B) — CORR_CLUSTER alert: 60-day Pearson r>0.75, ≥2 pairs, 7-day dedup |
-| screener.in + Trendlyne blocked from Railway (Errno 101 ENETUNREACHABLE / HTTP 405) | CRITICAL | `data/fetchers.py`, `data/trendlyne_analyst_fetcher.py` | 🔲 BF-15: `data/proxy_session.py` proxy layer built (SCRAPERAPI_KEY / FIXIE_URL). **Set SCRAPERAPI_KEY in Railway env vars** — all analyses fall back to yfinance-only without it |
+| screener.in + Trendlyne blocked from Railway (Errno 101 ENETUNREACHABLE / HTTP 405) | CRITICAL | `data/fetchers.py`, `data/trendlyne_analyst_fetcher.py` | ✅ Fixed BF-15 — `data/proxy_session.py` proxy abstraction built; SCRAPERAPI_KEY / FIXIE_URL env vars; ScraperAPI SSL cert fixed (BF-15b: `session.verify=False` for CONNECT tunnel). Direct connection currently working from Railway IP `152.55.180.59`. Proxy fires automatically if direct is blocked. **⏳ OPS-1: Review 2026-05-18/19 runs, buy ScraperAPI $29/month plan if needed.** |
 | Market pulse cards showing "—" (all dashes) — yfinance 1.2.x column format change | HIGH | `api/main.py` `_fetch_prices_sync` | ✅ Fixed BF-13 — removed deprecated group_by/progress params, fixed column access pattern |
 
 ---

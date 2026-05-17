@@ -1,6 +1,6 @@
 # Bharat Intelligence — Investment-Grade Execution Plan
 ### Target: 6.0 → 8.8 / 10 System Robustness
-*Last updated: 2026-05-17*
+*Last updated: 2026-05-18*
 
 > **Standing rules (apply after every build):**
 > 1. Update `CLAUDE.md` — new files, tables, endpoints, env vars, resolved issues
@@ -65,6 +65,11 @@
 | BF-10 | Governance WebSocket broadcaster pushing all 107 raw alerts (bypassing dedup) | Bug Fix | ✅ **DONE** | 2026-05-16 |
 | BF-11 | Synthesis 529 Overloaded — 3-attempt retry with 15s/45s backoff | Enhancement | ✅ **DONE** | 2026-05-16 |
 | BF-12 | ARIA "What ran today?" shows 0/0/0 — snake_case vs camelCase mismatch in daily_run ARIA intro | Bug Fix | ✅ **DONE** | 2026-05-17 |
+| BF-13 | Market pulse cards all showing "—" — yfinance 1.2.x `(Price,Ticker)` MultiIndex + deprecated `group_by`/`progress` params | Bug Fix | ✅ **DONE** | 2026-05-18 |
+| BF-14 | All 24 symbols SUPPRESSED silently — added DATA_DEGRADATION status to daily_runs + governance panel diagnosis | Enhancement | ✅ **DONE** | 2026-05-18 |
+| BF-15 | Railway IP blocked by screener.in Cloudflare + Trendlyne WAF — `data/proxy_session.py` proxy abstraction; SCRAPERAPI_KEY / FIXIE_URL env vars; `/api/debug/scraper-health` endpoint; test script | Enhancement | ✅ **DONE** | 2026-05-18 |
+| BF-15b | ScraperAPI SSL cert error in Railway container — `session.verify=False` for ScraperAPI CONNECT tunnel; fixed misleading test summary | Bug Fix | ✅ **DONE** | 2026-05-18 |
+| ⏳ **OPS-1** | **ScraperAPI subscription** — currently on free tier. Monitor 2026-05-18 + 2026-05-19 full pipeline runs. If screener.in / Trendlyne reach directly (no 405/Errno101), proxy is background insurance only. **Buy $29/month plan if direct gets blocked again.** URL: https://www.scraperapi.com/ → Residential plan | Ops | 🔔 **REVIEW BY 2026-05-20** | — |
 | P5-A | Enhanced outcome tracker + agent attribution | Phase 5 | ⬜ TODO | — |
 | P5-B | Paper portfolio simulation mode | Phase 5 | ⬜ TODO | — |
 | P5-C | Recommendation outcome seeder — backfill open recs into recommendation_outcomes table | Phase 5 | ✅ **DONE** | 2026-05-17 |
@@ -75,7 +80,7 @@
 | P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
 | P6-D | Elite News Intelligence Engine — FinBERT semantic layer + event classification (Janus-Q) + temporal decay + entity-centric aggregation + LLM ensemble (Claude+FinBERT) + India-native sources + backtesting loop | Phase 6 | ⬜ TODO | — |
 
-**Progress: 53 / 59 items complete (90%)**
+**Progress: 57 / 63 items complete (90%) — OPS-1 review due 2026-05-20**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -950,7 +955,7 @@ After every build session, before closing:
 
 ---
 
-*Document version: 4.0 — 2026-05-17 (P5-C seeder + P6-D news intelligence plan + P6-D-7 GIFT Nifty signal layer)*  
+*Document version: 4.1 — 2026-05-18 (BF-13/14/15/15b complete + OPS-1 ScraperAPI subscription review by 2026-05-20)*  
 *Next milestone: P5-D/E outcome attribution → P6-C morning brief → P6-D-7 GIFT Nifty → P6-D elite news engine*
 
 ---
