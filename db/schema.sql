@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     upside_pct       NUMERIC(7,2),
     upside_confidence NUMERIC(5,2),          -- 0–100
     is_discovery     BOOLEAN NOT NULL DEFAULT FALSE,   -- TRUE = found by discovery_screener
+    position_label   TEXT,                  -- "Full position (5%)" | "Half position (2.5%)" | etc.
+    metadata         JSONB,                 -- discovery context bag: price, sector, name, risks, catalysts, valid_till, etc.
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

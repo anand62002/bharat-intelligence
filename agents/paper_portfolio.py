@@ -157,7 +157,7 @@ def _get_allocation_inr(position_label: Optional[str]) -> float:
 
 
 def _entry_price_from_rec(rec: dict) -> Optional[float]:
-    """Best-effort entry price: mid(entry_low, entry_high) → either → agent_signals snapshot price."""
+    """Best-effort entry price: mid(entry_low, entry_high) → either → metadata.price."""
     lo = _safe_float(rec.get("entry_low"))
     hi = _safe_float(rec.get("entry_high"))
     if lo and hi:
@@ -166,15 +166,10 @@ def _entry_price_from_rec(rec: dict) -> Optional[float]:
         return lo
     if hi:
         return hi
-    # Discovery screener stores snapshot price inside agent_signals.discovery.price
-    signals = rec.get("agent_signals") or {}
-    if isinstance(signals, dict):
-        disc = signals.get("discovery") or {}
-        if isinstance(disc, dict) and disc.get("price"):
-            try:
-                return float(disc["price"])
-            except (ValueError, TypeError):
-                pass
+    # Discovery recs store snapshot price in metadata (set by discovery_screener._save_discovery)
+    meta = rec.get("metadata") or {}
+    if isinstance(meta, dict) and meta.get("price"):
+        return _safe_float(meta["price"])
     return None
 
 
@@ -229,7 +224,7 @@ def open_new_positions(client, dry_run: bool = True) -> dict:
         recs = (
             client.table("recommendations")
             .select("id,symbol,action,entry_low,entry_high,target,stoploss,"
-                    "created_at,position_label,agent_signals")
+                    "created_at,position_label,metadata,agent_signals")
             .in_("action", ["BUY"])
             .order("created_at", desc=False)
             .execute()
