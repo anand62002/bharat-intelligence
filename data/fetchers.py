@@ -5,6 +5,7 @@ All functions return None on failure and log errors to stderr.
 
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -63,6 +64,89 @@ def _screener_headers(extra: dict | None = None) -> dict:
 # it self-heals by re-warming on the next call.
 _screener_session: requests.Session | None = None
 _screener_session_warmed: bool = False
+_screener_session_logged_in: bool = False   # True once login POST succeeded
+
+
+def _screener_login(session: "requests.Session") -> bool:
+    """
+    Attempt to log in to screener.in using SCREENER_USER / SCREENER_PASS env vars.
+
+    Login flow (standard Django CSRF POST):
+      1. GET /login/ → picks up csrftoken cookie
+      2. POST /login/ with {username, password, csrfmiddlewaretoken, next=/}
+      3. Successful login gives a sessionid cookie; session is then authenticated.
+
+    Export endpoint (/company/{slug}/export/) requires a logged-in session.
+    Without credentials the export returns 404; HTML scraping still works
+    unauthenticated.
+
+    Returns True on success, False otherwise.  Non-fatal — caller continues
+    with the unauthenticated session if login fails.
+    """
+    user = os.environ.get("SCREENER_USER", "").strip()
+    pwd  = os.environ.get("SCREENER_PASS", "").strip()
+    if not user or not pwd:
+        log.debug("_screener_login: SCREENER_USER/SCREENER_PASS not set — skipping login")
+        return False
+
+    try:
+        # Step 1: GET login page to obtain CSRF token
+        login_get = session.get(
+            "https://screener.in/login/",
+            headers=_screener_headers({
+                "User-Agent": random.choice(_SCREENER_USER_AGENTS),
+                "Referer":    "https://screener.in/",
+            }),
+            timeout=12,
+        )
+        if login_get.status_code != 200:
+            log.warning("_screener_login: GET /login/ returned HTTP %s", login_get.status_code)
+            return False
+
+        csrf = session.cookies.get("csrftoken", "")
+        if not csrf:
+            log.warning("_screener_login: no csrftoken cookie after GET /login/")
+            return False
+
+        # Step 2: POST credentials
+        login_post = session.post(
+            "https://screener.in/login/",
+            data={
+                "csrfmiddlewaretoken": csrf,
+                "username":            user,
+                "password":            pwd,
+                "next":                "/",
+            },
+            headers=_screener_headers({
+                "User-Agent":   random.choice(_SCREENER_USER_AGENTS),
+                "Referer":      "https://screener.in/login/",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin":       "https://screener.in",
+            }),
+            timeout=15,
+            allow_redirects=True,
+        )
+        # Successful login: Django redirects to / (final URL is homepage)
+        # and sets a sessionid cookie.
+        has_session = bool(session.cookies.get("sessionid"))
+        log.info(
+            "_screener_login: POST /login/ → HTTP %s, sessionid=%s",
+            login_post.status_code,
+            "yes" if has_session else "no",
+        )
+        if has_session:
+            log.info("_screener_login: authenticated as %s", user)
+            return True
+        else:
+            log.warning(
+                "_screener_login: login POST returned HTTP %s but no sessionid cookie "
+                "— check SCREENER_USER/SCREENER_PASS are correct",
+                login_post.status_code,
+            )
+            return False
+    except Exception as exc:
+        log.warning("_screener_login: exception during login: %s", exc)
+        return False
 
 
 def _get_screener_session() -> requests.Session:
@@ -71,9 +155,13 @@ def _get_screener_session() -> requests.Session:
 
     The first call does:
       GET https://screener.in/  → picks up csrftoken + sessionid cookies
+
+    If SCREENER_USER + SCREENER_PASS env vars are set, also attempts login
+    so that the export endpoint (/company/{slug}/export/) becomes accessible.
+
     Subsequent calls reuse the same session object.
     """
-    global _screener_session, _screener_session_warmed
+    global _screener_session, _screener_session_warmed, _screener_session_logged_in
 
     if _screener_session is None:
         _screener_session = requests.Session()
@@ -93,6 +181,9 @@ def _get_screener_session() -> requests.Session:
                     "_get_screener_session: warmup OK — cookies: %s",
                     list(_screener_session.cookies.keys()),
                 )
+                # Attempt login if credentials are configured (non-fatal)
+                if not _screener_session_logged_in:
+                    _screener_session_logged_in = _screener_login(_screener_session)
             else:
                 log.warning(
                     "_get_screener_session: warmup returned HTTP %s",
@@ -106,9 +197,10 @@ def _get_screener_session() -> requests.Session:
 
 def reset_screener_session() -> None:
     """Force a fresh session next time (call after 403/429 to recover)."""
-    global _screener_session, _screener_session_warmed
+    global _screener_session, _screener_session_warmed, _screener_session_logged_in
     _screener_session = None
     _screener_session_warmed = False
+    _screener_session_logged_in = False
     log.info("Screener.in session reset — will re-warm on next request")
 
 
@@ -1698,8 +1790,21 @@ def get_screener_history(symbol: str) -> dict | None:
             symbol, _last_status,
         )
         # ── Excel export fallback (DB-10) ─────────────────────────────────────
-        # screener.in /export/ endpoint uses the same session cookies but a
-        # different URL pattern — may succeed when HTML scraping is rate-limited.
+        # screener.in /export/ endpoint requires an authenticated session
+        # (SCREENER_USER + SCREENER_PASS env vars).  Skip silently when not
+        # logged in — HTML scraping may be temporarily blocked but the user
+        # hasn't configured credentials.
+        if not _screener_session_logged_in:
+            log.info(
+                "get_screener_history(%s): Excel export skipped (no login — set "
+                "SCREENER_USER + SCREENER_PASS to enable export fallback)",
+                symbol,
+            )
+            log.error(
+                "get_screener_history(%s): all variants failed — no fallback available",
+                symbol,
+            )
+            return None
         for candidate in candidates:
             for variant in ("consolidated/", ""):
                 export_url = f"https://www.screener.in/company/{candidate}/{variant}export/"
