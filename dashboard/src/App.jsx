@@ -2071,7 +2071,7 @@ function SystemHealthPanel({health}){
 
 // ─── PAPER PORTFOLIO PANEL (P5-B) ────────────────────────────────────────────
 function PaperPortfolioPanel({data, history, apiLoaded}){
-  const [expanded, setExpanded] = React.useState(false);
+  const [expanded, setExpanded] = useState(false);
   const snap   = data?.summary   || {};
   const open   = data?.open_positions || [];
   const closed = data?.trade_history   || [];

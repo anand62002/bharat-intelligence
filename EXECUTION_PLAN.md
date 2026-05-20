@@ -80,7 +80,7 @@
 | P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
 | P6-D | Elite News Intelligence Engine — FinBERT semantic layer + event classification (Janus-Q) + temporal decay + entity-centric aggregation + LLM ensemble (Claude+FinBERT) + India-native sources + backtesting loop | Phase 6 | ⬜ TODO | — |
 
-**Progress: 59 / 63 items complete (94%) — OPS-1 review due 2026-05-20**
+**Progress: 59 / 72 items complete (82%) — OPS-1 review due 2026-05-20 — Phase 7 + Phase 8 added**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -924,6 +924,15 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P6-A** | System performance dashboard tab | Code | None | M | ⬜ TODO |
 | **P6-B** | Backtest results dashboard panel | Code | None | S | ⬜ TODO |
 | **P6-C** | Market tab daily news digest (Morning Brief + Closing Digest, Claude+OpenAI) | Code | OpenAI API (existing) | L | ⬜ TODO |
+| **P7-A** | Live trading agent — signal + Telegram alert engine | Code | None (Telegram free) | L | ⬜ TODO |
+| **P7-B** | Paper-to-live promotion gate — 60d paper validation before live signals | Code | None | M | ⬜ TODO |
+| **P7-C** | T+1 India settlement awareness + order timing logic | Code | None | S | ⬜ TODO |
+| **P7-D** | Kite Connect / Zerodha demat API integration (optional, Phase 7 final step) | Code + Service | ₹0 Kite (free with demat) | XL | ⬜ TODO |
+| **P8-A** | Architecture audit — map all agents + tools to MCP servers | Design | None | M | ⬜ TODO |
+| **P8-B** | Supervisor agent (Claude Agent SDK) — replaces LangGraph orchestrator | Code | None | XL | ⬜ TODO |
+| **P8-C** | MCP server suite — Supabase, Kite, Telegram, Firecrawl, yfinance | Code | None | XL | ⬜ TODO |
+| **P8-D** | Specialist sub-agents — 10 analysis agents rewritten as Agent SDK tools | Code | None | XL | ⬜ TODO |
+| **P8-E** | Migration + parallel-run validation — v1 vs v2 signal comparison | Code | None | L | ⬜ TODO |
 | **Always** | CLAUDE.md + EXECUTION_PLAN.md update | Doc | None | XS | 🔄 Recurring |
 
 *Effort: XS=<1hr · S=1-3hr · M=3-6hr · L=6-12hr · XL=12-24hr*
