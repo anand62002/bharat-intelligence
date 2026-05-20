@@ -417,7 +417,7 @@ def _batch_current_prices(yf_symbols: list[str]) -> dict[str, float]:
         return {}
     try:
         import pandas as pd
-        df = yf.download(yf_symbols, period="5d", interval="1d", auto_adjust=True, progress=False)
+        df = yf.download(yf_symbols, period="5d", interval="1d", auto_adjust=True)  # progress=False deprecated in yfinance 1.2.x
         if df.empty:
             return {}
         close = df["Close"] if "Close" in df.columns else df.xs("Close", axis=1, level=0)
@@ -461,15 +461,26 @@ def run_forward_polling(dry_run: bool = False) -> dict:
             log.warning("Supabase not configured — forward poller skipped")
             return {"polled": 0, "live_updated": 0, "t30_resolved": 0, "errors": ["Supabase not configured"]}
 
+        # Use .or_() to correctly match both "PENDING" string AND SQL NULL.
+        # Supabase .in_() does NOT translate Python None → SQL IS NULL.
+        # Select includes outcome_t30/price_t30 which require p5d migration.
         rows = (
             fetch_client
             .table("recommendation_outcomes")
             .select("id,symbol,action,entry_price,nifty_entry,rec_date,outcome_t90,outcome_t30,price_t30")
-            .in_("outcome_t90", ["PENDING", None])
+            .or_("outcome_t90.eq.PENDING,outcome_t90.is.null")
             .execute()
             .data or []
         )
     except Exception as exc:
+        err_str = str(exc)
+        if "column" in err_str.lower() or "does not exist" in err_str.lower() or "PGRST" in err_str:
+            log.critical(
+                "Forward poller: migration p5d_live_performance_columns.sql not applied yet — "
+                "run it in Supabase SQL Editor to enable live price tracking."
+            )
+            return {"polled": 0, "live_updated": 0, "t30_resolved": 0,
+                    "errors": ["Migration p5d_live_performance_columns.sql not applied"]}
         log.error("Forward poller — failed to fetch rows: %s", exc)
         return {"polled": 0, "live_updated": 0, "t30_resolved": 0, "errors": [str(exc)]}
 
@@ -729,6 +740,11 @@ def run_live_attribution() -> list[dict]:
             .data or []
         )
     except Exception as exc:
+        err_str = str(exc)
+        if "column" in err_str.lower() or "does not exist" in err_str.lower() or "PGRST" in err_str:
+            # P5-D migration not yet applied — return empty list gracefully
+            log.warning("Live attribution: alpha_live column not found — run p5d_live_performance_columns.sql migration")
+            return []
         log.error("Live attribution fetch failed: %s", exc)
         return []
 
@@ -796,6 +812,10 @@ def get_live_performance_summary() -> dict:
     """
     P5-E: Portfolio-level live performance snapshot for all open (PENDING) recs.
     Returns aggregate stats + per-rec list for the /api/performance/live endpoint.
+
+    NOTE: Requires p5d_live_performance_columns.sql migration to be applied first.
+    Returns {"migration_needed": True} if the new columns don't exist yet — the
+    API endpoint surfaces this as has_live_data=False without a 500 error.
     """
     client = _supabase()
     if not client:
@@ -814,8 +834,25 @@ def get_live_performance_summary() -> dict:
             .data or []
         )
     except Exception as exc:
-        log.error("Live performance fetch failed: %s", exc)
-        return {}
+        err_str = str(exc)
+        if "column" in err_str.lower() or "does not exist" in err_str.lower() or "PGRST" in err_str:
+            # P5-D migration (p5d_live_performance_columns.sql) not yet applied —
+            # fall back to base columns so the dashboard shows empty rather than 500
+            log.warning("Live performance: new columns not found — migration may not be applied yet. Falling back.")
+            try:
+                rows = (
+                    client
+                    .table("recommendation_outcomes")
+                    .select("id,symbol,action,entry_price,rec_date,composite_score,outcome_t90,alpha_t90")
+                    .execute()
+                    .data or []
+                )
+            except Exception as exc2:
+                log.error("Live performance fallback fetch also failed: %s", exc2)
+                return {}
+        else:
+            log.error("Live performance fetch failed: %s", exc)
+            return {}
 
     open_rows    = [r for r in rows if r.get("outcome_t90") in ("PENDING", None)]
     resolved_90d = [r for r in rows if r.get("outcome_t90") not in ("PENDING", None, "")]
