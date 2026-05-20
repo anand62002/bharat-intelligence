@@ -80,7 +80,7 @@
 | P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
 | P6-D | Elite News Intelligence Engine — FinBERT semantic layer + event classification (Janus-Q) + temporal decay + entity-centric aggregation + LLM ensemble (Claude+FinBERT) + India-native sources + backtesting loop | Phase 6 | ⬜ TODO | — |
 
-**Progress: 59 / 72 items complete (82%) — OPS-1 review due 2026-05-20 — Phase 7 + Phase 8 added**
+**Progress: 64 / 73 items complete (88%) — OPS-1 review due 2026-05-20 — Phase 7 + Phase 8 added — OPS-2 weekly audit recurring**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -916,11 +916,11 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P4-B** | Symbol resolution cache persistence | Code | None | S | ✅ Done (already built) |
 | **P4-C** | Governance numerical grounding check | Code | None | M | ✅ Done |
 | **P4-D** | Replace Breeze with Angel One SmartAPI (live options) | Code | ₹0 (free with demat) | M | ⬜ TODO (lowest priority) |
-| **P5-A** | Enhanced outcome tracker + attribution | Code | None | L | ⬜ TODO |
-| **P5-B** | Paper portfolio simulation mode | Code | None | L | ⬜ TODO |
-| **P5-C** | Rec outcome seeder (backfill open recs into recommendation_outcomes) | Code | None | S | ⬜ TODO |
-| **P5-D** | Forward outcome poller — daily t+30/60/90 alpha vs NIFTY | Code | None | M | ⬜ TODO |
-| **P5-E** | Attribution dashboard — per-agent hit rate + alpha over rolling 90d | Code | None | M | ⬜ TODO |
+| **P5-A** | Enhanced outcome tracker + attribution | Code | None | L | ✅ Done |
+| **P5-B** | Paper portfolio simulation mode | Code | None | L | ✅ Done |
+| **P5-C** | Rec outcome seeder (backfill open recs into recommendation_outcomes) | Code | None | S | ✅ Done |
+| **P5-D** | Forward outcome poller — daily t+30/60/90 alpha vs NIFTY | Code | None | M | ✅ Done |
+| **P5-E** | Attribution dashboard — per-agent hit rate + alpha over rolling 90d | Code | None | M | ✅ Done |
 | **P6-A** | System performance dashboard tab | Code | None | M | ⬜ TODO |
 | **P6-B** | Backtest results dashboard panel | Code | None | S | ⬜ TODO |
 | **P6-C** | Market tab daily news digest (Morning Brief + Closing Digest, Claude+OpenAI) | Code | OpenAI API (existing) | L | ⬜ TODO |
@@ -933,6 +933,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P8-C** | MCP server suite — Supabase, Kite, Telegram, Firecrawl, yfinance | Code | None | XL | ⬜ TODO |
 | **P8-D** | Specialist sub-agents — 10 analysis agents rewritten as Agent SDK tools | Code | None | XL | ⬜ TODO |
 | **P8-E** | Migration + parallel-run validation — v1 vs v2 signal comparison | Code | None | L | ⬜ TODO |
+| **OPS-2** | Weekly interface + DB audit — run checklist every Sunday 09:00 IST (routes vs dashboard, column names vs code writes, worker imports vs exports, yfinance/Supabase API patterns) | Ops | None | XS | 🔄 Recurring |
 | **Always** | CLAUDE.md + EXECUTION_PLAN.md update | Doc | None | XS | 🔄 Recurring |
 
 *Effort: XS=<1hr · S=1-3hr · M=3-6hr · L=6-12hr · XL=12-24hr*
@@ -964,8 +965,8 @@ After every build session, before closing:
 
 ---
 
-*Document version: 4.2 — 2026-05-20 (P5-D forward outcome poller + P5-E live attribution dashboard complete)*  
-*Next milestone: P5-D/E outcome attribution → P6-C morning brief → P6-D-7 GIFT Nifty → P6-D elite news engine*
+*Document version: 4.4 — 2026-05-20 (P5-A/B/C/D/E all ✅ Done; OPS-2 weekly interface audit added as recurring maintenance)*  
+*Next milestone: P6-A system perf tab → P6-B backtest panel → P6-C morning brief → P6-D elite news engine*
 
 ---
 

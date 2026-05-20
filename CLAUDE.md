@@ -517,6 +517,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (P5-D/E audit fix) | Interface & DB audit — 3 bugs fixed in `outcome_tracker.py`: (1) removed `progress=False` from `yf.download()` (deprecated yfinance 1.2.x); (2) changed `.in_("outcome_t90", ["PENDING", None])` → `.or_("outcome_t90.eq.PENDING,outcome_t90.is.null")` (Python `None` in `.in_()` generates literal `'None'` string, never matches SQL NULL); (3) all 3 P5-D/E functions now catch PGRST column-not-found errors and fall back gracefully (empty data) instead of HTTP 500 when migration not yet applied. Full audit: 21 dashboard apiFetch() calls verified vs defined routes; all DB column names verified vs code writes; worker imports verified vs exported functions. |
 | (P5-D/E) | P5-D: `run_forward_polling()` in outcome_tracker.py — daily 16:30 IST batch live price snapshot (alpha_live/return_live/days_live) + t+30 milestone; `db/migrations/p5d_live_performance_columns.sql`; `job_forward_poller()` in worker.py. P5-E: `/api/performance/live` + `/api/attribution/live` endpoints; `LivePerformancePanel` component in dashboard (open positions table, by-action alpha tiles, avg return/alpha header); `AgentAttributionPanel` upgraded to show live attribution mode before 90d data exists |
 | (P5-A/B) | P5-A: `compute_agent_attribution()` + `run_attribution_analysis()` added to `agents/outcome_tracker.py`; `GET /api/attribution/agents` endpoint — per-agent hit rate + avg alpha from resolved recommendation_outcomes. P5-B: `agents/paper_portfolio.py` — auto-follows BUY recs (FULL=₹10k/HALF=₹5k/QUARTER=₹2.5k), SL/target/horizon exits, daily snapshot; `db/migrations/create_paper_portfolio.sql`; worker jobs 07:05/16:15 IST; `GET /api/paper/portfolio` + `GET /api/paper/history` endpoints; PaperPortfolioPanel + AgentAttributionPanel in dashboard; 49 tests |
 | (BF-15b) | BF-15b: ScraperAPI SSL cert fix — `session.verify=False` for CONNECT tunnel in Railway container; urllib3 warning suppressed; `test_scraper_connectivity.py` summary fixed (now correctly shows direct✅/proxy✅ separately); OPS-1 reminder added to EXECUTION_PLAN.md |
@@ -586,6 +587,52 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 ---
 
+## Interface & DB Audit Checklist (OPS-2 — run weekly)
+
+> **Recurring maintenance task.** Run every Sunday before market open (or after any major build session). Catches mismatches before they cause silent failures in production. Last full audit: 2026-05-20 (found 3 bugs — see P5-D/E audit fix in git history).
+
+### What to check
+
+| Area | Check | Common failure patterns |
+|---|---|---|
+| **API routes vs dashboard** | Every `apiFetch("/api/...")` in `App.jsx` must match a `@app.get/post(...)` in `api/main.py` | Route renamed in backend but not frontend (silent 404) |
+| **DB column names** | Every `.update({...})` / `.insert({...})` key in Python code must match actual Supabase column | Migration added column but code still writes old name; or vice versa |
+| **Worker imports** | Every `from agents.X import Y` in `worker.py` must be a real exported function | Function renamed/moved; worker silently skips job |
+| **yfinance API** | No `progress=False` in `yf.download()` calls (deprecated yfinance 1.2.x → TypeError) | Added in new code without checking yfinance version compatibility |
+| **Supabase NULL in `.in_()`** | Never pass Python `None` inside `.in_()` list → generates `'None'` string, never matches SQL NULL | Use `.or_("col.eq.VALUE,col.is.null")` pattern instead |
+| **Migration-gated columns** | Any SELECT/UPDATE referencing a column from a new migration must catch `PGRST` errors and fall back gracefully | New migration not yet applied on prod → HTTP 500 instead of empty data |
+| **Field name casing** | Backend DB fields are `snake_case`; React dashboard expects `camelCase`. Verify `_transform_*()` functions in `api/main.py` cover all new fields | New DB column added but not included in transformer → `undefined` in dashboard |
+
+### How to run
+
+```powershell
+# 1. Grep all apiFetch calls in dashboard vs all route definitions in API
+grep -n "apiFetch(" dashboard/src/App.jsx | grep -oP '"/api/[^"]+' | sort > /tmp/dashboard_routes.txt
+grep -n "@app\.(get|post|put|delete)" api/main.py | grep -oP '"/api/[^"]+' | sort > /tmp/api_routes.txt
+diff /tmp/dashboard_routes.txt /tmp/api_routes.txt
+
+# 2. Check for progress=False in yf.download calls
+grep -rn "progress=False" agents/ data/ api/ scheduler/
+
+# 3. Check for Python None in .in_() Supabase calls
+grep -rn "\.in_(" agents/ scheduler/ api/ | grep "None"
+
+# 4. Check worker imports compile cleanly (catches missing/renamed functions)
+python -c "import worker; print('worker.py imports OK')"
+
+# 5. Check outcome_tracker migration status
+python -c "from agents.outcome_tracker import get_live_performance_summary; r=get_live_performance_summary(); print('has_live_data:', r.get('has_live_data')); print('migration needed:', not r.get('has_live_data') and r.get('total_open',0)==0)"
+```
+
+### Known gotchas (recorded from past bugs)
+
+- **yfinance MultiIndex** (1.2.x): use `df.xs("Close", axis=1, level=0)` or `df["Close"][sym]` — NOT `df[sym]["Close"]`
+- **Supabase `.in_()` with None**: generates `IN ('PENDING', 'None')` — SQL NULL rows never matched. Always use `.or_()` filter string
+- **`_transform_*()`** in `api/main.py`: adding a new DB column without adding it to the transformer means React gets `undefined` silently
+- **P5-D live columns**: require `db/migrations/p5d_live_performance_columns.sql` to be run in Supabase SQL Editor first. Until then, `get_live_performance_summary()` returns `{has_live_data: false}` (graceful fallback).
+
+---
+
 ## Phase 0 — What changed (affects every production run from here)
 
 ### `agents/valuation_scenarios.py`
@@ -627,7 +674,8 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 3 (P3)** ✅: P3-A ✅ (position sizing), P3-B ✅ (correlation alerts), P3-C ✅ (Trendlyne — all pillars: P1 fundamentals fallback, P2 earnings calendar, P3 DVM filter, P5 insider sentiment, P6 insider institutional)
 - **Phase 4 (P4)** ✅ COMPLETE (except P4-D): P4-A commentary grounding ✅; P4-B symbol cache persistence ✅ (was already built); P4-C governance numerical grounding ✅; P4-D Angel One options ⬜ (lowest priority, needs TOTP secret)
 - **Dashboard items (DB-6→DB-10)** ✅ ALL DONE: DB-6 PerformanceTab (was already built); DB-7 live news panel; DB-8 holdings filter; DB-9 "What ran today?" ARIA button; DB-10 Excel export fallback
-- **Phase 5 (P5)**: Robust forward paper portfolio tracker + attribution analysis
-- **Phase 6 (P6)**: Dashboard performance tab (hit rate, alpha, backtest results)
+- **Phase 5 (P5)** ✅ ALL DONE: P5-A (outcome tracker + attribution) ✅; P5-B (paper portfolio) ✅; P5-C (outcome seeder) ✅; P5-D (forward poller — batch live prices 16:30 IST, alpha_live/return_live/days_live, t+30 milestone) ✅; P5-E (live attribution dashboard — LivePerformancePanel + upgraded AgentAttributionPanel) ✅. **Pending: run `db/migrations/p5d_live_performance_columns.sql` in Supabase to activate live columns.**
+- **Phase 6 (P6)**: System perf tab (P6-A), backtest panel (P6-B), morning brief (P6-C), elite news engine (P6-D)
+- **OPS-2** 🔄 Recurring: Weekly interface + DB audit every Sunday — routes vs dashboard, column names vs code, worker imports, yfinance/Supabase API patterns
 
 **Estimated additional monthly cost at full build:** ₹1,039–3,498/month (Quantsapp options feed + Trendlyne fundamentals backup + OpenAI GPT-4o-mini judges)
