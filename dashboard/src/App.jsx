@@ -2247,29 +2247,67 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
 
 
 // ─── AGENT ATTRIBUTION PANEL (P5-A) ──────────────────────────────────────────
-function AgentAttributionPanel({attribution}){
-  const agents = attribution?.agents || [];
+function AgentAttributionPanel({attribution, liveAttribution}){
+  // Prefer resolved 90d data; fall back to live attribution if not yet available
+  const resolved = attribution?.agents || [];
+  const live     = liveAttribution?.agents || [];
+  const useLive  = resolved.length === 0 && live.length > 0;
+  const agents   = useLive ? live : resolved;
+
   if(!agents.length) return(
     <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:12}}>
       <div style={{fontSize:10,fontWeight:700,color:C.muted,marginBottom:4}}>Agent Attribution</div>
-      <div style={{fontSize:9,color:C.textDim}}>Attribution data will populate after recommendations are 90+ days old. Each agent's hit rate and average alpha will be shown here.</div>
+      <div style={{fontSize:9,color:C.textDim}}>
+        Attribution data will populate after 16:30 IST today (when the Forward Poller first runs).
+        Each agent's current alpha vs NIFTY 50 will appear here daily.
+      </div>
     </div>
   );
+
+  const isLiveMode = useLive;
   return(
     <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:12}}>
-      <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:2}}>Agent Attribution</div>
-      <div style={{fontSize:8,color:C.muted,marginBottom:8}}>{attribution?.note}</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
+        <div style={{fontSize:10,fontWeight:700,color:C.accent}}>Agent Attribution</div>
+        {isLiveMode && (
+          <span style={{fontSize:7,background:C.teal+"22",color:C.teal,borderRadius:4,padding:"2px 7px",fontWeight:700}}>
+            LIVE · updates 16:30 IST daily
+          </span>
+        )}
+        {!isLiveMode && (
+          <span style={{fontSize:7,background:C.green+"22",color:C.green,borderRadius:4,padding:"2px 7px",fontWeight:700}}>
+            RESOLVED · 90-day outcomes
+          </span>
+        )}
+      </div>
+      <div style={{fontSize:8,color:C.muted,marginBottom:8}}>
+        {isLiveMode ? liveAttribution?.note : attribution?.note}
+      </div>
       <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
         <div style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 70px 80px",background:C.panel,padding:"5px 9px",gap:4}}>
-          {["Agent","Signals","Bullish","Hit Rate","Avg Alpha"].map(h=>(
+          {["Agent","Signals","Bullish",
+            isLiveMode?"Live Alpha":"Hit Rate",
+            isLiveMode?"Beat NIFTY%":"Avg Alpha"
+          ].map(h=>(
             <div key={h} style={{fontSize:7,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</div>
           ))}
         </div>
         {agents.map((a,i)=>{
-          const hr  = a.hit_rate_90d;
-          const alp = a.avg_alpha_90d;
-          const hrCol = hr==null?C.muted:hr>=55?C.green:hr>=45?C.orange:C.red;
+          const hr  = isLiveMode ? null : a.hit_rate_90d;
+          const alp = isLiveMode ? (a.avg_bull_alpha_live != null ? a.avg_bull_alpha_live * 100 : null)
+                                 : a.avg_alpha_90d;
+          const beat = isLiveMode ? a.positive_rate_live : null;
+          const hrCol = hr==null?(beat!=null?(beat>=55?C.green:beat>=45?C.orange:C.red):C.muted)
+                                :(hr>=55?C.green:hr>=45?C.orange:C.red);
           const alpCol= alp==null?C.muted:alp>=0?C.green:C.red;
+          const col1  = isLiveMode ? alpCol : hrCol;
+          const col2  = alpCol;
+          const val1  = isLiveMode
+            ? (alp!=null?`${alp>=0?"+":""}${alp.toFixed(1)}%`:"—")
+            : (hr!=null?`${hr.toFixed(0)}%`:"—");
+          const val2  = isLiveMode
+            ? (beat!=null?`${beat.toFixed(0)}%`:"—")
+            : (alp!=null?`${alp>=0?"+":""}${alp.toFixed(1)}%`:"—");
           return(
             <div key={a.agent_name} style={{
               display:"grid",gridTemplateColumns:"1fr 60px 60px 70px 80px",
@@ -2283,20 +2321,139 @@ function AgentAttributionPanel({attribution}){
               </div>
               <div style={{fontSize:9,color:C.muted,fontFamily:"JetBrains Mono"}}>{a.signal_count}</div>
               <div style={{fontSize:9,color:C.muted,fontFamily:"JetBrains Mono"}}>{a.bullish_count}</div>
-              <div style={{fontSize:9,fontWeight:700,color:hrCol,fontFamily:"JetBrains Mono"}}>{hr!=null?`${hr.toFixed(0)}%`:"—"}</div>
-              <div style={{fontSize:9,fontWeight:700,color:alpCol,fontFamily:"JetBrains Mono"}}>{alp!=null?`${alp>=0?"+":""}${alp.toFixed(1)}%`:"—"}</div>
+              <div style={{fontSize:9,fontWeight:700,color:col1,fontFamily:"JetBrains Mono"}}>{val1}</div>
+              <div style={{fontSize:9,fontWeight:700,color:col2,fontFamily:"JetBrains Mono"}}>{val2}</div>
             </div>
           );
         })}
       </div>
-      <div style={{fontSize:7,color:C.textDim,marginTop:5}}>Hit rate = % of BULLISH votes where stock beat Nifty 50 at 90 days. Target: ≥55%.</div>
+      {isLiveMode
+        ? <div style={{fontSize:7,color:C.textDim,marginTop:5}}>Live Alpha = avg alpha vs NIFTY 50 since rec date for BULLISH votes. Beat NIFTY% = % of bullish votes currently outperforming.</div>
+        : <div style={{fontSize:7,color:C.textDim,marginTop:5}}>Hit rate = % of BULLISH votes where stock beat Nifty 50 at 90 days. Target: ≥55%.</div>
+      }
+    </div>
+  );
+}
+
+
+// ─── LIVE PERFORMANCE PANEL (P5-D) ───────────────────────────────────────────
+function LivePerformancePanel({livePerf}){
+  if(!livePerf || !livePerf.has_live_data) return(
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+        <div style={{fontSize:10,fontWeight:700,color:C.accent}}>📈 Live Open Positions</div>
+        <span style={{fontSize:7,background:C.orange+"22",color:C.orange,borderRadius:4,padding:"2px 7px"}}>awaiting 16:30 IST poller</span>
+      </div>
+      <div style={{fontSize:9,color:C.textDim}}>
+        {(livePerf?.total_open||0) > 0
+          ? `${livePerf.total_open} open recommendations tracked — live prices load at 16:30 IST daily.`
+          : "No open recommendations being tracked yet. New recommendations are seeded automatically at 06:55 IST."}
+      </div>
+    </div>
+  );
+
+  const open   = livePerf.total_open || 0;
+  const avgRet = livePerf.avg_live_return_pct;
+  const avgAlp = livePerf.avg_live_alpha_pct;
+  const posC   = livePerf.positive_count || 0;
+  const byAct  = livePerf.by_action || {};
+  const recs   = (livePerf.recs || []).slice(0, 20);
+
+  const retCol  = avgRet == null ? C.muted : avgRet >= 0 ? C.green : C.red;
+  const alpCol  = avgAlp == null ? C.muted : avgAlp >= 0 ? C.green : C.red;
+
+  return(
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div>
+          <div style={{fontSize:10,fontWeight:700,color:C.accent}}>📈 Live Open Positions</div>
+          <div style={{fontSize:8,color:C.muted,marginTop:1}}>{open} recs tracked · {posC} beating NIFTY · updates 16:30 IST</div>
+        </div>
+        <div style={{display:"flex",gap:12}}>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:7,color:C.muted}}>Avg Return</div>
+            <div style={{fontSize:13,fontWeight:700,color:retCol}}>{avgRet!=null?`${avgRet>=0?"+":""}${avgRet.toFixed(1)}%`:"—"}</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:7,color:C.muted}}>Avg Alpha vs NIFTY</div>
+            <div style={{fontSize:13,fontWeight:700,color:alpCol}}>{avgAlp!=null?`${avgAlp>=0?"+":""}${avgAlp.toFixed(1)}%`:"—"}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* By-action summary tiles */}
+      {Object.keys(byAct).length > 0 && (
+        <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+          {["BUY","HOLD","SELL","AVOID"].filter(a=>byAct[a]).map(action=>{
+            const d    = byAct[action];
+            const aCol = action==="BUY"?C.green:action==="SELL"?C.red:action==="HOLD"?C.teal:C.orange;
+            const alpC = d.avg_alpha_pct==null?C.muted:d.avg_alpha_pct>=0?C.green:C.red;
+            return(
+              <div key={action} style={{flex:"1 1 120px",background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"8px 10px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                  <Tag color={aCol}>{action}</Tag>
+                  <span style={{fontSize:8,color:C.muted}}>{d.count}</span>
+                </div>
+                <div style={{fontSize:11,fontWeight:700,color:alpC}}>
+                  {d.avg_alpha_pct!=null?`${d.avg_alpha_pct>=0?"+":""}${d.avg_alpha_pct.toFixed(1)}%`:"—"}
+                </div>
+                <div style={{fontSize:7,color:C.muted}}>alpha vs NIFTY</div>
+                {d.has_live_data&&<div style={{fontSize:7,color:C.textDim,marginTop:2}}>{d.positive_count}/{d.count} beating</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Per-rec table (top 20 by alpha) */}
+      {recs.length > 0 && (
+        <div>
+          <div style={{fontSize:8,fontWeight:700,color:C.muted,marginBottom:5,textTransform:"uppercase"}}>Top Open Recs by Live Alpha</div>
+          <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
+            <div style={{display:"grid",gridTemplateColumns:"80px 50px 55px 55px 60px 50px",gap:0,padding:"5px 10px",borderBottom:`1px solid ${C.border}`,background:C.bg}}>
+              {["Symbol","Action","Return","Alpha","Entry","Days"].map(h=>(
+                <span key={h} style={{fontSize:7,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</span>
+              ))}
+            </div>
+            {recs.map((r,i)=>{
+              const ret  = r.return_live != null ? r.return_live * 100 : null;
+              const alp  = r.alpha_live  != null ? r.alpha_live  * 100 : null;
+              const retC = ret==null?C.muted:ret>=0?C.green:C.red;
+              const alpC = alp==null?C.muted:alp>=0?C.green:C.red;
+              const aCol = r.action==="BUY"?C.green:r.action==="SELL"?C.red:r.action==="HOLD"?C.teal:C.orange;
+              return(
+                <div key={r.id||i} style={{
+                  display:"grid",gridTemplateColumns:"80px 50px 55px 55px 60px 50px",
+                  gap:0,padding:"5px 10px",
+                  borderBottom:i<recs.length-1?`1px solid ${C.border}33`:"none",
+                  background:i%2===0?"transparent":C.bg+"44",
+                }}>
+                  <span style={{fontSize:9,fontWeight:700,color:"white",fontFamily:"JetBrains Mono"}}>{r.symbol}</span>
+                  <Tag color={aCol}>{r.action}</Tag>
+                  <span style={{fontSize:9,fontWeight:600,color:retC,fontFamily:"JetBrains Mono"}}>{ret!=null?`${ret>=0?"+":""}${ret.toFixed(1)}%`:"—"}</span>
+                  <span style={{fontSize:9,fontWeight:700,color:alpC,fontFamily:"JetBrains Mono"}}>{alp!=null?`${alp>=0?"+":""}${alp.toFixed(1)}%`:"—"}</span>
+                  <span style={{fontSize:8,color:C.muted,fontFamily:"JetBrains Mono"}}>{r.entry_price!=null?`₹${Number(r.entry_price).toLocaleString("en-IN")}`:"—"}</span>
+                  <span style={{fontSize:8,color:C.muted,fontFamily:"JetBrains Mono"}}>{r.days_live!=null?`${r.days_live}d`:"—"}</span>
+                </div>
+              );
+            })}
+          </div>
+          {livePerf.total_open > 20 && (
+            <div style={{fontSize:7,color:C.textDim,marginTop:4}}>Showing top 20 of {livePerf.total_open} open positions.</div>
+          )}
+        </div>
+      )}
+      <div style={{fontSize:7,color:C.textDim,marginTop:6}}>
+        Alpha = stock return − NIFTY 50 return since recommendation date. Refreshed daily at 16:30 IST.
+      </div>
     </div>
   );
 }
 
 
 // ─── PERFORMANCE TAB ─────────────────────────────────────────────────────────
-function PerformanceTab({accuracy, outcomes, alphaChart, attribution, apiLoaded}){
+function PerformanceTab({accuracy, outcomes, alphaChart, attribution, livePerf, liveAttribution, apiLoaded}){
   const byAction = accuracy?.by_action || {};
   const total    = accuracy?.total_tracked || 0;
   const ACTIONS  = ["BUY","HOLD","SELL","AVOID"];
@@ -2316,9 +2473,16 @@ function PerformanceTab({accuracy, outcomes, alphaChart, attribution, apiLoaded}
         </div>
       </div>
 
-      {IS_LIVE && apiLoaded && !accuracy && (
-        <EmptyState icon="📊" title="No performance data yet"
-          sub="Outcomes are tracked at 90, 180, and 365 day horizons. Come back after the first recommendations are 90+ days old. The tracker runs daily at 18:30 IST." />
+      {/* Live Performance Panel — always shown, shows "awaiting poller" until 16:30 IST */}
+      <LivePerformancePanel livePerf={livePerf} />
+
+      {IS_LIVE && apiLoaded && !accuracy && !livePerf?.has_live_data && (
+        <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
+          <div style={{fontSize:9,color:C.muted}}>
+            📊 <strong style={{color:"white"}}>90-day outcomes</strong> will appear here once the first recommendations are 90+ days old.
+            Live alpha data above updates daily at 16:30 IST.
+          </div>
+        </div>
       )}
 
       {/* Accuracy Scorecard */}
@@ -2407,7 +2571,7 @@ function PerformanceTab({accuracy, outcomes, alphaChart, attribution, apiLoaded}
       )}
 
       {/* Agent Attribution (P5-A) */}
-      <AgentAttributionPanel attribution={attribution} />
+      <AgentAttributionPanel attribution={attribution} liveAttribution={liveAttribution} />
 
       {/* Recent outcomes table */}
       {recent.length > 0 && (
@@ -2488,8 +2652,11 @@ export default function App(){
   // P5-B: Paper portfolio simulation
   const [paperPortfolio,    setPaperPortfolio]    = useState(null);
   const [paperHistory,      setPaperHistory]      = useState(null);
-  // P5-A: Agent attribution
+  // P5-A: Agent attribution (resolved 90d)
   const [agentAttribution,  setAgentAttribution]  = useState(null);
+  // P5-D/E: Live performance + live attribution
+  const [livePerf,          setLivePerf]          = useState(null);
+  const [liveAttribution,   setLiveAttribution]   = useState(null);
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -2560,8 +2727,14 @@ export default function App(){
       apiFetch("/api/paper/history?days=180")  // P5-B: paper P&L history
         .then(d=>{ if(d) setPaperHistory(d); })
         .catch(()=>{}),
-      apiFetch("/api/attribution/agents")  // P5-A: agent attribution
+      apiFetch("/api/attribution/agents")  // P5-A: agent attribution (resolved 90d)
         .then(d=>{ if(d) setAgentAttribution(d); })
+        .catch(()=>{}),
+      apiFetch("/api/performance/live")    // P5-D/E: live snapshot
+        .then(d=>{ if(d) setLivePerf(d); })
+        .catch(()=>{}),
+      apiFetch("/api/attribution/live")    // P5-E: live agent attribution
+        .then(d=>{ if(d) setLiveAttribution(d); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -2976,6 +3149,8 @@ export default function App(){
                 outcomes={perfOutcomes}
                 alphaChart={perfAlphaChart}
                 attribution={agentAttribution}
+                livePerf={livePerf}
+                liveAttribution={liveAttribution}
                 apiLoaded={apiLoaded}
               />
             )}

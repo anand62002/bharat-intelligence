@@ -2783,7 +2783,81 @@ async def get_agent_attribution(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-# ── 14. WebSocket — real-time critical alerts ──────────────────────────────────
+# ── 14. P5-E: Live performance snapshot ────────────────────────────────────────
+
+@app.get("/api/performance/live", tags=["performance"])
+async def get_live_performance(
+    _: None = Depends(require_api_key),
+):
+    """
+    P5-D/E: Current live performance of all open (PENDING) recommendations.
+
+    Returns portfolio-level aggregate stats plus per-rec detail, sorted by
+    alpha_live descending. Data is populated daily at 16:30 IST by the
+    Forward Outcome Poller (run_forward_polling). Before the first poller run
+    on a fresh deploy, returns empty stats.
+
+    Response:
+      { total_open, total_resolved, avg_live_return_pct, avg_live_alpha_pct,
+        positive_count, has_live_data, by_action: {...}, recs: [...] }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        loop = asyncio.get_event_loop()
+        def _run():
+            from agents.outcome_tracker import get_live_performance_summary
+            return get_live_performance_summary()
+        summary = await loop.run_in_executor(None, _run)
+        return _sanitise_floats(summary or {})
+    except Exception as exc:
+        log.error("performance/live error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/attribution/live", tags=["performance"])
+async def get_live_attribution(
+    _: None = Depends(require_api_key),
+):
+    """
+    P5-E: Per-agent attribution using LIVE alpha (alpha_live) instead of waiting
+    for 90-day resolution.
+
+    For each agent that voted BULLISH on any open recommendation, computes:
+      - avg_bull_alpha_live: average alpha vs NIFTY 50 since recommendation date
+      - positive_rate_live: % of bullish votes currently outperforming NIFTY
+      - signal_count, bullish_count, avg_days_held
+
+    Useful immediately — updates daily as soon as run_forward_polling fires.
+
+    Response:
+      { agents: [...], total_open: int, note: str }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    try:
+        loop = asyncio.get_event_loop()
+        def _run():
+            from agents.outcome_tracker import run_live_attribution
+            return run_live_attribution()
+        agents = await loop.run_in_executor(None, _run)
+        note = (
+            "Live attribution based on current prices vs NIFTY 50. "
+            "Updates daily at 16:30 IST. 90-day resolved data will replace this once available."
+            if agents else
+            "No live data yet — the Forward Poller runs at 16:30 IST and will populate this."
+        )
+        return _sanitise_floats({
+            "agents":     agents,
+            "total_open": len(agents),
+            "note":       note,
+        })
+    except Exception as exc:
+        log.error("attribution/live error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── 15. WebSocket — real-time critical alerts ──────────────────────────────────
 
 @app.websocket("/ws/alerts")
 async def websocket_alerts(

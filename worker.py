@@ -10,6 +10,10 @@ Schedule (all times IST / Asia/Kolkata)
   07:00  Performance tracker  — audits agent accuracy, writes agent_performance
   07:30  Research agent       — scans arXiv / Semantic Scholar, saves proposals
   09:15, 11:30, 13:30, 15:15  Portfolio monitor — danger/alert checks (market hours)
+  16:00  Portfolio risk      — concentration + correlation metrics after close
+  16:15  Paper portfolio     — refresh prices, check exits, save daily snapshot (P5-B)
+  16:30  Forward poller      — live price snapshot for all open recs + t+30 resolve (P5-D)
+  18:30  Outcome tracker     — resolve t+90/180/365 milestones (fires once horizons pass)
 
 Usage
 -----
@@ -227,6 +231,25 @@ def job_outcome_tracker() -> None:
                 log.warning("  outcome tracker error: %s", e)
     except Exception as exc:
         log.error("Outcome tracker job failed: %s", exc, exc_info=True)
+
+
+def job_forward_poller() -> None:
+    """16:30 IST — P5-D: update live price snapshot for all pending recs + resolve t+30 milestone."""
+    log.info("-" * 50)
+    log.info("  JOB START: Forward Outcome Poller (16:30 IST)")
+    try:
+        from agents.outcome_tracker import run_forward_polling
+        result = run_forward_polling(dry_run=False)
+        log.info(
+            "Forward poller done — polled=%d live_updated=%d t30_resolved=%d errors=%d",
+            result.get("polled", 0), result.get("live_updated", 0),
+            result.get("t30_resolved", 0), len(result.get("errors", [])),
+        )
+        if result.get("errors"):
+            for e in result["errors"]:
+                log.warning("  forward poller error: %s", e)
+    except Exception as exc:
+        log.error("Forward poller job failed: %s", exc, exc_info=True)
 
 
 def job_paper_portfolio_open() -> None:
@@ -510,6 +533,21 @@ def build_scheduler():
         misfire_grace_time=1800,
     )
 
+    # ── Forward outcome poller — live snapshot + t+30 milestone (P5-D) ─────────
+    # Runs at 16:30 — after paper portfolio update (16:15).
+    # Batch-fetches current prices for all PENDING recs, writes alpha_live /
+    # return_live / days_live to recommendation_outcomes. Also resolves t+30
+    # milestone once 30 days have elapsed. Gives Performance tab live data.
+    scheduler.add_job(
+        job_forward_poller,
+        CronTrigger(hour=16, minute=30, timezone=IST),
+        id="forward_poller",
+        name="Forward Outcome Poller (16:30 IST)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+
     # ── Rec outcome seeder — after orchestrator (P5-C) ───────────────────────
     # Seeds PENDING rows for any new recs saved by the orchestrator (06:00).
     # Runs at 06:55 so orchestrator + discovery (06:00) have time to finish.
@@ -620,6 +658,7 @@ def main() -> None:
         job_portfolio_monitor()
         job_rec_outcome_seeder()
         job_paper_portfolio_open()
+        job_forward_poller()
         job_outcome_tracker()
         job_paper_portfolio_update()
         job_options_snapshot()

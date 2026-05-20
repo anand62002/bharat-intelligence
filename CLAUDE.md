@@ -40,8 +40,13 @@ Stock analysis/
 │   │                           # save_daily_snapshot() persists portfolio-level P&L metrics for charting
 │   │                           # Allocation: FULL=₹10k, HALF=₹5k, QUARTER=₹2.5k; exit: SL 15%, target 40%, horizon 90d
 │   │                           # CLI: python -m agents.paper_portfolio [--run] [--backfill] [--report]
-│   └── outcome_tracker.py      # P5-A enhancement: compute_agent_attribution() + run_attribution_analysis()
-│   #   (original) daily 90/180/365d outcome resolver + (P5-A new) per-agent hit rate / avg alpha attribution
+│   └── outcome_tracker.py      # P5-A/D/E: outcome resolution + live poller + attribution
+│   #   run_outcome_tracking()  — daily 18:30 IST, resolves t+90/180/365 horizons (HIT/MISS/PARTIAL)
+│   #   run_forward_polling()   — P5-D: daily 16:30 IST, batch live prices → alpha_live/return_live/days_live
+│   #                             + resolves t+30 milestone (price_t30/outcome_t30)
+│   #   get_live_performance_summary() — P5-E: portfolio-level live stats for /api/performance/live
+│   #   run_live_attribution()  — P5-E: per-agent live alpha before 90d data exists
+│   #   compute_agent_attribution() + run_attribution_analysis() — P5-A resolved 90d attribution
 │   #                             calc_position_size(upside_pct, confidence, action, mos_pct, warren_score)
 │   #                             MOS source: warren_bot DCF (primary) → upside_pct proxy (fallback)
 │   #                             FULL tier requires DCF MOS — proxy cannot qualify (quality gate)
@@ -217,6 +222,8 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/api/paper/portfolio` | P5-B: paper portfolio — open positions, recent closed, summary stats, win rate, avg alpha |
 | GET | `/api/paper/history` | P5-B: daily `paper_portfolio_snapshots` for P&L vs Nifty chart — `?days=180` |
 | GET | `/api/attribution/agents` | P5-A: per-agent hit rate + avg alpha derived from resolved recommendation_outcomes |
+| GET | `/api/performance/live` | P5-D/E: live snapshot of all open (PENDING) recs — avg return/alpha, by-action tiles, per-rec table sorted by alpha_live |
+| GET | `/api/attribution/live` | P5-E: per-agent live alpha attribution (before 90d data exists) — avg_bull_alpha_live, positive_rate_live |
 | WS | `/ws/alerts` | WebSocket — broadcasts DANGER/CRITICAL alerts every 30s |
 
 **Auth:** `x-api-key: <DASHBOARD_API_KEY>` header on all HTTP. `?api_key=<key>` on WebSocket.
@@ -510,6 +517,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (P5-D/E) | P5-D: `run_forward_polling()` in outcome_tracker.py — daily 16:30 IST batch live price snapshot (alpha_live/return_live/days_live) + t+30 milestone; `db/migrations/p5d_live_performance_columns.sql`; `job_forward_poller()` in worker.py. P5-E: `/api/performance/live` + `/api/attribution/live` endpoints; `LivePerformancePanel` component in dashboard (open positions table, by-action alpha tiles, avg return/alpha header); `AgentAttributionPanel` upgraded to show live attribution mode before 90d data exists |
 | (P5-A/B) | P5-A: `compute_agent_attribution()` + `run_attribution_analysis()` added to `agents/outcome_tracker.py`; `GET /api/attribution/agents` endpoint — per-agent hit rate + avg alpha from resolved recommendation_outcomes. P5-B: `agents/paper_portfolio.py` — auto-follows BUY recs (FULL=₹10k/HALF=₹5k/QUARTER=₹2.5k), SL/target/horizon exits, daily snapshot; `db/migrations/create_paper_portfolio.sql`; worker jobs 07:05/16:15 IST; `GET /api/paper/portfolio` + `GET /api/paper/history` endpoints; PaperPortfolioPanel + AgentAttributionPanel in dashboard; 49 tests |
 | (BF-15b) | BF-15b: ScraperAPI SSL cert fix — `session.verify=False` for CONNECT tunnel in Railway container; urllib3 warning suppressed; `test_scraper_connectivity.py` summary fixed (now correctly shows direct✅/proxy✅ separately); OPS-1 reminder added to EXECUTION_PLAN.md |
 | (BF-15) | BF-15: Railway IP block fix — `data/proxy_session.py` proxy abstraction; apply_proxy_to_session() wired into screener.in + Trendlyne sessions; SCRAPERAPI_KEY / FIXIE_URL env vars; /api/debug/scraper-health endpoint; scripts/test_scraper_connectivity.py; Trendlyne 405 retry with alt URL patterns |
@@ -569,7 +577,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | 98 of 150 historical_events rows missing OpenAI embeddings | MEDIUM | `db/` | ✅ Fixed (BF-5) — all 150/150 now have embeddings |
 | ARIA partial sell removes entire position instead of reducing qty | HIGH | `dashboard/src/App.jsx`, `api/main.py` | ✅ Fixed (BF-6) — partial sell support + backend field-clobber fix |
 | Telegram not configured — STOPLOSS_HIT / CRITICAL alerts not delivered | HIGH | `scheduler/portfolio_monitor.py` | 🔲 Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars on Railway |
-| `recommendation_outcomes` table empty — no forward tracking | MEDIUM | `agents/outcome_tracker.py` | 🔲 Needs seeding from historical recs |
+| `recommendation_outcomes` table empty — no forward tracking | MEDIUM | `agents/outcome_tracker.py` | ✅ P5-C seeded; P5-D live poller fills alpha_live daily at 16:30 IST. Run `db/migrations/p5d_live_performance_columns.sql` in Supabase to add live columns. |
 | ICICI Breeze primary IP update due ~May 18 | MEDIUM | Railway env | 🔲 Update primary IP to `52.5.155.132` on ICICI Direct portal |
 | No portfolio-level concentration alerts (sector overlap, macro cluster) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P2-C) — SECTOR_CONCENTRATION + MACRO_CLUSTER alerts added |
 | No correlation-aware alerts (hidden concentration in same-direction movers) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P3-B) — CORR_CLUSTER alert: 60-day Pearson r>0.75, ≥2 pairs, 7-day dedup |

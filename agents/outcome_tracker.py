@@ -404,6 +404,188 @@ def run_outcome_tracking(dry_run: bool = False) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# P5-D: Forward outcome poller — live price snapshot + t+30 milestone
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _batch_current_prices(yf_symbols: list[str]) -> dict[str, float]:
+    """
+    Fetch today's (or most-recent) closing price for a list of yfinance symbols
+    in a single batch download. Returns {symbol: price}.
+    Uses the last available close to handle weekends / market-closed days.
+    """
+    if not yf_symbols:
+        return {}
+    try:
+        import pandas as pd
+        df = yf.download(yf_symbols, period="5d", interval="1d", auto_adjust=True, progress=False)
+        if df.empty:
+            return {}
+        close = df["Close"] if "Close" in df.columns else df.xs("Close", axis=1, level=0)
+        result: dict[str, float] = {}
+        for sym in yf_symbols:
+            try:
+                series = close[sym].dropna() if sym in close.columns else pd.Series(dtype=float)
+                if not series.empty:
+                    result[sym] = float(series.iloc[-1])
+            except Exception:
+                pass
+        return result
+    except Exception as exc:
+        log.warning("Batch price fetch failed: %s — falling back to per-symbol", exc)
+        return {}
+
+
+def run_forward_polling(dry_run: bool = False) -> dict:
+    """
+    P5-D: Daily job at 16:30 IST — runs after market close.
+
+    For every recommendation_outcomes row where outcome_t90 is still PENDING:
+      1. Batch-fetch current prices for all symbols + NIFTY in one yfinance call
+      2. Compute live abs_return, nifty_return, alpha
+      3. Update price_live / nifty_live / alpha_live / return_live / days_live / live_updated_at
+      4. If rec_date + 30 days is past → also resolve the t+30 milestone
+         (price_t30, nifty_t30, alpha_t30, outcome_t30)
+
+    Returns:
+      { polled: int, live_updated: int, t30_resolved: int, errors: list[str] }
+    """
+    log.info("=== Forward Poller run started (dry_run=%s) ===", dry_run)
+    today   = date.today()
+    client  = None if dry_run else _supabase()
+    errors: list[str] = []
+
+    # ── 1. Fetch all PENDING rows ─────────────────────────────────────────────
+    try:
+        fetch_client = _supabase() if dry_run else client
+        if not fetch_client:
+            log.warning("Supabase not configured — forward poller skipped")
+            return {"polled": 0, "live_updated": 0, "t30_resolved": 0, "errors": ["Supabase not configured"]}
+
+        rows = (
+            fetch_client
+            .table("recommendation_outcomes")
+            .select("id,symbol,action,entry_price,nifty_entry,rec_date,outcome_t90,outcome_t30,price_t30")
+            .in_("outcome_t90", ["PENDING", None])
+            .execute()
+            .data or []
+        )
+    except Exception as exc:
+        log.error("Forward poller — failed to fetch rows: %s", exc)
+        return {"polled": 0, "live_updated": 0, "t30_resolved": 0, "errors": [str(exc)]}
+
+    if not rows:
+        log.info("No PENDING rows — nothing to poll")
+        return {"polled": 0, "live_updated": 0, "t30_resolved": 0, "errors": []}
+
+    log.info("Forward poller: %d PENDING rows to refresh", len(rows))
+
+    # ── 2. Batch-fetch current prices ────────────────────────────────────────
+    yf_symbols_set = {_resolve_yf_symbol(r["symbol"]) for r in rows} | {NIFTY_SYMBOL}
+    yf_symbols     = list(yf_symbols_set)
+
+    batch_prices = _batch_current_prices(yf_symbols)
+    nifty_now    = batch_prices.get(NIFTY_SYMBOL)
+
+    if not nifty_now:
+        log.warning("Could not fetch NIFTY current price — aborting forward poller")
+        return {"polled": 0, "live_updated": 0, "t30_resolved": 0, "errors": ["NIFTY price unavailable"]}
+
+    log.info("Batch prices fetched: %d symbols, NIFTY=%.2f", len(batch_prices), nifty_now)
+
+    stats = {"polled": 0, "live_updated": 0, "t30_resolved": 0}
+
+    for row in rows:
+        try:
+            rec_date_str = row.get("rec_date")
+            if not rec_date_str:
+                continue
+
+            rec_date    = date.fromisoformat(str(rec_date_str)[:10])
+            symbol      = row["symbol"]
+            action      = row.get("action", "BUY")
+            entry_price = row.get("entry_price")
+            nifty_entry = row.get("nifty_entry")
+            row_id      = row["id"]
+            yf_sym      = _resolve_yf_symbol(symbol)
+
+            if not entry_price or not nifty_entry:
+                log.debug("[%s] skipping — missing entry_price or nifty_entry", symbol)
+                continue
+
+            entry_price = float(entry_price)
+            nifty_entry = float(nifty_entry)
+            stats["polled"] += 1
+
+            current_price = batch_prices.get(yf_sym)
+            if not current_price:
+                log.debug("[%s] no current price in batch — skipping", symbol)
+                errors.append(f"{symbol}: no current price")
+                continue
+
+            days_elapsed  = (today - rec_date).days
+            abs_return    = (current_price / entry_price) - 1.0
+            nifty_ret_now = (nifty_now / nifty_entry) - 1.0
+            alpha_now     = abs_return - nifty_ret_now
+
+            updates: dict = {
+                "price_live":      round(current_price, 4),
+                "nifty_live":      round(nifty_now, 4),
+                "alpha_live":      round(alpha_now, 6),
+                "return_live":     round(abs_return, 6),
+                "days_live":       days_elapsed,
+                "live_updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            # ── t+30 milestone ────────────────────────────────────────────────
+            t30_date = rec_date + timedelta(days=30)
+            already_resolved_t30 = row.get("outcome_t30") not in (None, "PENDING")
+
+            if not already_resolved_t30 and t30_date <= today + timedelta(days=2):
+                price_t30   = _fetch_price_on_date(yf_sym, t30_date)
+                nifty_t30   = _fetch_price_on_date(NIFTY_SYMBOL, t30_date)
+                if price_t30 and nifty_t30:
+                    ret_t30   = (price_t30 / entry_price) - 1.0
+                    nifty_t30_ret = (nifty_t30 / nifty_entry) - 1.0
+                    alpha_t30 = ret_t30 - nifty_t30_ret
+                    outcome_t30 = _classify_outcome(action, ret_t30, alpha_t30)
+                    updates["price_t30"]   = round(price_t30, 4)
+                    updates["nifty_t30"]   = round(nifty_t30, 4)
+                    updates["alpha_t30"]   = round(alpha_t30, 6)
+                    updates["outcome_t30"] = outcome_t30
+                    stats["t30_resolved"] += 1
+                    log.info(
+                        "[%s] t30 resolved: price=%.2f ret=%.1f%% alpha=%.1f%% → %s",
+                        symbol, price_t30, ret_t30 * 100, alpha_t30 * 100, outcome_t30
+                    )
+
+            log.debug(
+                "[%s] live: days=%d price=%.2f ret=%+.1f%% alpha=%+.1f%%",
+                symbol, days_elapsed, current_price, abs_return * 100, alpha_now * 100
+            )
+
+            if dry_run:
+                log.info("[DRY RUN] Would update %s: ret=%+.1f%% alpha=%+.1f%%",
+                         symbol, abs_return * 100, alpha_now * 100)
+            else:
+                try:
+                    client.table("recommendation_outcomes").update(updates).eq("id", row_id).execute()
+                    stats["live_updated"] += 1
+                except Exception as exc:
+                    log.error("[%s] live update failed: %s", symbol, exc)
+                    errors.append(f"{symbol}: update failed — {exc}")
+
+        except Exception as exc:
+            log.error("Error in forward poller for row %s: %s", row.get("id"), exc)
+            errors.append(f"row {row.get('id')}: {exc}")
+
+    log.info(
+        "=== Forward Poller done: polled=%d live_updated=%d t30_resolved=%d errors=%d ===",
+        stats["polled"], stats["live_updated"], stats["t30_resolved"], len(errors)
+    )
+    return {**stats, "errors": errors}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # P5-A: Per-agent attribution analysis
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -526,6 +708,155 @@ def run_attribution_analysis() -> list[dict]:
     return compute_agent_attribution(rows)
 
 
+def run_live_attribution() -> list[dict]:
+    """
+    P5-E: Per-agent attribution using LIVE alpha (alpha_live) instead of waiting
+    for 90-day resolution. Returns same schema as compute_agent_attribution() but
+    sourced from price_live / alpha_live columns populated by run_forward_polling().
+
+    This makes attribution immediately useful before any rec reaches 90 days.
+    """
+    client = _supabase()
+    if not client:
+        return []
+    try:
+        rows = (
+            client
+            .table("recommendation_outcomes")
+            .select("outcome_t90,alpha_live,return_live,days_live,agent_signals,action")
+            .not_.is_("alpha_live", "null")
+            .execute()
+            .data or []
+        )
+    except Exception as exc:
+        log.error("Live attribution fetch failed: %s", exc)
+        return []
+
+    if not rows:
+        return []
+
+    # Build per-agent stats from live alpha (substitute outcome_t90/alpha_t90 with live values)
+    # Positive live alpha = "bullish call is working so far"
+    from collections import defaultdict
+    agent_data: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        signals = row.get("agent_signals") or {}
+        if isinstance(signals, str):
+            import json
+            try:
+                signals = json.loads(signals)
+            except Exception:
+                signals = {}
+        alpha_live  = row.get("alpha_live")
+        return_live = row.get("return_live")
+        days_live   = row.get("days_live", 0)
+        if alpha_live is None:
+            continue
+        for agent_name, sig_data in signals.items():
+            if not isinstance(sig_data, dict):
+                continue
+            agent_data[agent_name].append({
+                "signal":       sig_data.get("signal", "NEUTRAL"),
+                "score":        sig_data.get("score"),
+                "alpha_live":   alpha_live,
+                "return_live":  return_live,
+                "days_live":    days_live,
+                "action":       row.get("action", ""),
+            })
+
+    results = []
+    for agent_name, sigs in agent_data.items():
+        bullish = [s for s in sigs if s["signal"] in ("BULLISH", "POSITIVE", "BUY")]
+        alpha_vals = [s["alpha_live"] for s in sigs if s["alpha_live"] is not None]
+        bull_alpha = [s["alpha_live"] for s in bullish if s["alpha_live"] is not None]
+
+        avg_alpha_live  = round(sum(alpha_vals)  / len(alpha_vals),  4) if alpha_vals  else None
+        avg_bull_alpha  = round(sum(bull_alpha)   / len(bull_alpha),  4) if bull_alpha  else None
+        positive_bull   = sum(1 for a in bull_alpha if a > 0)
+        positive_rate   = (positive_bull / len(bull_alpha) * 100) if bull_alpha else None
+        avg_days        = round(sum(s["days_live"] for s in sigs) / len(sigs)) if sigs else 0
+
+        results.append({
+            "agent_name":          agent_name,
+            "signal_count":        len(sigs),
+            "bullish_count":       len(bullish),
+            "avg_alpha_live":      avg_alpha_live,
+            "avg_bull_alpha_live": avg_bull_alpha,
+            "positive_rate_live":  round(positive_rate, 1) if positive_rate is not None else None,
+            "avg_days_held":       avg_days,
+            # Keep field names compatible with resolved-outcome attribution schema
+            "hit_rate_90d":        None,
+            "avg_alpha_90d":       None,
+        })
+
+    return sorted(results, key=lambda x: (x["avg_bull_alpha_live"] or -999), reverse=True)
+
+
+def get_live_performance_summary() -> dict:
+    """
+    P5-E: Portfolio-level live performance snapshot for all open (PENDING) recs.
+    Returns aggregate stats + per-rec list for the /api/performance/live endpoint.
+    """
+    client = _supabase()
+    if not client:
+        return {}
+    try:
+        rows = (
+            client
+            .table("recommendation_outcomes")
+            .select(
+                "id,symbol,action,entry_price,rec_date,composite_score,"
+                "price_live,nifty_live,alpha_live,return_live,days_live,live_updated_at,"
+                "outcome_t30,alpha_t30,"
+                "outcome_t90,alpha_t90"
+            )
+            .execute()
+            .data or []
+        )
+    except Exception as exc:
+        log.error("Live performance fetch failed: %s", exc)
+        return {}
+
+    open_rows    = [r for r in rows if r.get("outcome_t90") in ("PENDING", None)]
+    resolved_90d = [r for r in rows if r.get("outcome_t90") not in ("PENDING", None, "")]
+
+    # ── Aggregate live stats (open recs only) ─────────────────────────────────
+    live_alphas   = [r["alpha_live"]  for r in open_rows if r.get("alpha_live")  is not None]
+    live_returns  = [r["return_live"] for r in open_rows if r.get("return_live") is not None]
+
+    by_action: dict[str, dict] = {}
+    for action in ("BUY", "HOLD", "SELL", "AVOID"):
+        grp = [r for r in open_rows if r.get("action") == action]
+        if not grp:
+            continue
+        alphas  = [r["alpha_live"]  for r in grp if r.get("alpha_live")  is not None]
+        returns = [r["return_live"] for r in grp if r.get("return_live") is not None]
+        by_action[action] = {
+            "count":          len(grp),
+            "avg_alpha_pct":  round(sum(alphas)  / len(alphas)  * 100, 2) if alphas  else None,
+            "avg_return_pct": round(sum(returns) / len(returns) * 100, 2) if returns else None,
+            "positive_count": sum(1 for a in alphas if a > 0),
+            "has_live_data":  len(alphas) > 0,
+        }
+
+    # ── Sort open recs by live alpha desc ─────────────────────────────────────
+    def _sort_key(r):
+        return r.get("alpha_live") if r.get("alpha_live") is not None else -999
+
+    sorted_open = sorted(open_rows, key=_sort_key, reverse=True)
+
+    return {
+        "total_open":          len(open_rows),
+        "total_resolved":      len(resolved_90d),
+        "avg_live_return_pct": round(sum(live_returns) / len(live_returns) * 100, 2) if live_returns else None,
+        "avg_live_alpha_pct":  round(sum(live_alphas)  / len(live_alphas)  * 100, 2) if live_alphas  else None,
+        "positive_count":      sum(1 for a in live_alphas if a > 0),
+        "has_live_data":       len(live_alphas) > 0,
+        "by_action":           by_action,
+        "recs":                sorted_open,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Accuracy report helper
 # ─────────────────────────────────────────────────────────────────────────────
@@ -619,12 +950,33 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description="Bharat Intelligence — Outcome Tracker")
-    parser.add_argument("--dry",    action="store_true", help="Dry run — no DB writes")
-    parser.add_argument("--report", action="store_true", help="Print accuracy scorecard and exit")
+    parser.add_argument("--dry",          action="store_true", help="Dry run — no DB writes")
+    parser.add_argument("--report",       action="store_true", help="Print accuracy scorecard and exit")
+    parser.add_argument("--forward-poll", action="store_true", help="Run P5-D forward poller (live snapshot + t30)")
+    parser.add_argument("--live-report",  action="store_true", help="Print live performance summary and exit")
     args = parser.parse_args()
 
     if args.report:
         _print_accuracy_report()
+        sys.exit(0)
+
+    if args.live_report:
+        summary = get_live_performance_summary()
+        print(f"\nLive Performance Summary:")
+        print(f"  Open recs:     {summary.get('total_open', 0)}")
+        print(f"  Avg return:    {summary.get('avg_live_return_pct', 'N/A')}%")
+        print(f"  Avg alpha:     {summary.get('avg_live_alpha_pct', 'N/A')}%")
+        print(f"  Beating NIFTY: {summary.get('positive_count', 0)}/{summary.get('total_open', 0)}")
+        print()
+        for r in (summary.get("recs") or []):
+            ret = (r.get("return_live") or 0) * 100
+            alp = (r.get("alpha_live")  or 0) * 100
+            print(f"  {r['symbol']:15s} {r.get('action','?'):5s}  ret={ret:+.1f}%  alpha={alp:+.1f}%  days={r.get('days_live','?')}")
+        sys.exit(0)
+
+    if args.forward_poll:
+        result = run_forward_polling(dry_run=args.dry)
+        print(f"\nForward Poller Result: {result}")
         sys.exit(0)
 
     result = run_outcome_tracking(dry_run=args.dry)
