@@ -195,8 +195,7 @@ Stock analysis/
 | `paper_portfolio_positions` | P5-B paper trade log | `rec_id, symbol, yf_symbol, entry_date, entry_price, quantity, allocation_inr, position_label, stoploss_price, target_price, nifty_entry, current_price, current_value, unrealized_pnl, unrealized_pnl_pct, status (OPEN/CLOSED/SKIPPED), exit_date, exit_price, nifty_exit, realized_pnl, realized_pnl_pct, alpha_pct, exit_reason` |
 | `paper_portfolio_snapshots` | P5-B daily portfolio P&L | `snapshot_date (unique), total_invested, total_current_value, unrealized_pnl, realized_pnl, total_pnl, total_pnl_pct, open_positions, closed_positions, nifty_value, nifty_return_pct, alpha_pct` |
 
-> **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results)
-> **⚠ PENDING: run `db/migrations/create_paper_portfolio.sql` in Supabase SQL Editor before first paper portfolio job runs.**
+> **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results, create_paper_portfolio, p5d_live_performance_columns)
 
 ---
 
@@ -578,7 +577,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | 98 of 150 historical_events rows missing OpenAI embeddings | MEDIUM | `db/` | ✅ Fixed (BF-5) — all 150/150 now have embeddings |
 | ARIA partial sell removes entire position instead of reducing qty | HIGH | `dashboard/src/App.jsx`, `api/main.py` | ✅ Fixed (BF-6) — partial sell support + backend field-clobber fix |
 | Telegram not configured — STOPLOSS_HIT / CRITICAL alerts not delivered | HIGH | `scheduler/portfolio_monitor.py` | 🔲 Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars on Railway |
-| `recommendation_outcomes` table empty — no forward tracking | MEDIUM | `agents/outcome_tracker.py` | ✅ P5-C seeded; P5-D live poller fills alpha_live daily at 16:30 IST. Run `db/migrations/p5d_live_performance_columns.sql` in Supabase to add live columns. |
+| `recommendation_outcomes` table empty — no forward tracking | MEDIUM | `agents/outcome_tracker.py` | ✅ P5-C seeded; P5-D live poller fills alpha_live daily at 16:30 IST; `p5d_live_performance_columns.sql` migration ✅ applied 2026-05-20. |
 | ICICI Breeze primary IP update due ~May 18 | MEDIUM | Railway env | 🔲 Update primary IP to `52.5.155.132` on ICICI Direct portal |
 | No portfolio-level concentration alerts (sector overlap, macro cluster) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P2-C) — SECTOR_CONCENTRATION + MACRO_CLUSTER alerts added |
 | No correlation-aware alerts (hidden concentration in same-direction movers) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P3-B) — CORR_CLUSTER alert: 60-day Pearson r>0.75, ≥2 pairs, 7-day dedup |
@@ -629,7 +628,7 @@ python -c "from agents.outcome_tracker import get_live_performance_summary; r=ge
 - **yfinance MultiIndex** (1.2.x): use `df.xs("Close", axis=1, level=0)` or `df["Close"][sym]` — NOT `df[sym]["Close"]`
 - **Supabase `.in_()` with None**: generates `IN ('PENDING', 'None')` — SQL NULL rows never matched. Always use `.or_()` filter string
 - **`_transform_*()`** in `api/main.py`: adding a new DB column without adding it to the transformer means React gets `undefined` silently
-- **P5-D live columns**: require `db/migrations/p5d_live_performance_columns.sql` to be run in Supabase SQL Editor first. Until then, `get_live_performance_summary()` returns `{has_live_data: false}` (graceful fallback).
+- **P5-D live columns**: migration `db/migrations/p5d_live_performance_columns.sql` ✅ applied in Supabase (2026-05-20). `get_live_performance_summary()` now returns live data.
 
 ---
 
@@ -674,7 +673,7 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 3 (P3)** ✅: P3-A ✅ (position sizing), P3-B ✅ (correlation alerts), P3-C ✅ (Trendlyne — all pillars: P1 fundamentals fallback, P2 earnings calendar, P3 DVM filter, P5 insider sentiment, P6 insider institutional)
 - **Phase 4 (P4)** ✅ COMPLETE (except P4-D): P4-A commentary grounding ✅; P4-B symbol cache persistence ✅ (was already built); P4-C governance numerical grounding ✅; P4-D Angel One options ⬜ (lowest priority, needs TOTP secret)
 - **Dashboard items (DB-6→DB-10)** ✅ ALL DONE: DB-6 PerformanceTab (was already built); DB-7 live news panel; DB-8 holdings filter; DB-9 "What ran today?" ARIA button; DB-10 Excel export fallback
-- **Phase 5 (P5)** ✅ ALL DONE: P5-A (outcome tracker + attribution) ✅; P5-B (paper portfolio) ✅; P5-C (outcome seeder) ✅; P5-D (forward poller — batch live prices 16:30 IST, alpha_live/return_live/days_live, t+30 milestone) ✅; P5-E (live attribution dashboard — LivePerformancePanel + upgraded AgentAttributionPanel) ✅. **Pending: run `db/migrations/p5d_live_performance_columns.sql` in Supabase to activate live columns.**
+- **Phase 5 (P5)** ✅ ALL DONE: P5-A (outcome tracker + attribution) ✅; P5-B (paper portfolio) ✅; P5-C (outcome seeder) ✅; P5-D (forward poller — batch live prices 16:30 IST, alpha_live/return_live/days_live, t+30 milestone) ✅; P5-E (live attribution dashboard — LivePerformancePanel + upgraded AgentAttributionPanel) ✅. Migration `db/migrations/p5d_live_performance_columns.sql` ✅ applied in Supabase.
 - **Phase 6 (P6)**: System perf tab (P6-A), backtest panel (P6-B), morning brief (P6-C), elite news engine (P6-D)
 - **OPS-2** 🔄 Recurring: Weekly interface + DB audit every Sunday — routes vs dashboard, column names vs code, worker imports, yfinance/Supabase API patterns
 
