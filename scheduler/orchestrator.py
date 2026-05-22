@@ -303,6 +303,98 @@ def _extract_json(text: str) -> dict:
         raise ValueError(f"No valid JSON object found in Claude response: {exc}") from exc
 
 
+def _apply_consensus_gate(
+    symbol:         str,
+    synthesis_data: dict,
+    agent_results:  dict[str, dict],
+) -> dict:
+    """
+    Consensus gate: prevents a single bullish agent from producing a BUY
+    recommendation when the broader agent panel disagrees.
+
+    Logic:
+      - Count agents with explicit BUY vs AVOID/SELL signals (NEUTRAL excluded).
+      - If synthesis action is BUY but fewer than 2 agents are bullish:
+          * Only 1 bullish, rest neutral  → reduce confidence 10 pts, add caveat
+          * Only 1 bullish, ≥2 bearish   → downgrade action to HOLD, reduce confidence 15 pts
+      - If synthesis action is BUY and 0 agents are bullish (pure Claude conviction):
+          → downgrade action to HOLD, reduce confidence 20 pts
+
+    Returns modified synthesis_data dict (may be same dict mutated in-place).
+    """
+    action = str(synthesis_data.get("action", "HOLD")).upper()
+    if action not in ("BUY",):
+        return synthesis_data  # only gate BUY promotions
+
+    bull_signals  = [
+        n for n in AGENT_NAMES
+        if str(agent_results.get(n, {}).get("signal", "")).upper() == "BUY"
+    ]
+    bear_signals  = [
+        n for n in AGENT_NAMES
+        if str(agent_results.get(n, {}).get("signal", "")).upper() in ("AVOID", "SELL")
+    ]
+
+    n_bull = len(bull_signals)
+    n_bear = len(bear_signals)
+
+    if n_bull >= 2:
+        return synthesis_data  # solid consensus — no adjustment needed
+
+    confidence = float(synthesis_data.get("confidence", 65.0))
+    note       = ""
+
+    if n_bull == 0:
+        # Pure Claude narrative conviction with no supporting agent signals
+        synthesis_data["action"] = "HOLD"
+        confidence = max(confidence - 20, 30.0)
+        note = (
+            f"⚠ CONSENSUS GATE: Downgraded from BUY to HOLD — "
+            f"0 of {len(AGENT_NAMES)} agents gave a BUY signal "
+            f"(bears: {', '.join(bear_signals) or 'none'}). "
+            f"Single-source conviction insufficient for BUY recommendation."
+        )
+        log.info(
+            "[%s] consensus gate: 0 bullish agents → downgraded BUY→HOLD (confidence %.0f→%.0f)",
+            symbol, float(synthesis_data.get("confidence", 65)), confidence,
+        )
+
+    elif n_bull == 1 and n_bear >= 2:
+        # One supporter, two or more active bears — contested, downgrade
+        synthesis_data["action"] = "HOLD"
+        confidence = max(confidence - 15, 35.0)
+        note = (
+            f"⚠ CONSENSUS GATE: Downgraded from BUY to HOLD — "
+            f"only {bull_signals[0]} is bullish while "
+            f"{', '.join(bear_signals)} are bearish. "
+            f"Minority conviction insufficient against active bear signals."
+        )
+        log.info(
+            "[%s] consensus gate: 1 bull (%s) vs %d bears → downgraded BUY→HOLD",
+            symbol, bull_signals[0], n_bear,
+        )
+
+    elif n_bull == 1:
+        # One supporter, others neutral — keep BUY but caveat confidence
+        confidence = max(confidence - 10, 40.0)
+        note = (
+            f"⚠ SINGLE-AGENT CONVICTION: BUY driven primarily by {bull_signals[0]} agent "
+            f"({len(AGENT_NAMES) - 1} other agents neutral). "
+            f"Confidence reduced pending broader signal alignment."
+        )
+        log.info(
+            "[%s] consensus gate: 1 bullish agent (%s), rest neutral — confidence %.0f→%.0f",
+            symbol, bull_signals[0], float(synthesis_data.get("confidence", 65)), confidence,
+        )
+
+    synthesis_data["confidence"] = round(confidence, 2)
+    if note:
+        existing = synthesis_data.get("synthesis") or ""
+        synthesis_data["synthesis"] = note + ("\n\n" + existing if existing else "")
+
+    return synthesis_data
+
+
 def _fallback_synthesis(
     symbol:        str,
     composite:     float,
@@ -930,6 +1022,11 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                         synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
             else:
                 synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
+
+            # ── Consensus gate — prevent single-agent BUY promotions ────────────
+            # Applied before earnings guard and validation so adjusted confidence
+            # flows through both downstream steps correctly.
+            synthesis_data = _apply_consensus_gate(symbol, synthesis_data, agent_results)
 
             # ── Earnings guard — inject pre-earnings warning ──────────────────
             # If earnings are within 14 days, add context to synthesis prompt

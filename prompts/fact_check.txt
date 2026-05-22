@@ -20,16 +20,28 @@ INSTRUCTIONS
 
 1. Read the source data carefully and locate the specific metric(s) relevant to the claim.
 2. Compare the claimed value against what the source data shows.
-3. Apply these tolerance rules when assessing numerical claims:
-   - Within ±5% of claimed value   → VERIFIED
-   - 5%–15% off from claimed value → MISLEADING (directionally correct but magnitude wrong)
-   - >15% off, or wrong direction   → CONTRADICTED
-   - Metric not present in source   → UNVERIFIED
+3. Apply these tolerance rules when assessing numerical claims.
+   Use the metric-specific tolerance — NOT a flat ±5% rule:
+
+   METRIC-SPECIFIC TOLERANCES (calibrated for multi-source Indian market data):
+   - P/E ratio              → within ±15% relative   → VERIFIED  (sources differ by timing)
+   - Revenue growth (YoY%)  → within ±20% relative   → VERIFIED  (quarter-lag differences)
+   - EBITDA margin          → within ±10% relative   → VERIFIED
+   - Debt/Equity ratio      → within ±15% relative   → VERIFIED
+   - ROCE (%)               → within ±10% relative   → VERIFIED
+   - ROE (%)                → within ±10% relative   → VERIFIED
+   - Promoter holding (%)   → within ±3 percentage points absolute → VERIFIED
+   - Promoter pledging (%)  → within ±3 percentage points absolute → VERIFIED
+   - RSI (14-day)           → within ±5 RSI points   → VERIFIED
+   - EMA-50 / EMA-20 price  → within ±2% relative    → VERIFIED
+
+   If outside tolerance: CONTRADICTED (provide corrected value from source)
+   If metric not present in source data at all: UNVERIFIED
 
 4. For directional claims ("revenue is growing", "debt is high"):
    - VERIFIED if source data confirms the direction
    - CONTRADICTED if source data shows the opposite direction
-   - MISLEADING if directionally correct but significantly overstated/understated
+   - MISLEADING if directionally correct but magnitude significantly overstated
 
 5. For Indian equity context:
    - PE < 15 is low, 15–35 is moderate, >35 is elevated for most sectors (IT/FMCG can be higher)
@@ -37,6 +49,11 @@ INSTRUCTIONS
    - Debt/Equity > 1.0 is elevated; > 2.0 is high risk
    - Promoter pledging > 30% is a governance concern
    - ROCE > 15% is healthy; < 10% is weak
+
+6. IMPORTANT — Do NOT mark a claim CONTRADICTED purely because it is a derived or
+   computed metric (e.g. "upside potential", "intrinsic value", "margin of safety").
+   These are model outputs, not raw data fields. If the source data does not directly
+   contain such a metric, mark it UNVERIFIED (not CONTRADICTED).
 
 ---
 

@@ -1303,8 +1303,29 @@ def run_discovery(
                     )
                     tier = "STANDARD" if upside_pct >= _STANDARD_UPSIDE and upside_conf >= _STANDARD_CONF else None
                 else:
-                    tier = "CRITICAL"
-                    if fund_data_quality.upper() == "FALLBACK":
+                    # Consensus gate: require ≥2 bullish agents for CRITICAL tier.
+                    # A single bullish agent with strong upside numbers can inflate
+                    # upside_conf above 75% even when other agents are bearish.
+                    _bull_agents = [
+                        n for n in ("technical", "fundamental", "sentiment",
+                                    "institutional", "macro", "historical_rag")
+                        if str(agent_results.get(n, {}).get("signal", "")).upper() == "BUY"
+                    ]
+                    _bear_agents = [
+                        n for n in ("technical", "fundamental", "sentiment",
+                                    "institutional", "macro", "historical_rag")
+                        if str(agent_results.get(n, {}).get("signal", "")).upper() in ("AVOID", "SELL")
+                    ]
+                    if len(_bull_agents) < 2 and len(_bear_agents) >= 2:
+                        log.info(
+                            "  %s demoted CRITICAL→STANDARD: consensus gate "
+                            "(bulls=%s bears=%s)",
+                            symbol, _bull_agents, _bear_agents,
+                        )
+                        tier = "STANDARD" if upside_pct >= _STANDARD_UPSIDE and upside_conf >= _STANDARD_CONF else None
+                    else:
+                        tier = "CRITICAL"
+                    if tier == "CRITICAL" and fund_data_quality.upper() == "FALLBACK":
                         log.info(
                             "  %s CRITICAL (yfinance fallback data — screener.in unavailable)",
                             symbol,

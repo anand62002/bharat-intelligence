@@ -298,32 +298,12 @@ def _extract_claims(rec: dict, agent_results: dict, source_cache: dict) -> list[
                 context_text  = ctx,
             ))
 
-    # ── Recommendation-level: upside / danger ─────────────────────────────────
-    if rec.get("upside_pct") and len(claims) < MAX_CLAIMS_PER_REC:
-        ctx = _fetch_source_context("screener_in", symbol, source_cache)
-        claims.append(Claim(
-            claim_text    = f"stock has {rec['upside_pct']:.1f}% upside potential",
-            metric_key    = "upside_pct",
-            claimed_value = float(rec["upside_pct"]),
-            data_source   = "screener_in",
-            agent_name    = "fundamental",
-            context_text  = ctx,
-        ))
-
-    if rec.get("danger_drop_pct") and rec["danger_drop_pct"] > 0 \
-            and len(claims) < MAX_CLAIMS_PER_REC:
-        ctx = _fetch_source_context("screener_in", symbol, source_cache)
-        claims.append(Claim(
-            claim_text    = (
-                f"downside risk is {rec['danger_drop_pct']:.1f}% "
-                f"(confidence {rec.get('danger_confidence', 0):.0f}%)"
-            ),
-            metric_key    = "danger_drop_pct",
-            claimed_value = float(rec["danger_drop_pct"]),
-            data_source   = "screener_in",
-            agent_name    = "fundamental",
-            context_text  = ctx,
-        ))
+    # NOTE: upside_pct and danger_drop_pct are deliberately NOT included here.
+    # These are model-computed/derived values (DCF output, danger scoring).
+    # screener.in raw data does not directly contain them, so Haiku always marks
+    # them UNVERIFIED — inflating the hallucination counter with false positives.
+    # They are fact-checked indirectly via the underlying raw metrics (PE, EBITDA,
+    # ROCE etc.) that feed into the computation.
 
     return claims[:MAX_CLAIMS_PER_REC]
 
