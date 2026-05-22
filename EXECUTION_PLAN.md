@@ -69,6 +69,8 @@
 | BF-14 | All 24 symbols SUPPRESSED silently — added DATA_DEGRADATION status to daily_runs + governance panel diagnosis | Enhancement | ✅ **DONE** | 2026-05-18 |
 | BF-15 | Railway IP blocked by screener.in Cloudflare + Trendlyne WAF — `data/proxy_session.py` proxy abstraction; SCRAPERAPI_KEY / FIXIE_URL env vars; `/api/debug/scraper-health` endpoint; test script | Enhancement | ✅ **DONE** | 2026-05-18 |
 | BF-15b | ScraperAPI SSL cert error in Railway container — `session.verify=False` for ScraperAPI CONNECT tunnel; fixed misleading test summary | Bug Fix | ✅ **DONE** | 2026-05-18 |
+| BF-16 | Consensus gate — single-agent BUY prevention: `_apply_consensus_gate()` in orchestrator; 0 bulls→HOLD−20, 1 bull+2 bears→HOLD−15, 1 bull neutral→BUY−10 caveat; discovery CRITICAL tier also gated. Hallucination false-positives: `fact_check.txt` metric-specific tolerances (PE±15%, rev±20%, ROCE±10%); remove unverifiable derived claims (upside_pct, danger_drop_pct) from Haiku check | Enhancement | ✅ **DONE** | 2026-05-22 |
+| BF-17 | Discovery pre-screen Filter 2 — replace flat `PE < 50` with sector-relative logic: Tier A PE ≤ sector_median (undervalued), Tier B PE ≤ sector×1.2+cap80 (fair), Tier C PE ≤ sector×2.0+revGrowth>30% (growth premium). `_get_sector_pe()` imports from `SECTOR_PE_MAP` (fundamental.py). Hard cap 80 prevents overvalued stocks passing in any sector | Enhancement | ✅ **DONE** | 2026-05-23 |
 | ⏳ **OPS-1** | **ScraperAPI subscription** — currently on free tier. Monitor 2026-05-18 + 2026-05-19 full pipeline runs. If screener.in / Trendlyne reach directly (no 405/Errno101), proxy is background insurance only. **Buy $29/month plan if direct gets blocked again.** URL: https://www.scraperapi.com/ → Residential plan | Ops | 🔔 **REVIEW BY 2026-05-20** | — |
 | P5-A | Enhanced outcome tracker + agent attribution | Phase 5 | ✅ **DONE** | 2026-05-18 |
 | P5-B | Paper portfolio simulation mode | Phase 5 | ✅ **DONE** | 2026-05-18 |
@@ -80,7 +82,7 @@
 | P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
 | P6-D | Elite News Intelligence Engine — FinBERT semantic layer + event classification (Janus-Q) + temporal decay + entity-centric aggregation + LLM ensemble (Claude+FinBERT) + India-native sources + backtesting loop | Phase 6 | ⬜ TODO | — |
 
-**Progress: 64 / 73 items complete (88%) — OPS-1 review due 2026-05-20 — Phase 7 + Phase 8 added — OPS-2 weekly audit recurring**
+**Progress: 66 / 75 items complete (88%) — OPS-1 review due 2026-05-20 — Phase 7 + Phase 8 added — OPS-2 weekly audit recurring**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |

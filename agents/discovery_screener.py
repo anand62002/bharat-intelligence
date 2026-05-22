@@ -10,8 +10,9 @@ Entry point:
 
 Pre-screen filters (stock passes if it meets 4+ of 5):
     1. RSI between 40 and 65  (not overbought, not deeply oversold)
-    2. PE < 50  OR  revenue growth > 30% (growth justification)
-    3. FII net buyer last 5 sessions
+    2. PE vs sector peers: ≤ sector_median (undervalued), ≤ sector×1.2 (fair),
+       or ≤ sector×2.0 with revenue_growth>30% (growth premium). Hard cap: PE>80 fails.
+    3. Institutional holding ≥ 5%  (smart money present in this stock)
     4. Revenue growth YoY > 15%
     5. Price above 200-day EMA
 
@@ -53,9 +54,22 @@ _dcv = DataCompletenessValidator()
 # ──────────────────────────────────────────────────────────────────────────────
 _RSI_LOW            = 40.0
 _RSI_HIGH           = 65.0
-_PE_MAX             = 50.0
-_GROWTH_PE_OVERRIDE = 30.0   # revenue growth % that justifies PE > 50
-_REVENUE_GROWTH_MIN = 15.0   # YoY %
+
+# PE valuation filter — sector-relative thresholds (Filter 2)
+# ─────────────────────────────────────────────────────────────
+# _PE_ABSOLUTE_CAP    : hard ceiling — no stock above this passes, regardless of sector
+#                       (prevents pathologically overvalued stocks even in high-PE sectors)
+# _PE_SECTOR_RATIO_OK : up to this multiple of sector median PE is "fair value" (passes)
+#                       e.g. FMCG sector PE 48x × 1.2 = 57.6x still passes
+#                       e.g. Metals sector PE 12x × 1.2 = 14.4x is the fair-value ceiling
+# _PE_SECTOR_RATIO_GROWTH: growth override ceiling — high-growth stocks can justify up to
+#                       2x their sector PE median (still capped by _PE_ABSOLUTE_CAP)
+# _GROWTH_PE_OVERRIDE : minimum revenue growth % to trigger the growth premium allowance
+_PE_ABSOLUTE_CAP         = 80.0   # absolute hard stop (no stock passes above this)
+_PE_SECTOR_RATIO_OK      = 1.2    # ≤ 1.2x sector median = fair value → passes
+_PE_SECTOR_RATIO_GROWTH  = 2.0    # ≤ 2x sector median if growth > _GROWTH_PE_OVERRIDE
+_GROWTH_PE_OVERRIDE      = 30.0   # revenue growth % that unlocks growth premium allowance
+_REVENUE_GROWTH_MIN      = 15.0   # YoY %
 _MIN_PRESCREEN_PASS        = 3   # must pass this many of 5 filters
                                  # (revenue_growth is frequently None from screener.in,
                                  #  making effective ceiling 4 available filters — 3/4 pass rate)
@@ -343,6 +357,31 @@ _MIN_INSTITUTIONAL_HOLDING_PCT = 5.0   # Filter 3: stock must have ≥5% institu
 _MIN_DVM_SCORE = 45.0                  # Filter 6: Trendlyne DVM composite score threshold (0–100)
 
 
+def _get_sector_pe(sector: str) -> float:
+    """
+    Return the sector median P/E for the given sector string.
+
+    Delegates to the SECTOR_PE_MAP in agents/fundamental.py — single source of
+    truth for all sector PE benchmarks. Falls back to DEFAULT_SECTOR_PE (22x)
+    for unknown sectors.
+
+    Used by Filter 2 of prescreen() to compute PE relative to peers rather than
+    comparing against a flat absolute threshold.
+
+    Examples:
+        "Energy"  → 12.0   (not cheap at PE 25, but cheap at PE 10)
+        "FMCG"    → 48.0   (PE 40 is actually a value signal here)
+        "Banking" → 14.0   (PE 18 is a mild premium, not a red flag)
+        ""        → 22.0   (default NSE 500 long-run median)
+    """
+    try:
+        from agents.fundamental import SECTOR_PE_MAP, DEFAULT_SECTOR_PE
+    except ImportError:
+        return 22.0  # safe fallback if fundamental unavailable
+    key = (sector or "").strip().lower()
+    return SECTOR_PE_MAP.get(key, DEFAULT_SECTOR_PE)
+
+
 def prescreen(
     symbol: str,
     fii_data: Optional[dict] = None,   # kept for API compatibility; no longer used for Filter 3
@@ -357,7 +396,14 @@ def prescreen(
 
     Filters:
       1. RSI between 40–65  (momentum sweet spot)
-      2. PE < 50  OR  revenue growth > 30%  (valuation / growth justification)
+      2. PE relative to sector peers  (sector-aware valuation):
+           Tier A: PE ≤ sector_median_PE × 1.0  → undervalued vs peers (strong signal)
+           Tier B: PE ≤ sector_median_PE × 1.2 AND PE ≤ 80  → fair value vs peers
+           Tier C: PE ≤ sector_median_PE × 2.0 AND PE ≤ 80 AND revenue_growth > 30%
+                   → growth premium justified by strong growth
+           Hard fail: PE > 80  (absolute cap regardless of sector or growth)
+           (sector_median_PE from SECTOR_PE_MAP in fundamental.py — same source of
+            truth used by the fundamental scoring agent)
       3. Institutional holding ≥ 5%  (smart money present)
       4. Revenue growth YoY > 15%  (business momentum)
       5. Price above 200-day EMA   (uptrend confirmed)
@@ -440,16 +486,61 @@ def prescreen(
     if raw is not None:
         pe             = raw.get("pe")
         revenue_growth = raw.get("revenue_growth")
+        sector_str     = raw.get("sector") or ""
+        sector_pe      = _get_sector_pe(sector_str)
 
-        # Filter 2: PE < 50 OR revenue growth > 30% (growth justification)
-        pe_ok        = (pe is not None and pe < _PE_MAX)
-        growth_pe_ok = (revenue_growth is not None and revenue_growth > _GROWTH_PE_OVERRIDE)
-        if pe_ok:
-            triggers.append(f"PE {pe:.1f} < 50 (reasonable valuation)")
-        elif growth_pe_ok:
-            triggers.append(
-                f"Revenue growth {revenue_growth:.1f}% justifies elevated PE"
+        # Filter 2: Sector-relative PE valuation (three tiers + hard cap)
+        # ────────────────────────────────────────────────────────────────
+        # Compares stock PE against its sector median rather than a flat
+        # absolute. A PE of 40x is cheap for FMCG (sector 48x) but expensive
+        # for Metals (sector 12x). Absolute cap of 80 prevents genuinely
+        # overvalued stocks from passing even in high-PE sectors.
+        if pe is not None and pe <= 0:
+            # Negative/zero PE (loss-making): treat as no PE data
+            pe = None
+
+        if pe is not None:
+            pe_vs_sector = pe / sector_pe  # 1.0 = at sector median
+            at_or_below  = pe_vs_sector <= 1.0
+            fair_value   = pe_vs_sector <= _PE_SECTOR_RATIO_OK and pe <= _PE_ABSOLUTE_CAP
+            growth_ok    = (
+                revenue_growth is not None
+                and revenue_growth > _GROWTH_PE_OVERRIDE
+                and pe_vs_sector <= _PE_SECTOR_RATIO_GROWTH
+                and pe <= _PE_ABSOLUTE_CAP
             )
+
+            if at_or_below:
+                triggers.append(
+                    f"PE {pe:.1f}x ≤ sector median {sector_pe:.0f}x"
+                    + (f" ({sector_str})" if sector_str else "")
+                    + " — undervalued vs peers"
+                )
+            elif fair_value:
+                triggers.append(
+                    f"PE {pe:.1f}x within 20% of sector median {sector_pe:.0f}x"
+                    + (f" ({sector_str})" if sector_str else "")
+                    + " — fair value vs peers"
+                )
+            elif growth_ok:
+                triggers.append(
+                    f"PE {pe:.1f}x ({pe_vs_sector:.1f}x sector median {sector_pe:.0f}x) "
+                    f"justified by {revenue_growth:.0f}% revenue growth"
+                )
+            # else: PE is too expensive vs sector — filter does not pass
+            if pe > _PE_ABSOLUTE_CAP:
+                log.debug(
+                    "prescreen(%s): PE %.1f > hard cap %.0f — Filter 2 skipped",
+                    symbol, pe, _PE_ABSOLUTE_CAP,
+                )
+        else:
+            # No PE data: growth override still applies (unknown valuation, but
+            # strong growth is a positive signal even without a PE to benchmark)
+            if revenue_growth is not None and revenue_growth > _GROWTH_PE_OVERRIDE:
+                triggers.append(
+                    f"Revenue growth {revenue_growth:.1f}% > {_GROWTH_PE_OVERRIDE:.0f}%"
+                    " (no PE data — growth signal only)"
+                )
 
         # Filter 4: Revenue growth YoY > 15%
         if revenue_growth is not None and revenue_growth > _REVENUE_GROWTH_MIN:
