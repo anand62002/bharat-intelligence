@@ -28,7 +28,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from data.fetchers import get_rss_headlines, get_nse_fii_dii  # noqa: E402
+import math
+
+from data.fetchers import get_rss_headlines, get_nse_fii_dii, get_bse_announcements  # noqa: E402
 from agents.base import DataCompletenessValidator, insufficient_data_result
 from data.insider_signal import get_promoter_signal  # noqa: E402  # P3-C-P5
 
@@ -61,6 +63,70 @@ _FII_SELLING_PATTERNS = re.compile(
     r"|institutional.*selling|heavy.*selling",
     re.IGNORECASE,
 )
+
+# ── D-2: Event class taxonomy (Janus-Q inspired) ─────────────────────────────
+EVENT_CLASSES = [
+    "EARNINGS_SURPRISE",  # beat/miss vs consensus
+    "REGULATORY_SHOCK",   # SEBI order, RBI circular, ED/IT raid, court order
+    "M_A_SIGNAL",         # acquisition, merger, stake sale, delisting
+    "MACRO_CATALYST",     # budget, rate decision, PMI, CPI, GDP
+    "ANALYST_ACTION",     # upgrade, downgrade, target change
+    "MANAGEMENT_SIGNAL",  # concall guidance, promoter buy/sell, AGM outcome
+    "SECTOR_CATALYST",    # PLI scheme, import duty, price hike, industry regulation
+    "ROUTINE",            # in-line earnings, dividend, record date, AGM date notice
+]
+
+# D-2: Amplification multipliers — event impact ×N on the raw sentiment score delta
+_EVENT_MULTIPLIERS: dict[str, float] = {
+    "EARNINGS_SURPRISE": 2.5,
+    "REGULATORY_SHOCK":  3.0,
+    "M_A_SIGNAL":        2.0,
+    "MACRO_CATALYST":    1.5,
+    "ANALYST_ACTION":    1.5,
+    "MANAGEMENT_SIGNAL": 1.8,
+    "SECTOR_CATALYST":   1.5,
+    "ROUTINE":           0.5,
+    "UNKNOWN":           1.0,
+}
+
+# D-3: Temporal decay half-lives in hours
+# exp(-ln(2)/half_life × age_hours) → 1.0 when fresh, 0.5 at half-life
+_HALF_LIVES_HOURS: dict[str, float] = {
+    "EARNINGS_SURPRISE": 6.0,
+    "REGULATORY_SHOCK":  48.0,
+    "M_A_SIGNAL":        24.0,
+    "MACRO_CATALYST":    12.0,
+    "ANALYST_ACTION":    8.0,
+    "MANAGEMENT_SIGNAL": 18.0,
+    "SECTOR_CATALYST":   12.0,
+    "ROUTINE":           2.0,
+    "UNKNOWN":           6.0,
+}
+
+# D-4: HuggingFace Inference API endpoint for FinBERT
+# Free-tier, no API key needed; rate-limited to ~10 req/s
+_HF_FINBERT_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
+_FINBERT_ENSEMBLE_W = 0.6   # weight of FinBERT in ensemble (1 - w = Claude Haiku)
+
+# D-2: Batch classification prompt
+_BATCH_CLASSIFY_PROMPT = """\
+You are a financial news event classifier for Indian equity markets.
+Classify EACH headline into exactly ONE category from this list:
+EARNINGS_SURPRISE, REGULATORY_SHOCK, M_A_SIGNAL, MACRO_CATALYST,
+ANALYST_ACTION, MANAGEMENT_SIGNAL, SECTOR_CATALYST, ROUTINE, UNKNOWN
+
+Also score each headline sentiment 0-100 (100=most bullish) for {symbol}.
+
+Return ONLY a JSON array (no markdown, no text outside the array):
+[
+  {{"idx": 0, "event_class": "CATEGORY", "score": <int 0-100>, "key_claim": "<5 words>"}},
+  ...
+]
+
+Headlines to classify:
+{headlines}
+"""
+
 
 # Haiku scoring prompt template
 _SCORE_PROMPT = (
@@ -208,6 +274,194 @@ def _fallback_score(headline: str) -> dict:
         sentiment, score = "neutral", 50
 
     return {"sentiment": sentiment, "score": score, "key_claim": "", "fallback": True}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# D-2: Batch event classifier (Janus-Q pattern)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _batch_classify_headlines(headlines: list[dict], symbol: str) -> list[dict]:
+    """
+    Classify all headlines in a single Claude Haiku call (D-2).
+
+    Replaces the per-headline loop + MAX_HAIKU_CALLS cap.  One prompt covers
+    all headlines, returning event_class + sentiment score for each.
+
+    Returns a list parallel to `headlines` (same order), each element with:
+      event_class : str   — one of EVENT_CLASSES or "UNKNOWN"
+      score       : int   — 0-100 bullishness for this symbol
+      key_claim   : str   — 5-word summary
+      fallback    : bool  — True if Haiku failed / not configured
+
+    Falls back gracefully to keyword scoring if Haiku unavailable.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key or not headlines:
+        return [_fallback_score(h.get("title", "")) for h in headlines]
+
+    # Build numbered headline list for the prompt
+    lines = "\n".join(
+        f'{i}. {h.get("title", "")[:200]}'
+        for i, h in enumerate(headlines)
+    )
+    prompt = _BATCH_CLASSIFY_PROMPT.format(symbol=symbol, headlines=lines)
+
+    payload = json.dumps({
+        "model": HAIKU_MODEL,
+        "max_tokens": max(200, len(headlines) * 60),
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+
+    req = Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode())
+        raw_text = body["content"][0]["text"].strip()
+        raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
+        raw_text = re.sub(r"\n?```$", "", raw_text).strip()
+        items = json.loads(raw_text)
+    except Exception as exc:
+        log.warning("_batch_classify_headlines failed (%s) — using keyword fallback", exc)
+        return [_fallback_score(h.get("title", "")) for h in headlines]
+
+    # Build index → result map, fill gaps with fallback
+    results: list[dict] = []
+    result_map = {}
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and "idx" in item:
+                result_map[int(item["idx"])] = item
+
+    valid_classes = set(EVENT_CLASSES) | {"UNKNOWN"}
+    for i, h in enumerate(headlines):
+        item = result_map.get(i)
+        if item:
+            ec = str(item.get("event_class", "UNKNOWN")).upper()
+            if ec not in valid_classes:
+                ec = "UNKNOWN"
+            results.append({
+                "event_class": ec,
+                "score":       max(0, min(100, int(item.get("score", 50)))),
+                "key_claim":   str(item.get("key_claim", ""))[:120],
+                "sentiment":   "bullish" if int(item.get("score", 50)) >= 60
+                               else ("bearish" if int(item.get("score", 50)) <= 40 else "neutral"),
+                "fallback":    False,
+            })
+        else:
+            fb = _fallback_score(h.get("title", ""))
+            fb["event_class"] = "UNKNOWN"
+            results.append(fb)
+
+    return results
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# D-3: Temporal decay
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _temporal_weight(headline: dict, event_class: str = "UNKNOWN") -> float:
+    """
+    Compute exponential temporal decay weight for a headline (D-3).
+
+    weight = exp(-ln(2) / half_life × age_hours)
+
+    Published date ("YYYY-MM-DD" or "YYYY-MM-DD HH:MM") is used to compute age.
+    Returns 1.0 (full weight) when publication time is unknown.
+    Returns a value in (0, 1].
+    """
+    pub_str = headline.get("published") or ""
+    if not pub_str:
+        return 1.0
+
+    try:
+        # Accept "YYYY-MM-DD" or "YYYY-MM-DD HH:MM"
+        if len(pub_str) >= 16:
+            pub_dt = datetime.strptime(pub_str[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        else:
+            pub_dt = datetime.strptime(pub_str[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return 1.0
+
+    age_hours = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600.0
+    if age_hours < 0:
+        age_hours = 0.0
+
+    half_life = _HALF_LIVES_HOURS.get(event_class, _HALF_LIVES_HOURS["UNKNOWN"])
+    lam = math.log(2) / half_life
+    return math.exp(-lam * age_hours)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# D-4: FinBERT via HuggingFace Inference API
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _call_finbert_hf(headline: str) -> Optional[dict]:
+    """
+    Score a headline using ProsusAI/finbert via the HuggingFace Inference API (D-4).
+
+    Returns {positive: float, negative: float, neutral: float} in [0,1],
+    or None on failure (rate-limit, network error, etc.).
+
+    HF free tier allows ~10 req/s; we call this once per batch (not per headline).
+    """
+    hf_token = os.environ.get("HF_API_TOKEN", "")   # optional — works without token on free tier
+    headers = {"Content-Type": "application/json"}
+    if hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
+
+    payload = json.dumps({"inputs": headline[:512]}).encode()
+    req = Request(
+        _HF_FINBERT_URL,
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=8) as resp:
+            body = json.loads(resp.read().decode())
+    except Exception as exc:
+        log.debug("_call_finbert_hf: request failed: %s", exc)
+        return None
+
+    # HF response: [[{"label":"positive","score":0.8}, {"label":"negative","score":0.1}, ...]]
+    scores: dict[str, float] = {}
+    if isinstance(body, list) and body:
+        inner = body[0]
+        if isinstance(inner, list):
+            for item in inner:
+                if isinstance(item, dict) and "label" in item:
+                    scores[item["label"].lower()] = float(item.get("score", 0))
+        elif isinstance(inner, dict):
+            scores[inner.get("label", "").lower()] = float(inner.get("score", 0))
+
+    if not scores:
+        return None
+
+    return {
+        "positive": scores.get("positive", 0.0),
+        "negative": scores.get("negative", 0.0),
+        "neutral":  scores.get("neutral",  0.0),
+    }
+
+
+def _finbert_to_score(finbert: dict) -> int:
+    """Convert FinBERT {positive, negative, neutral} to 0-100 bullishness score."""
+    # Map positive→100, negative→0, neutral→50; weighted by probability
+    raw = (
+        finbert.get("positive", 0) * 100
+        + finbert.get("neutral",  0) * 50
+        + finbert.get("negative", 0) * 0
+    )
+    return max(0, min(100, round(raw)))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -439,6 +693,17 @@ def analyse(symbol: str) -> dict:
         all_headlines.extend(rss)
         data_sources.append("rss_feeds")
 
+    # ── 1b. BSE corporate announcements (D-1 data enrichment) ────────────────
+    clean_sym = symbol.replace(".NS", "").replace(".BO", "").strip().upper()
+    try:
+        bse_anns = get_bse_announcements(clean_sym, hours=24)
+        if bse_anns:
+            all_headlines.extend(bse_anns)
+            data_sources.append("bse_filings")
+            log.debug("sentiment(%s): %d BSE announcements added", symbol, len(bse_anns))
+    except Exception as _bse_exc:
+        log.debug("sentiment(%s): BSE fetch skipped: %s", symbol, _bse_exc)
+
     # ── 2. NewsAPI ────────────────────────────────────────────────────────────
     newsapi_articles = _fetch_newsapi(symbol)
     if newsapi_articles:
@@ -464,33 +729,104 @@ def analyse(symbol: str) -> dict:
             seen_titles.add(t)
             unique_headlines.append(h)
 
-    # ── 3. Score each headline (Haiku, capped at MAX_HAIKU_CALLS) ────────────
+    # ── 3. Score headlines — batch Haiku classifier + FinBERT ensemble ────────
+    # D-2: One batch Haiku call classifies all headlines (event_class + score).
+    #       Replaces the per-headline loop and MAX_HAIKU_CALLS cap.
+    # D-3: Temporal decay weight applied per headline × event_class half-life.
+    # D-4: FinBERT (HF Inference API) ensemble on top-3 headlines by decay weight.
     haiku_available = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    haiku_calls = 0
+    haiku_calls = 0   # set to 1 below only if batch call actually succeeds
     scored: list[dict] = []
+    finbert_used = False
 
-    for h in unique_headlines:
-        result = dict(h)   # carry source/published/url through
+    # D-2: Batch classify all headlines in one Haiku call
+    if haiku_available and unique_headlines:
+        classified = _batch_classify_headlines(unique_headlines, symbol)
+        if any(not c.get("fallback") for c in classified):
+            haiku_calls = 1
+            data_sources.append("claude_haiku")
+        log.debug("sentiment(%s): batch classified %d headlines", symbol, len(classified))
+    else:
+        classified = [_fallback_score(h.get("title", "")) for h in unique_headlines]
 
-        if haiku_available and haiku_calls < MAX_HAIKU_CALLS:
+    # D-3 + D-4: Apply temporal decay and optional FinBERT ensemble
+    # Select top-5 headlines by temporal weight for FinBERT to avoid rate-limiting
+    weights = []
+    for h, cls in zip(unique_headlines, classified):
+        ec = cls.get("event_class", "UNKNOWN")
+        w = _temporal_weight(h, ec)
+        weights.append(w)
+
+    # Sort indices by weight descending to find top candidates for FinBERT
+    top_indices = sorted(range(len(weights)), key=lambda i: weights[i], reverse=True)[:5]
+
+    for i, (h, cls) in enumerate(zip(unique_headlines, classified)):
+        result = dict(h)
+        result.update(cls)
+
+        ec = cls.get("event_class", "UNKNOWN")
+        decay_w = weights[i]
+
+        # D-4: FinBERT ensemble on high-weight headlines
+        haiku_s = cls.get("score", 50)
+        if i in top_indices:
             try:
-                scored_data = _call_haiku(h["title"], symbol)
-                result.update(scored_data)
-                haiku_calls += 1
-                data_sources_tag = "claude_haiku"
-                if data_sources_tag not in data_sources:
-                    data_sources.append(data_sources_tag)
-            except Exception as exc:
-                log.warning("Haiku scoring failed for '%s': %s", h["title"][:60], exc)
-                result.update(_fallback_score(h["title"]))
+                fb = _call_finbert_hf(h.get("title", ""))
+                if fb:
+                    fb_s = _finbert_to_score(fb)
+                    # Ensemble: 0.6 × FinBERT + 0.4 × Haiku
+                    ensembled = round(
+                        _FINBERT_ENSEMBLE_W * fb_s + (1 - _FINBERT_ENSEMBLE_W) * haiku_s
+                    )
+                    result["score"] = ensembled
+                    result["finbert_score"]  = fb_s
+                    result["finbert_raw"]    = fb
+                    result["score_source"]   = "finbert_ensemble"
+                    finbert_used = True
+                    log.debug(
+                        "sentiment(%s): FinBERT[%s] haiku=%d finbert=%d ensemble=%d",
+                        symbol, h.get("title", "")[:40], haiku_s, fb_s, ensembled,
+                    )
+                else:
+                    result["score_source"] = "haiku_only"
+            except Exception as _fb_exc:
+                log.debug("sentiment(%s): FinBERT call failed: %s", symbol, _fb_exc)
+                result["score_source"] = "haiku_only"
         else:
-            result.update(_fallback_score(h["title"]))
+            result["score_source"] = "haiku_only"
+
+        # D-3: Apply temporal decay to the final score (pull toward neutral 50)
+        raw_s = result.get("score", 50)
+        decayed_s = round(50.0 + (raw_s - 50.0) * decay_w)
+        result["score_weighted"]  = decayed_s
+        result["temporal_weight"] = round(decay_w, 3)
+        result["event_class"]     = ec
+
+        # D-2: Apply event amplification multiplier (to the delta from neutral)
+        multiplier = _EVENT_MULTIPLIERS.get(ec, 1.0)
+        amplified = round(50.0 + (decayed_s - 50.0) * multiplier)
+        result["score"] = max(0, min(100, amplified))
+
+        # Derive sentiment label from final score
+        if result["score"] >= 60:
+            result["sentiment"] = "bullish"
+        elif result["score"] <= 40:
+            result["sentiment"] = "bearish"
+        else:
+            result["sentiment"] = "neutral"
 
         scored.append(result)
 
-    # ── 4. Aggregate scores ───────────────────────────────────────────────────
+    if finbert_used:
+        data_sources.append("finbert_hf")
+
+    # ── 4. Aggregate scores (event-class weighted) ────────────────────────────
+    # Use amplified+decayed scores for aggregate; fall back if all 50
     scores = [s["score"] for s in scored]
     avg_score = round(sum(scores) / len(scores), 1) if scores else 50.0
+
+    # Summarise event class distribution
+    event_class_breakdown = Counter(s.get("event_class", "UNKNOWN") for s in scored)
 
     breakdown = Counter(s.get("sentiment", "neutral") for s in scored)
 
@@ -607,6 +943,10 @@ def analyse(symbol: str) -> dict:
             "fii_net":              fii_net,
             "fii_available":        fii_available,
             "news_only_mode":       not fii_available,
+            # D-2/D-3/D-4 enrichment fields
+            "event_class_breakdown": dict(event_class_breakdown),
+            "finbert_used":          finbert_used,
+            "temporal_decay_applied": True,
             # P3-C-P5: insider / promoter signal
             "insider_signal":       insider_data.get("signal", "NEUTRAL"),
             "insider_adjustment":   insider_adjustment,

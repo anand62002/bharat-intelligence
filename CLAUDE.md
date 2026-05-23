@@ -23,8 +23,21 @@ A multi-agent Indian stock/commodity market intelligence platform.
 Stock analysis/
 ├── agents/                     # 10 analysis agents (all extend a common pattern)
 │   ├── technical.py            # TA indicators via yfinance
+│   │                           # Result includes ohlcv_last_date: ISO date of last OHLCV bar
+│   │                           #   used by audit_data_leakage() for temporal integrity checks
 │   ├── fundamental.py          # Valuation, ratios, screeners
+│   │                           # Result includes data_as_of: date.today().isoformat() — snapshot
+│   │                           #   fetch time; used by audit_data_leakage() for leakage detection
 │   ├── sentiment.py            # News + social sentiment NLP
+│   │                           # P6-D D-1: get_bse_announcements() feeds corporate filings into pipeline
+│   │                           # P6-D D-2: _batch_classify_headlines() — single Haiku batch call (Janus-Q);
+│   │                           #   event taxonomy: EARNINGS_SURPRISE/REGULATORY_SHOCK/M_A_SIGNAL/MACRO_CATALYST/
+│   │                           #   ANALYST_ACTION/MANAGEMENT_SIGNAL/SECTOR_CATALYST/ROUTINE; multipliers 0.5–3.0×
+│   │                           # P6-D D-3: _temporal_weight() — exp(-ln(2)/half_life × age_hours);
+│   │                           #   event-specific half-lives 2–48h; applied before multiplier
+│   │                           # P6-D D-4: _call_finbert_hf() — ProsusAI/finbert via HF Inference API;
+│   │                           #   ensemble 0.6×FinBERT + 0.4×Haiku on top-5 headlines by decay weight;
+│   │                           #   requires optional HF_API_TOKEN; falls back gracefully on rate-limit
 │   ├── macro.py                # RBI, inflation, currency, global macro
 │   ├── institutional.py        # FII/DII flow analysis
 │   ├── sector_valuation.py     # Live sector PE regime vs 5-yr average
@@ -49,6 +62,15 @@ Stock analysis/
 │   │                           #     1. compute_rolling_longrun_pe() — live 365-day DB median (≥90 pts)
 │   │                           #     2. SECTOR_LONGRUN_PE in sector_valuation.py (5-yr structural median)
 │   │                           #     3. DEFAULT_SECTOR_PE 22x fallback
+│   ├── market_digest.py        # P6-C: Morning Brief + Closing Digest agent
+│   │                           # Entry: generate_digest(digest_type) → dict; save_digest(digest, client, dry_run)
+│   │                           # digest_type: MORNING | CLOSING
+│   │                           # RSS sources: ET Markets, Moneycontrol, Hindu BizLine, BS + 3 Google News feeds
+│   │                           # Single Claude Haiku call → JSON {market_mood, summary, key_events,
+│   │                           #   top_themes, sectors_in_focus, nifty_signal}
+│   │                           # Keyword fallback when no ANTHROPIC_API_KEY
+│   │                           # Stores in market_digests table (upsert on digest_type+digest_date)
+│   │                           # VALID_MOODS: BULLISH|BEARISH|NEUTRAL|VOLATILE|MIXED
 │   ├── warren_bot.py           # Long-term business quality (Buffett+Jhunjhunwala)
 │   ├── position_sizer.py       # P3-A: 4-tier Kelly position sizing (FULL 5%/HALF 2.5%/QUARTER 1.25%/AVOID 0%)
 │   ├── paper_portfolio.py      # P5-B: Paper portfolio simulation — auto-follows BUY signals, tracks P&L vs Nifty 50
@@ -72,6 +94,14 @@ Stock analysis/
 │   ├── fact_checker.py         # Cross-agent claim verification
 │   ├── hallucination_detector.py
 │   ├── performance_tracker.py  # Accuracy/hallucination rate logging
+│   │                           # + audit_data_leakage() — temporal leakage audit
+│   │                           #   LeakageViolation / DataLeakageReport dataclasses
+│   │                           #   _check_technical_temporal_integrity() — flags ohlcv_last_date > signal_ts+1d (BLOCKING)
+│   │                           #     or > 7d stale (WARNING)
+│   │                           #   _check_fundamental_temporal_integrity() — flags data_as_of > signal_ts (WARNING)
+│   │                           #   _check_rag_temporal_integrity() — flags matched_event.event_date > signal_ts (BLOCKING)
+│   │                           #   Called from orchestrator synthesise_node() before _apply_consensus_gate()
+│   │                           #   block_on_leak=False by default — logs only; set True for strict backtest mode
 │   ├── research_agent.py       # Daily AI paper scanner (arXiv, SS, HuggingFace)
 │   └── github_manager.py       # Opens GitHub PRs for approved research proposals
 │
@@ -98,6 +128,9 @@ Stock analysis/
 │
 ├── data/
 │   ├── fetchers.py             # India market data fetchers (NSE, BSE, RBI, SEBI)
+│   │                           # + get_bse_announcements(symbol, hours) — P6-D D-1: BSE corporate
+│   │                           #   announcements API (api.bseindia.com); pre-tags event_hint="BSE_FILING";
+│   │                           #   consumed by sentiment.py; strips .NS/.BO suffix before querying
 │   │                           # + get_screener_history() — 10yr annual time series
 │   │                           # + _parse_screener_excel() — DB-10: parses 'Data Sheet' tab from
 │   │                           #   screener.in Excel export (POST /user/company/export/{id}/).
@@ -211,8 +244,10 @@ Stock analysis/
 | `backtest_results` | Walk-forward backtest runs | `run_date, universe, period_start/end, split_type (TRAIN/TEST/FULL), hit_rate_90d, avg_alpha_90d/180d, sharpe_ratio, max_drawdown, win_loss_ratio, signal_details (jsonb)` |
 | `paper_portfolio_positions` | P5-B paper trade log | `rec_id, symbol, yf_symbol, entry_date, entry_price, quantity, allocation_inr, position_label, stoploss_price, target_price, nifty_entry, current_price, current_value, unrealized_pnl, unrealized_pnl_pct, status (OPEN/CLOSED/SKIPPED), exit_date, exit_price, nifty_exit, realized_pnl, realized_pnl_pct, alpha_pct, exit_reason` |
 | `paper_portfolio_snapshots` | P5-B daily portfolio P&L | `snapshot_date (unique), total_invested, total_current_value, unrealized_pnl, realized_pnl, total_pnl, total_pnl_pct, open_positions, closed_positions, nifty_value, nifty_return_pct, alpha_pct` |
+| `market_digests` | P6-C daily market briefs | `id (UUID PK), digest_type (MORNING/CLOSING), digest_date (DATE), headline_count, top_themes (jsonb), summary, key_events (jsonb), market_mood, nifty_signal, sectors_in_focus (jsonb), raw_headlines (jsonb), created_at` — unique on (digest_type, digest_date) |
 
 > **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results, create_paper_portfolio, p5d_live_performance_columns)
+> ⚠️ **Pending migration**: `db/migrations/create_market_digests.sql` — run in Supabase SQL Editor to enable P6-C digest storage.
 
 ---
 
@@ -241,6 +276,7 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/api/attribution/agents` | P5-A: per-agent hit rate + avg alpha derived from resolved recommendation_outcomes |
 | GET | `/api/performance/live` | P5-D/E: live snapshot of all open (PENDING) recs — avg return/alpha, by-action tiles, per-rec table sorted by alpha_live |
 | GET | `/api/attribution/live` | P5-E: per-agent live alpha attribution (before 90d data exists) — avg_bull_alpha_live, positive_rate_live |
+| GET | `/api/market/digest` | P6-C: today's market digests — `?digest_type=MORNING\|CLOSING&digest_date=YYYY-MM-DD` — returns `{digests, date, count}` with camelCase keys |
 | WS | `/ws/alerts` | WebSocket — broadcasts DANGER/CRITICAL alerts every 30s |
 
 **Auth:** `x-api-key: <DASHBOARD_API_KEY>` header on all HTTP. `?api_key=<key>` on WebSocket.
@@ -537,6 +573,8 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (data-leakage-audit) | `governance/performance_tracker.py`: `LeakageViolation` + `DataLeakageReport` dataclasses; `_check_technical_temporal_integrity()` (BLOCKING: ohlcv_last_date > signal_ts+1d; WARNING: stale >7d), `_check_fundamental_temporal_integrity()` (WARNING: data_as_of > signal_ts), `_check_rag_temporal_integrity()` (BLOCKING: matched_event.event_date > signal_ts); `audit_data_leakage()` orchestrates all checks. `agents/technical.py`: added `ohlcv_last_date` field. `agents/fundamental.py`: added `data_as_of` field. `scheduler/orchestrator.py`: leakage audit called in `synthesise_node()` pre-consensus-gate, violations stored in `synthesis_data["metadata"]["leakage_violations"]`. 43 tests added. |
+| (P6-C/D) | P6-C: `agents/market_digest.py` — Morning/Closing digest via single Haiku call; `db/migrations/create_market_digests.sql`; `GET /api/market/digest`; `MarketDigestPanel` React component (mood colour coding, impact badges, themes, sectors, nifty signal); worker jobs 08:45 IST (MORNING) + 16:20 IST (CLOSING). P6-D: `agents/sentiment.py` upgraded with D-1 BSE announcements (`get_bse_announcements()`), D-2 batch event classifier (Janus-Q: 8 event classes, `_batch_classify_headlines()`), D-3 temporal decay (`_temporal_weight()`, event-specific half-lives 2–48h), D-4 FinBERT ensemble (`_call_finbert_hf()`, 0.6×FinBERT+0.4×Haiku on top-5 headlines). `data/fetchers.py`: `get_bse_announcements()` added. 70 new tests (29 market_digest + 41 sentiment_elite); 4 pre-existing sentiment tests fixed (batch classifier mock + `haiku_calls` count fix). |
 | (P6-A/B) | P6-A: `ConfidenceCalibrationChart` — buckets composite_score into 5 tiers, shows expected vs actual hit rate (calibration quality); `TopCallsPanel` — top 5 best/worst calls by t90 alpha. New `/api/performance/calibration` endpoint. P6-B: `BacktestPanel` — TRAIN/TEST/FULL split selector, summary tiles (avg hit rate/alpha/Sharpe/drawdown), per-run monthly table; wires to existing `/api/backtest/summary`. Both panels show proper empty states until data accumulates. |
 | (BF-17 sector PE fix) | `_get_sector_pe()` in discovery_screener.py upgraded to three-layer lookup: (1) `compute_rolling_longrun_pe()` from live `sector_pe_snapshots` DB — auto-activates when ≥90 data points accumulated; (2) `SECTOR_LONGRUN_PE` from `sector_valuation.py` (5-yr structural median); (3) `DEFAULT_SECTOR_PE` 22x. Two-static-map architecture documented: `SECTOR_PE_MAP` (fundamental.py) = current-year forward scoring; `SECTOR_LONGRUN_PE` (sector_valuation.py) = structural 5-yr median for regime + discovery. Discovery PE filter (BF-17) uses structural median; fundamental scoring continues to use forward benchmarks. |
 | (BF-16 discovery PE + consensus gate) | Filter 2 in discovery pre-screen replaced flat `PE < 50` with sector-relative three-tier logic (Tier A/B/C). Consensus gate added to orchestrator synthesis path + discovery CRITICAL tier (prevents 1-agent BUY promotions). Hallucination false-positive root causes fixed: `fact_check.txt` tolerances now metric-specific (PE ±15%, revenue ±20%, etc.); derived/computed claims (`upside_pct`, `danger_drop_pct`) removed from `_extract_claims()` in `fact_checker.py`. |
@@ -698,7 +736,7 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 4 (P4)** ✅ COMPLETE (except P4-D): P4-A commentary grounding ✅; P4-B symbol cache persistence ✅ (was already built); P4-C governance numerical grounding ✅; P4-D Angel One options ⬜ (lowest priority, needs TOTP secret)
 - **Dashboard items (DB-6→DB-10)** ✅ ALL DONE: DB-6 PerformanceTab (was already built); DB-7 live news panel; DB-8 holdings filter; DB-9 "What ran today?" ARIA button; DB-10 Excel export fallback
 - **Phase 5 (P5)** ✅ ALL DONE: P5-A (outcome tracker + attribution) ✅; P5-B (paper portfolio) ✅; P5-C (outcome seeder) ✅; P5-D (forward poller — batch live prices 16:30 IST, alpha_live/return_live/days_live, t+30 milestone) ✅; P5-E (live attribution dashboard — LivePerformancePanel + upgraded AgentAttributionPanel) ✅. Migration `db/migrations/p5d_live_performance_columns.sql` ✅ applied in Supabase.
-- **Phase 6 (P6)**: P6-A ✅ (confidence calibration + top/worst calls in PerformanceTab); P6-B ✅ (backtest panel — TRAIN/TEST/FULL split selector, monthly runs table); P6-C (morning brief) ⬜; P6-D (elite news engine) ⬜
+- **Phase 6 (P6)**: P6-A ✅ (confidence calibration + top/worst calls in PerformanceTab); P6-B ✅ (backtest panel — TRAIN/TEST/FULL split selector, monthly runs table); P6-C ✅ (morning/closing digest — `agents/market_digest.py`, worker 08:45/16:20 IST, `GET /api/market/digest`, `MarketDigestPanel` component, `market_digests` table); P6-D ✅ D-1/D-2/D-3/D-4 (BSE feeds, batch event classifier, temporal decay, FinBERT ensemble in `agents/sentiment.py`)
 - **OPS-2** 🔄 Recurring: Weekly interface + DB audit every Sunday — routes vs dashboard, column names vs code, worker imports, yfinance/Supabase API patterns
 
 **Estimated additional monthly cost at full build:** ₹1,039–3,498/month (Quantsapp options feed + Trendlyne fundamentals backup + OpenAI GPT-4o-mini judges)

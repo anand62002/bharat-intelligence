@@ -79,10 +79,11 @@
 | P5-E | Attribution dashboard — `LivePerformancePanel` (live open positions table, avg alpha, by-action tiles); `AgentAttributionPanel` upgraded to show live attribution before 90d data; 2 new API endpoints (`/api/performance/live`, `/api/attribution/live`) | Phase 5 | ✅ **DONE** | 2026-05-20 |
 | P6-A | System performance dashboard — `ConfidenceCalibrationChart` (5 confidence tiers, expected vs actual hit rate); `TopCallsPanel` (top 5 best/worst calls by t90 alpha); new `/api/performance/calibration` endpoint; all empty-state-safe | Phase 6 | ✅ **DONE** | 2026-05-23 |
 | P6-B | Backtest results panel — `BacktestPanel` in PerformanceTab; TRAIN/TEST/FULL split selector; summary tiles (avg hit rate/alpha/Sharpe/max DD); monthly runs table; wires to `/api/backtest/summary`; empty-state: "runs on 1st of month" | Phase 6 | ✅ **DONE** | 2026-05-23 |
-| P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
-| P6-D | Elite News Intelligence Engine — FinBERT semantic layer + event classification (Janus-Q) + temporal decay + entity-centric aggregation + LLM ensemble (Claude+FinBERT) + India-native sources + backtesting loop | Phase 6 | ⬜ TODO | — |
+| GOV-1 | Data leakage audit — `governance/performance_tracker.py`: `LeakageViolation` + `DataLeakageReport` dataclasses; `_check_technical_temporal_integrity()` (BLOCKING: ohlcv_last_date > signal_ts+1d; WARNING: stale >7d); `_check_fundamental_temporal_integrity()` (WARNING: data_as_of > signal_ts); `_check_rag_temporal_integrity()` (BLOCKING: matched_event.event_date > signal_ts); `audit_data_leakage()` called pre-consensus-gate in `synthesise_node()`; violations stored in `synthesis_data.metadata.leakage_violations`; `ohlcv_last_date` added to technical.py; `data_as_of` added to fundamental.py; 43 tests | Governance | ✅ **DONE** | 2026-05-24 |
+| P6-C | Market tab: daily Morning Brief + Closing Digest — `agents/market_digest.py`; single Haiku call → `{market_mood, summary, key_events, top_themes, sectors_in_focus, nifty_signal}`; keyword fallback; `db/migrations/create_market_digests.sql`; worker 08:45 IST (MORNING) + 16:20 IST (CLOSING); `GET /api/market/digest`; `MarketDigestPanel` React component with mood colour coding + impact badges | Phase 6 | ✅ **DONE** | 2026-05-24 |
+| P6-D | Elite News Intelligence Engine — D-1: `get_bse_announcements()` BSE corporate filings feed; D-2: `_batch_classify_headlines()` Janus-Q batch event classifier (8 classes, 0.5–3.0× multipliers); D-3: `_temporal_weight()` temporal decay (event-specific half-lives 2–48h); D-4: `_call_finbert_hf()` FinBERT HF Inference API ensemble (0.6×FinBERT+0.4×Haiku on top-5); `HF_API_TOKEN` optional; all in `agents/sentiment.py` | Phase 6 | ✅ **DONE** (D-1/2/3/4) | 2026-05-24 |
 
-**Progress: 68 / 77 items complete (88%) — OPS-1 review due 2026-05-20 — Phase 7 + Phase 8 added — OPS-2 weekly audit recurring**
+**Progress: 71 / 78 items complete (91%) — P6-C + P6-D (D-1/2/3/4) DONE 2026-05-24 — OPS-2 weekly audit recurring**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -925,7 +926,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P5-E** | Attribution dashboard — per-agent hit rate + alpha over rolling 90d | Code | None | M | ✅ Done |
 | **P6-A** | System performance dashboard tab — calibration chart + top/worst calls + calibration API | Code | None | M | ✅ Done |
 | **P6-B** | Backtest results dashboard panel — TRAIN/TEST/FULL splits, monthly runs table | Code | None | S | ✅ Done |
-| **P6-C** | Market tab daily news digest (Morning Brief + Closing Digest, Claude+OpenAI) | Code | OpenAI API (existing) | L | ⬜ TODO |
+| **P6-C** | Market tab daily news digest (Morning Brief + Closing Digest, single Haiku call) | Code | None (existing Anthropic key) | L | ✅ Done |
 | **P7-A** | Live trading agent — signal + Telegram alert engine | Code | None (Telegram free) | L | ⬜ TODO |
 | **P7-B** | Paper-to-live promotion gate — 60d paper validation before live signals | Code | None | M | ⬜ TODO |
 | **P7-C** | T+1 India settlement awareness + order timing logic | Code | None | S | ⬜ TODO |
@@ -967,8 +968,8 @@ After every build session, before closing:
 
 ---
 
-*Document version: 4.5 — 2026-05-23 (P6-A confidence calibration + top/worst calls ✅; P6-B backtest panel ✅; BF-17 sector PE three-layer lookup ✅)*  
-*Next milestone: P6-C morning brief → P6-D elite news engine → P7-A live trading agent*
+*Document version: 4.7 — 2026-05-24 (P6-C morning/closing digest ✅; P6-D D-1/2/3/4 elite news engine ✅; 70 new tests + 4 sentiment fixes; GOV-1 data leakage audit ✅; P6-A/B ✅)*  
+*Next milestone: P6-D D-5/6 (spaCy NER, Hindi RSS) optional → P7-A live trading agent*
 
 ---
 

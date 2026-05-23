@@ -9,7 +9,7 @@ import os
 import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional, Tuple, Type
 
 import feedparser
@@ -837,6 +837,101 @@ def get_rss_headlines(symbol: str) -> list | None:
     if not any_feed_ok:
         return None
     return results
+
+
+# ─── 4b. BSE CORPORATE ANNOUNCEMENTS (D-1 — P6-D data enrichment) ────────────
+
+_BSE_ANN_URL = (
+    "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
+    "?pageno=1&strCat=-1&strPrevDate={prev_date}&strScrip={scrip}"
+    "&strSearch=P&strToDate={to_date}&strType=C&subcategory=-1"
+)
+_BSE_ANN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.bseindia.com/corporates/ann.html",
+}
+
+
+def get_bse_announcements(symbol: str = "", hours: int = 24) -> list[dict]:
+    """
+    Fetch recent BSE corporate announcements for a given symbol (or market-wide).
+
+    Parameters
+    ----------
+    symbol : NSE/BSE symbol without exchange suffix, e.g. "RELIANCE". Leave
+             empty ("") to fetch market-wide announcements (all companies).
+    hours  : look-back window in hours (default 24)
+
+    Returns
+    -------
+    list of {title, source, published, url} — same schema as get_rss_headlines.
+    Empty list on failure (non-fatal).
+    """
+    from urllib.request import Request as _Req, urlopen as _open
+    from urllib.error import URLError as _UE, HTTPError as _HE
+
+    today   = datetime.now()
+    prev_dt = today - timedelta(hours=hours)
+    to_date   = today.strftime("%Y%m%d")
+    prev_date = prev_dt.strftime("%Y%m%d")
+
+    # BSE uses SCRIPCD (numeric code); for simplicity use scrip name when no code known
+    scrip = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+
+    url = _BSE_ANN_URL.format(prev_date=prev_date, to_date=to_date, scrip=scrip)
+    try:
+        req = _Req(url, headers=_BSE_ANN_HEADERS)
+        with _open(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+    except (_UE, _HE, json.JSONDecodeError, Exception) as exc:
+        log.debug("get_bse_announcements: request failed (%s): %s", symbol or "all", exc)
+        return []
+
+    items = []
+    announcements = (
+        data.get("Table", []) or
+        data.get("Table1", []) or
+        (data if isinstance(data, list) else [])
+    )
+
+    for ann in announcements[:30]:
+        # Different BSE API versions use different key names
+        title = (
+            ann.get("HEADLINE") or
+            ann.get("NEWSSUB") or
+            ann.get("SUBJECT") or
+            ann.get("SUBCATNAME") or ""
+        ).strip()
+        if not title:
+            continue
+
+        company = (ann.get("COMPANYNAME") or ann.get("LONGNAME") or "").strip()
+        if company and company.lower() not in title.lower():
+            title = f"{company}: {title}"
+
+        pub_raw = (
+            ann.get("NEWS_DT") or ann.get("DT_TM") or ann.get("ANNOUNCEMENTDATE") or ""
+        )
+        pub_str = pub_raw[:10] if pub_raw else ""
+
+        # BSE announcement URL
+        news_id = ann.get("NEWSID") or ann.get("ID") or ""
+        link = (
+            f"https://www.bseindia.com/stock-share-price/equity-stockcode-{ann.get('SCRIP_CD', '')}.html"
+            if ann.get("SCRIP_CD") else
+            "https://www.bseindia.com/corporates/ann.html"
+        )
+
+        items.append({
+            "title":     title,
+            "source":    "BSE Filings",
+            "published": pub_str,
+            "url":       link,
+            "event_hint": "BSE_FILING",   # pre-tag for D-2 event classifier
+        })
+
+    return items
 
 
 # ─── 5. SCREENER DATA ────────────────────────────────────────────────────────

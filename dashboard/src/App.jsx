@@ -2246,6 +2246,161 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
 }
 
 
+// ─── MARKET DIGEST PANEL (P6-C) ───────────────────────────────────────────────
+function MarketDigestPanel({ digestData, apiLoaded }) {
+  const [openType, setOpenType] = useState(null);
+
+  const digests = digestData?.digests || [];
+  const morning = digests.find(d => d.digestType === 'MORNING');
+  const closing = digests.find(d => d.digestType === 'CLOSING');
+
+  const MOOD_COLOR = {
+    BULLISH:  C.green,
+    BEARISH:  C.red,
+    VOLATILE: C.orange,
+    MIXED:    C.accent,
+    NEUTRAL:  C.muted,
+  };
+  const IMPACT_COLOR = {
+    POSITIVE: C.green,
+    NEGATIVE: C.red,
+    WATCH:    C.orange,
+    NEUTRAL:  C.muted,
+  };
+
+  if (!apiLoaded) return (
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:14}}>
+      <div style={{fontSize:11,fontWeight:700,color:"white",marginBottom:8}}>📋 Market Brief</div>
+      <div style={{fontSize:10,color:C.muted}}>Loading digest…</div>
+    </div>
+  );
+
+  if (digests.length === 0) return (
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:14}}>
+      <div style={{fontSize:11,fontWeight:700,color:"white",marginBottom:6}}>📋 Market Brief</div>
+      <div style={{fontSize:10,color:C.muted}}>
+        No digest yet today. Generated daily at 08:45 IST (Morning) and 16:20 IST (Closing).
+      </div>
+    </div>
+  );
+
+  function DigestCard({ digest, type }) {
+    if (!digest) return (
+      <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:12,flex:1}}>
+        <div style={{fontSize:10,color:C.muted}}>
+          {type === 'MORNING' ? '🌅 Morning Brief' : '🌆 Closing Digest'} not yet available today.
+        </div>
+      </div>
+    );
+    const isOpen = openType === type;
+    const mood = digest.marketMood || 'NEUTRAL';
+    const moodColor = MOOD_COLOR[mood] || C.muted;
+    return (
+      <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:12,flex:1,minWidth:0}}>
+        {/* Header */}
+        <div
+          onClick={() => setOpenType(isOpen ? null : type)}
+          style={{cursor:'pointer',display:'flex',alignItems:'center',gap:8,marginBottom: isOpen ? 10 : 0}}
+        >
+          <span style={{fontSize:13}}>{type === 'MORNING' ? '🌅' : '🌆'}</span>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:10,fontWeight:700,color:'white'}}>
+              {type === 'MORNING' ? 'Morning Brief' : 'Closing Digest'}
+            </div>
+            <div style={{fontSize:8,color:C.muted}}>{digest.digestDate} · {digest.headlineCount} headlines</div>
+          </div>
+          <span style={{
+            fontSize:8,fontWeight:700,padding:'2px 7px',borderRadius:4,
+            background:moodColor+'22',color:moodColor,border:`1px solid ${moodColor}44`,
+          }}>{mood}</span>
+          <span style={{fontSize:9,color:C.muted,marginLeft:4}}>{isOpen ? '▲' : '▼'}</span>
+        </div>
+
+        {/* Collapsed preview */}
+        {!isOpen && digest.niftySignal && (
+          <div style={{fontSize:9,color:C.muted,marginTop:4,fontStyle:'italic',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+            {digest.niftySignal}
+          </div>
+        )}
+
+        {/* Expanded content */}
+        {isOpen && (
+          <div style={{animation:'fadeUp .2s ease'}}>
+            {/* Summary */}
+            {digest.summary && (
+              <div style={{fontSize:10,color:'#ccc',lineHeight:1.6,marginBottom:10,whiteSpace:'pre-line'}}>
+                {digest.summary}
+              </div>
+            )}
+            {/* Key Events */}
+            {(digest.keyEvents||[]).length > 0 && (
+              <div style={{marginBottom:10}}>
+                <div style={{fontSize:9,fontWeight:700,color:C.muted,marginBottom:5,textTransform:'uppercase'}}>Key Events</div>
+                {digest.keyEvents.map((evt,i) => {
+                  const ic = IMPACT_COLOR[evt.impact] || C.muted;
+                  return (
+                    <div key={i} style={{display:'flex',gap:6,alignItems:'flex-start',marginBottom:4}}>
+                      <span style={{fontSize:8,padding:'1px 5px',borderRadius:3,background:ic+'22',color:ic,border:`1px solid ${ic}44`,flexShrink:0,marginTop:1}}>
+                        {evt.impact||'—'}
+                      </span>
+                      <span style={{fontSize:9,color:'#bbb',lineHeight:1.4}}>{evt.event}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {/* Themes + Sectors */}
+            <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+              {(digest.topThemes||[]).length > 0 && (
+                <div>
+                  <div style={{fontSize:8,color:C.muted,marginBottom:4,textTransform:'uppercase'}}>Themes</div>
+                  <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                    {digest.topThemes.map((t,i) => (
+                      <span key={i} style={{fontSize:8,background:C.accent+'22',color:C.accent,padding:'1px 6px',borderRadius:4}}>
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(digest.sectorsInFocus||[]).length > 0 && (
+                <div>
+                  <div style={{fontSize:8,color:C.muted,marginBottom:4,textTransform:'uppercase'}}>Sectors</div>
+                  <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                    {digest.sectorsInFocus.map((s,i) => (
+                      <span key={i} style={{fontSize:8,background:C.surface,color:C.muted,padding:'1px 6px',borderRadius:4,border:`1px solid ${C.border}`}}>
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* Nifty signal */}
+            {digest.niftySignal && (
+              <div style={{marginTop:10,padding:'6px 10px',background:C.surface,borderRadius:5,border:`1px solid ${C.border}`}}>
+                <span style={{fontSize:8,color:C.muted,marginRight:6}}>📊 NIFTY SIGNAL:</span>
+                <span style={{fontSize:9,color:'white',fontStyle:'italic'}}>{digest.niftySignal}</span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{marginBottom:14}}>
+      <div style={{fontSize:11,fontWeight:700,color:'white',marginBottom:8}}>📋 Market Brief</div>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+        <DigestCard digest={morning} type="MORNING" />
+        <DigestCard digest={closing} type="CLOSING" />
+      </div>
+    </div>
+  );
+}
+
+
 // ─── CONFIDENCE CALIBRATION CHART (P6-A) ─────────────────────────────────────
 function ConfidenceCalibrationChart({ calibration }) {
   const buckets = calibration?.buckets || [];
@@ -2927,6 +3082,8 @@ export default function App(){
   // P6-A: Confidence calibration + P6-B: Backtest results
   const [calibrationData,   setCalibrationData]   = useState(null);
   const [backtestData,      setBacktestData]      = useState(null);
+  // P6-C: Daily market digest (Morning Brief + Closing Digest)
+  const [marketDigest,      setMarketDigest]      = useState(null);
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -3011,6 +3168,9 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/backtest/summary?split=TEST&limit=12")  // P6-B: backtest TEST split
         .then(d=>{ if(d) setBacktestData(d); })
+        .catch(()=>{}),
+      apiFetch("/api/market/digest")  // P6-C: Morning Brief + Closing Digest
+        .then(d=>{ if(d) setMarketDigest(d); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -3452,6 +3612,9 @@ export default function App(){
                     </div>
                   ))}
                 </div>
+                {/* P6-C: Morning Brief + Closing Digest */}
+                <MarketDigestPanel digestData={marketDigest} apiLoaded={apiLoaded} />
+
                 {/* DB-7: India Market News Feed */}
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                   <div style={{fontSize:11,fontWeight:700,color:"white"}}>📰 India Market News</div>

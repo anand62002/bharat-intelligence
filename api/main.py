@@ -2119,6 +2119,70 @@ async def get_market_pulse(
     return await _get_market_pulse()
 
 
+@app.get("/api/market/digest", tags=["market"])
+async def get_market_digest(
+    digest_type: Optional[str] = Query(None, description="MORNING or CLOSING; omit for both"),
+    digest_date: Optional[str] = Query(None, description="ISO date YYYY-MM-DD; defaults to today"),
+    _: None = Depends(require_api_key),
+):
+    """
+    P6-C: Latest Morning Brief and/or Closing Digest for the Indian equity market.
+    Returns both types for today by default; filter via digest_type and digest_date.
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    today = date.today().isoformat()
+    target_date = digest_date or today
+
+    try:
+        q = (
+            _supabase.table("market_digests")
+            .select(
+                "id, digest_type, digest_date, market_mood, summary, "
+                "key_events, top_themes, sectors_in_focus, nifty_signal, "
+                "headline_count, created_at"
+            )
+            .eq("digest_date", target_date)
+            .order("created_at", desc=True)
+        )
+        if digest_type:
+            q = q.eq("digest_type", digest_type.upper())
+
+        rows = q.execute().data or []
+    except Exception as exc:
+        log.error("/api/market/digest query failed: %s", exc)
+        return {"digests": [], "date": target_date, "note": "query error"}
+
+    # Return latest of each type (upsert may create duplicates in edge cases)
+    seen_types: set = set()
+    digests = []
+    for row in rows:
+        dt = row.get("digest_type")
+        if dt in seen_types:
+            continue
+        seen_types.add(dt)
+        digests.append({
+            "id":             row.get("id"),
+            "digestType":     dt,
+            "digestDate":     row.get("digest_date"),
+            "marketMood":     row.get("market_mood"),
+            "summary":        row.get("summary"),
+            "keyEvents":      row.get("key_events") or [],
+            "topThemes":      row.get("top_themes") or [],
+            "sectorsInFocus": row.get("sectors_in_focus") or [],
+            "niftySignal":    row.get("nifty_signal"),
+            "headlineCount":  row.get("headline_count", 0),
+            "createdAt":      row.get("created_at"),
+        })
+
+    return {
+        "digests":  digests,
+        "date":     target_date,
+        "count":    len(digests),
+    }
+
+
 @app.get("/api/earnings/upcoming", tags=["portfolio"])
 async def get_upcoming_earnings(
     days: int  = Query(14, description="Days ahead to look for earnings"),

@@ -487,6 +487,9 @@ def _run_analyse(
     """
     Run analyse() with fully mocked external calls.
     haiku_score=None → fall back to keyword scoring (no API key).
+    haiku_score=dict → _batch_classify_headlines returns those scores directly;
+                       temporal decay is suppressed (weight=1.0) so scores are
+                       deterministic regardless of headline publish date.
     """
     if rss_headlines is None:
         rss_headlines = _make_headlines(5)
@@ -500,12 +503,31 @@ def _run_analyse(
     def fake_haiku(headline, sym):
         return haiku_score or {"sentiment": "neutral", "score": 50, "key_claim": ""}
 
+    def fake_batch_classify(headlines, sym):
+        """Return classification parallel to `headlines` using the given haiku_score."""
+        sc = haiku_score or {"sentiment": "neutral", "score": 50, "key_claim": ""}
+        return [
+            {
+                "event_class": "UNKNOWN",
+                "score":       sc.get("score", 50),
+                "key_claim":   sc.get("key_claim", ""),
+                "sentiment":   sc.get("sentiment", "neutral"),
+                # fallback=False so haiku_calls_used becomes 1 when haiku_score provided
+                "fallback":    haiku_score is None,
+            }
+            for _ in headlines
+        ]
+
     fii_return    = {"date": "2024-01-15", "fii_net": fii_net, "dii_net": 0} if fii_net is not None else None
     insider_val   = insider if insider is not None else _NEUTRAL_PROMOTER
 
     with patch("agents.sentiment.get_rss_headlines", return_value=rss_headlines), \
          patch("agents.sentiment._fetch_newsapi", return_value=newsapi_articles), \
+         patch("agents.sentiment.get_bse_announcements", return_value=[]), \
+         patch("agents.sentiment._batch_classify_headlines", side_effect=fake_batch_classify), \
          patch("agents.sentiment._call_haiku", side_effect=fake_haiku), \
+         patch("agents.sentiment._call_finbert_hf", return_value=None), \
+         patch("agents.sentiment._temporal_weight", return_value=1.0), \
          patch("agents.sentiment.get_nse_fii_dii", return_value=fii_return), \
          patch("agents.sentiment.get_promoter_signal", return_value=insider_val), \
          patch.dict(os.environ, env_patch):

@@ -105,6 +105,40 @@ def job_research_agent() -> None:
         log.error("Research agent job failed: %s", exc, exc_info=True)
 
 
+def job_market_digest_morning() -> None:
+    """08:45 IST — generate Morning Brief for Indian equity market (P6-C)."""
+    log.info("-" * 50)
+    log.info("  JOB START: Market Digest Morning Brief (08:45 IST)")
+    log.info("-" * 50)
+    try:
+        from agents.market_digest import generate_digest, save_digest
+        digest = generate_digest("MORNING")
+        row_id = save_digest(digest)
+        log.info(
+            "Morning Brief generated — mood=%s headlines=%d id=%s",
+            digest.get("market_mood"), digest.get("headline_count", 0), row_id,
+        )
+    except Exception as exc:
+        log.error("Market digest morning job failed: %s", exc, exc_info=True)
+
+
+def job_market_digest_closing() -> None:
+    """16:20 IST — generate Closing Digest for Indian equity market (P6-C)."""
+    log.info("-" * 50)
+    log.info("  JOB START: Market Digest Closing (16:20 IST)")
+    log.info("-" * 50)
+    try:
+        from agents.market_digest import generate_digest, save_digest
+        digest = generate_digest("CLOSING")
+        row_id = save_digest(digest)
+        log.info(
+            "Closing Digest generated — mood=%s headlines=%d id=%s",
+            digest.get("market_mood"), digest.get("headline_count", 0), row_id,
+        )
+    except Exception as exc:
+        log.error("Market digest closing job failed: %s", exc, exc_info=True)
+
+
 def job_earnings_calendar() -> None:
     """08:00 IST — refresh earnings calendar for portfolio + recently-screened symbols (P3-C-P2)."""
     log.info("-" * 50)
@@ -485,6 +519,32 @@ def build_scheduler():
         misfire_grace_time=1800,
     )
 
+    # ── Market Digest — Morning Brief (P6-C) ─────────────────────────────────
+    # Runs at 08:45 IST: after Breeze refresh (08:30), before market open (09:15).
+    # Fetches overnight global cues + domestic news → Claude Haiku digest.
+    scheduler.add_job(
+        job_market_digest_morning,
+        CronTrigger(hour=8, minute=45, timezone=IST),
+        id="market_digest_morning",
+        name="Market Digest Morning Brief (08:45 IST)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+    )
+
+    # ── Market Digest — Closing Digest (P6-C) ────────────────────────────────
+    # Runs at 16:20 IST: after market close (15:30), before paper portfolio (16:15).
+    # Actually 16:20 is after paper portfolio (16:15) but before forward poller (16:30).
+    scheduler.add_job(
+        job_market_digest_closing,
+        CronTrigger(hour=16, minute=20, timezone=IST),
+        id="market_digest_closing",
+        name="Market Digest Closing Digest (16:20 IST)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+    )
+
     # ── Earnings calendar — daily refresh ────────────────────────────────────
     scheduler.add_job(
         job_earnings_calendar,
@@ -663,6 +723,8 @@ def main() -> None:
         job_paper_portfolio_update()
         job_options_snapshot()
         job_rag_refresh()
+        job_market_digest_morning()
+        job_market_digest_closing()
         log.info("--now run complete. Starting scheduler...")
 
     try:
@@ -693,6 +755,8 @@ def main() -> None:
     log.info("    18:30  Outcome Tracker")
     log.info("    07:45 (1st/month)  Monthly Backtest")
     log.info("    08:15 (1st/month)  RAG Corpus Auto-Refresh")
+    log.info("    08:45  Market Digest Morning Brief (P6-C)")
+    log.info("    16:20  Market Digest Closing Digest (P6-C)")
     log.info("  Press Ctrl+C to stop")
     log.info("=" * 60)
 
