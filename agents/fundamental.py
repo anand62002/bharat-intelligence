@@ -33,10 +33,34 @@ AGENT_NAME = "fundamental"
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 
-# NSE sector median P/E ratios
+# NSE sector median P/E ratios — CURRENT-YEAR FORWARD SCORING BENCHMARKS
+#
+# Purpose: answers "is this stock cheap relative to where its sector trades TODAY?"
+# Used by: fundamental scoring agent for valuation sub-score computation.
+#
 # Two layers:
 #   (a) screener.in / human-readable sector names
 #   (b) yfinance info["sector"] names — must be present or the lookup falls to DEFAULT
+#
+# IMPORTANT — two maps exist by design:
+#   SECTOR_PE_MAP (this map):     current-year forward benchmarks, calibrated to
+#                                  prevailing sector multiples in 2024-2026.
+#                                  Reflects FII re-ratings, growth premiums.
+#                                  Used only by the fundamental agent's scoring.
+#
+#   SECTOR_LONGRUN_PE (sector_valuation.py):  5-year structural median (Dec 2019–
+#                                  Dec 2024). Used for regime classification
+#                                  (COMPRESSED/FAIR/STRETCHED) and by the discovery
+#                                  pre-screen filter (_get_sector_pe() in
+#                                  discovery_screener.py — which first tries the live
+#                                  rolling median from sector_pe_snapshots DB table).
+#
+# The two maps differ intentionally for some sectors:
+#   FMCG:    SECTOR_PE_MAP=48x (current FII re-rating) vs SECTOR_LONGRUN_PE=44x (5yr median)
+#   NBFC:    SECTOR_PE_MAP=18x (current) vs SECTOR_LONGRUN_PE=22x (5yr median was higher)
+#   Telecom: SECTOR_PE_MAP=38x (5G premium) vs SECTOR_LONGRUN_PE=32x (5yr structural)
+#   IT:      SECTOR_PE_MAP=30x (current) vs SECTOR_LONGRUN_PE=28x (5yr median)
+#   Metals:  SECTOR_PE_MAP=12x vs SECTOR_LONGRUN_PE=10x (structural floor is lower)
 #
 # Updated for 2024-2026 market realities:
 #   Telecom/Comm Services raised to 38x (5G capex supercycle + duopoly pricing power)

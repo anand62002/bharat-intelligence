@@ -57,10 +57,19 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Long-run sector PE benchmarks
+# Long-run sector PE benchmarks — STRUCTURAL 5-YEAR MEDIAN
 # 5-year rolling median (Dec 2019 – Dec 2024), calibrated to Nifty sectoral
 # indices.  These represent the "structural fair multiple" for each sector —
 # not the all-time average (which includes GFC / COVID crash distortions).
+#
+# Used for:
+#   1. Regime classification: COMPRESSED / FAIR / STRETCHED / EXTREME
+#      (live_pe / longrun_pe → _REGIME_THRESHOLDS multiplier applied to scoring)
+#   2. Discovery pre-screen: _get_sector_pe() in discovery_screener.py uses
+#      this as tier-2 fallback (tier-1 = live rolling median from sector_pe_snapshots)
+#
+# Distinct from SECTOR_PE_MAP in fundamental.py (current-year scoring benchmarks).
+# See that file's header comment for the full two-map architecture explanation.
 # ──────────────────────────────────────────────────────────────────────────────
 
 SECTOR_LONGRUN_PE: dict[str, float] = {

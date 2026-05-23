@@ -28,15 +28,27 @@ Stock analysis/
 │   ├── macro.py                # RBI, inflation, currency, global macro
 │   ├── institutional.py        # FII/DII flow analysis
 │   ├── sector_valuation.py     # Live sector PE regime vs 5-yr average
+│   │                           # SECTOR_LONGRUN_PE: 5-yr structural median (Dec 2019–Dec 2024)
+│   │                           # — used for regime classification AND as tier-2 fallback in
+│   │                           #   discovery _get_sector_pe() lookup
+│   │                           # SECTOR_PE_MAP (in fundamental.py): current-year forward benchmarks
+│   │                           # — different from SECTOR_LONGRUN_PE by design (see fundamental.py header)
+│   │                           # Live pipeline: NSE allIndices API → sector_pe_snapshots table (daily)
+│   │                           # compute_rolling_longrun_pe() → 365-day median; auto-activates as tier-1
+│   │                           #   in _get_sector_pe() once ≥90 data points accumulate (~3 months)
 │   ├── commodities.py          # Gold, crude, silver MCX
 │   ├── historical_rag.py       # pgvector semantic similarity on past events
 │   ├── discovery_screener.py   # Proactive stock discovery — full NSE EQ universe
 │   │                           # daily slice rotation (200/day → 9-day full cycle)
-│   │                           # Filter 2 (PE): sector-relative — PE vs SECTOR_PE_MAP median
+│   │                           # Filter 2 (PE): sector-relative three-tier filter
 │   │                           #   Tier A: PE ≤ sector_median → undervalued vs peers (strong)
-│   │                           #   Tier B: PE ≤ sector×1.2 AND PE≤80 → fair value
-│   │                           #   Tier C: PE ≤ sector×2.0 AND PE≤80 AND revGrowth>30% → growth
-│   │                           #   Hard cap: PE > 80 always fails
+│   │                           #   Tier B: PE ≤ sector×1.2 AND PE≤80 → fair value vs peers
+│   │                           #   Tier C: PE ≤ sector×2.0 AND PE≤80 AND revGrowth>30% → growth premium
+│   │                           #   Hard cap: PE > 80 always fails regardless of sector/growth
+│   │                           #   Sector median source: _get_sector_pe() three-layer lookup:
+│   │                           #     1. compute_rolling_longrun_pe() — live 365-day DB median (≥90 pts)
+│   │                           #     2. SECTOR_LONGRUN_PE in sector_valuation.py (5-yr structural median)
+│   │                           #     3. DEFAULT_SECTOR_PE 22x fallback
 │   ├── warren_bot.py           # Long-term business quality (Buffett+Jhunjhunwala)
 │   ├── position_sizer.py       # P3-A: 4-tier Kelly position sizing (FULL 5%/HALF 2.5%/QUARTER 1.25%/AVOID 0%)
 │   ├── paper_portfolio.py      # P5-B: Paper portfolio simulation — auto-follows BUY signals, tracks P&L vs Nifty 50
@@ -521,7 +533,8 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
-| (discovery PE fix) | Filter 2 in discovery pre-screen replaced flat `PE < 50` with sector-relative logic: Tier A PE ≤ sector median (undervalued), Tier B PE ≤ sector×1.2 + hard cap 80 (fair value), Tier C PE ≤ sector×2.0 + revGrowth>30% (growth premium). `_get_sector_pe()` helper imports `SECTOR_PE_MAP` from `fundamental.py` — single source of truth. Also adds consensus gate (1-agent BUY prevention) and hallucination false-positive fixes (fact_check.txt tolerances + remove unverifiable derived claims). |
+| (BF-17 sector PE fix) | `_get_sector_pe()` in discovery_screener.py upgraded to three-layer lookup: (1) `compute_rolling_longrun_pe()` from live `sector_pe_snapshots` DB — auto-activates when ≥90 data points accumulated; (2) `SECTOR_LONGRUN_PE` from `sector_valuation.py` (5-yr structural median); (3) `DEFAULT_SECTOR_PE` 22x. Two-static-map architecture documented: `SECTOR_PE_MAP` (fundamental.py) = current-year forward scoring; `SECTOR_LONGRUN_PE` (sector_valuation.py) = structural 5-yr median for regime + discovery. Discovery PE filter (BF-17) uses structural median; fundamental scoring continues to use forward benchmarks. |
+| (BF-16 discovery PE + consensus gate) | Filter 2 in discovery pre-screen replaced flat `PE < 50` with sector-relative three-tier logic (Tier A/B/C). Consensus gate added to orchestrator synthesis path + discovery CRITICAL tier (prevents 1-agent BUY promotions). Hallucination false-positive root causes fixed: `fact_check.txt` tolerances now metric-specific (PE ±15%, revenue ±20%, etc.); derived/computed claims (`upside_pct`, `danger_drop_pct`) removed from `_extract_claims()` in `fact_checker.py`. |
 | (P5-D/E audit fix) | Interface & DB audit — 3 bugs fixed in `outcome_tracker.py`: (1) removed `progress=False` from `yf.download()` (deprecated yfinance 1.2.x); (2) changed `.in_("outcome_t90", ["PENDING", None])` → `.or_("outcome_t90.eq.PENDING,outcome_t90.is.null")` (Python `None` in `.in_()` generates literal `'None'` string, never matches SQL NULL); (3) all 3 P5-D/E functions now catch PGRST column-not-found errors and fall back gracefully (empty data) instead of HTTP 500 when migration not yet applied. Full audit: 21 dashboard apiFetch() calls verified vs defined routes; all DB column names verified vs code writes; worker imports verified vs exported functions. |
 | (P5-D/E) | P5-D: `run_forward_polling()` in outcome_tracker.py — daily 16:30 IST batch live price snapshot (alpha_live/return_live/days_live) + t+30 milestone; `db/migrations/p5d_live_performance_columns.sql`; `job_forward_poller()` in worker.py. P5-E: `/api/performance/live` + `/api/attribution/live` endpoints; `LivePerformancePanel` component in dashboard (open positions table, by-action alpha tiles, avg return/alpha header); `AgentAttributionPanel` upgraded to show live attribution mode before 90d data exists |
 | (P5-A/B) | P5-A: `compute_agent_attribution()` + `run_attribution_analysis()` added to `agents/outcome_tracker.py`; `GET /api/attribution/agents` endpoint — per-agent hit rate + avg alpha from resolved recommendation_outcomes. P5-B: `agents/paper_portfolio.py` — auto-follows BUY recs (FULL=₹10k/HALF=₹5k/QUARTER=₹2.5k), SL/target/horizon exits, daily snapshot; `db/migrations/create_paper_portfolio.sql`; worker jobs 07:05/16:15 IST; `GET /api/paper/portfolio` + `GET /api/paper/history` endpoints; PaperPortfolioPanel + AgentAttributionPanel in dashboard; 49 tests |

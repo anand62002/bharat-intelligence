@@ -361,25 +361,61 @@ def _get_sector_pe(sector: str) -> float:
     """
     Return the sector median P/E for the given sector string.
 
-    Delegates to the SECTOR_PE_MAP in agents/fundamental.py — single source of
-    truth for all sector PE benchmarks. Falls back to DEFAULT_SECTOR_PE (22x)
-    for unknown sectors.
+    Three-layer lookup (most data-driven → most static):
 
-    Used by Filter 2 of prescreen() to compute PE relative to peers rather than
-    comparing against a flat absolute threshold.
+      1. compute_rolling_longrun_pe() from sector_pe_snapshots — live DB median
+         built from real NSE/yfinance daily observations.  Only used when the
+         DB has >= 90 data points for this sector (≈3 months of daily runs).
+         Automatically improves as the platform accumulates history.
+
+      2. SECTOR_LONGRUN_PE in agents/sector_valuation.py — the "5-year structural
+         median" calibrated to Nifty sectoral indices (Dec 2019 – Dec 2024).
+         This is the canonical structural benchmark — used when live DB is thin
+         or Supabase is unavailable.
+
+      3. DEFAULT_SECTOR_PE (22.0) — Nifty 500 long-run median. Fallback for
+         completely unknown sectors or import failures.
+
+    NOTE: agents/fundamental.py has its own SECTOR_PE_MAP with slightly different
+    values (calibrated for current-year scoring rather than structural medians).
+    This function deliberately uses SECTOR_LONGRUN_PE (structural median) because
+    the discovery pre-screen is a relative filter — we want "cheap vs long-run
+    history", not "cheap vs today's forward estimates".
 
     Examples:
         "Energy"  → 12.0   (not cheap at PE 25, but cheap at PE 10)
-        "FMCG"    → 48.0   (PE 40 is actually a value signal here)
+        "FMCG"    → 44.0   (PE 40 is actually a value signal here)
         "Banking" → 14.0   (PE 18 is a mild premium, not a red flag)
         ""        → 22.0   (default NSE 500 long-run median)
     """
-    try:
-        from agents.fundamental import SECTOR_PE_MAP, DEFAULT_SECTOR_PE
-    except ImportError:
-        return 22.0  # safe fallback if fundamental unavailable
+    _DEFAULT = 22.0
     key = (sector or "").strip().lower()
-    return SECTOR_PE_MAP.get(key, DEFAULT_SECTOR_PE)
+    if not key:
+        return _DEFAULT
+
+    # Layer 1: live rolling median from sector_pe_snapshots (auto-updating)
+    try:
+        from scheduler.sector_pe_tracker import compute_rolling_longrun_pe
+        live_pe = compute_rolling_longrun_pe(key)
+        if live_pe is not None:
+            return live_pe
+    except Exception:
+        pass  # Supabase unavailable, tracker import failed, or insufficient data
+
+    # Layer 2: static 5-year structural median from sector_valuation.py
+    try:
+        from agents.sector_valuation import SECTOR_LONGRUN_PE
+        if key in SECTOR_LONGRUN_PE:
+            return SECTOR_LONGRUN_PE[key]
+    except ImportError:
+        pass
+
+    # Layer 3: DEFAULT_SECTOR_PE from fundamental.py (Nifty 500 long-run median)
+    try:
+        from agents.fundamental import DEFAULT_SECTOR_PE
+        return DEFAULT_SECTOR_PE
+    except ImportError:
+        return _DEFAULT
 
 
 def prescreen(
@@ -402,8 +438,8 @@ def prescreen(
            Tier C: PE ≤ sector_median_PE × 2.0 AND PE ≤ 80 AND revenue_growth > 30%
                    → growth premium justified by strong growth
            Hard fail: PE > 80  (absolute cap regardless of sector or growth)
-           (sector_median_PE from SECTOR_PE_MAP in fundamental.py — same source of
-            truth used by the fundamental scoring agent)
+           (sector_median_PE from three-layer lookup: live DB rolling median →
+            SECTOR_LONGRUN_PE in sector_valuation.py → DEFAULT_SECTOR_PE 22x)
       3. Institutional holding ≥ 5%  (smart money present)
       4. Revenue growth YoY > 15%  (business momentum)
       5. Price above 200-day EMA   (uptrend confirmed)
