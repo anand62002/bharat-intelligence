@@ -234,7 +234,8 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/api/governance/research` | Research proposals with debate status computed |
 | GET | `/api/market/pulse` | Live yfinance prices (NIFTY, SENSEX, GOLD, CRUDE, VIX, FII) — 60s cache |
 | GET | `/api/warren_bot/{symbol}` | On-demand Buffett/Jhunjhunwala quality score — 24h Supabase cache |
-| GET | `/api/backtest/summary` | Walk-forward backtest summary from `backtest_results` — `?split=TEST\|TRAIN\|FULL&limit=5` |
+| GET | `/api/backtest/summary` | Walk-forward backtest summary from `backtest_results` — `?split=TEST\|TRAIN\|FULL&limit=5` — powers P6-B BacktestPanel |
+| GET | `/api/performance/calibration` | P6-A: confidence calibration — buckets composite_score into 5 tiers (50–60, 60–70, 70–80, 80–90, 90+), returns expected vs actual hit rate per tier |
 | GET | `/api/paper/portfolio` | P5-B: paper portfolio — open positions, recent closed, summary stats, win rate, avg alpha |
 | GET | `/api/paper/history` | P5-B: daily `paper_portfolio_snapshots` for P&L vs Nifty chart — `?days=180` |
 | GET | `/api/attribution/agents` | P5-A: per-agent hit rate + avg alpha derived from resolved recommendation_outcomes |
@@ -315,7 +316,10 @@ python -m agents.discovery_screener --coverage-only          # print stats and e
 | 1060–1230 | GovernanceResearchTab component |
 | 1230–1350 | Charts and sub-components |
 | 1350–1520 | ARIAPanel component (AI chat) |
-| 1520–1900 | App() root component — state, useEffect, routing |
+| 1520–2250 | LivePerformancePanel (P5-E), AgentAttributionPanel (P5-A) |
+| 2250–2450 | ConfidenceCalibrationChart (P6-A), TopCallsPanel (P6-A), BacktestPanel (P6-B) |
+| 2450–2800 | PerformanceTab component — LivePerf + accuracy + calibration + top calls + attribution + backtest |
+| 2800–end  | App() root component — state, useEffect, routing |
 
 **IS_LIVE pattern:**
 ```javascript
@@ -533,6 +537,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (P6-A/B) | P6-A: `ConfidenceCalibrationChart` — buckets composite_score into 5 tiers, shows expected vs actual hit rate (calibration quality); `TopCallsPanel` — top 5 best/worst calls by t90 alpha. New `/api/performance/calibration` endpoint. P6-B: `BacktestPanel` — TRAIN/TEST/FULL split selector, summary tiles (avg hit rate/alpha/Sharpe/drawdown), per-run monthly table; wires to existing `/api/backtest/summary`. Both panels show proper empty states until data accumulates. |
 | (BF-17 sector PE fix) | `_get_sector_pe()` in discovery_screener.py upgraded to three-layer lookup: (1) `compute_rolling_longrun_pe()` from live `sector_pe_snapshots` DB — auto-activates when ≥90 data points accumulated; (2) `SECTOR_LONGRUN_PE` from `sector_valuation.py` (5-yr structural median); (3) `DEFAULT_SECTOR_PE` 22x. Two-static-map architecture documented: `SECTOR_PE_MAP` (fundamental.py) = current-year forward scoring; `SECTOR_LONGRUN_PE` (sector_valuation.py) = structural 5-yr median for regime + discovery. Discovery PE filter (BF-17) uses structural median; fundamental scoring continues to use forward benchmarks. |
 | (BF-16 discovery PE + consensus gate) | Filter 2 in discovery pre-screen replaced flat `PE < 50` with sector-relative three-tier logic (Tier A/B/C). Consensus gate added to orchestrator synthesis path + discovery CRITICAL tier (prevents 1-agent BUY promotions). Hallucination false-positive root causes fixed: `fact_check.txt` tolerances now metric-specific (PE ±15%, revenue ±20%, etc.); derived/computed claims (`upside_pct`, `danger_drop_pct`) removed from `_extract_claims()` in `fact_checker.py`. |
 | (P5-D/E audit fix) | Interface & DB audit — 3 bugs fixed in `outcome_tracker.py`: (1) removed `progress=False` from `yf.download()` (deprecated yfinance 1.2.x); (2) changed `.in_("outcome_t90", ["PENDING", None])` → `.or_("outcome_t90.eq.PENDING,outcome_t90.is.null")` (Python `None` in `.in_()` generates literal `'None'` string, never matches SQL NULL); (3) all 3 P5-D/E functions now catch PGRST column-not-found errors and fall back gracefully (empty data) instead of HTTP 500 when migration not yet applied. Full audit: 21 dashboard apiFetch() calls verified vs defined routes; all DB column names verified vs code writes; worker imports verified vs exported functions. |
@@ -693,7 +698,7 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 4 (P4)** ✅ COMPLETE (except P4-D): P4-A commentary grounding ✅; P4-B symbol cache persistence ✅ (was already built); P4-C governance numerical grounding ✅; P4-D Angel One options ⬜ (lowest priority, needs TOTP secret)
 - **Dashboard items (DB-6→DB-10)** ✅ ALL DONE: DB-6 PerformanceTab (was already built); DB-7 live news panel; DB-8 holdings filter; DB-9 "What ran today?" ARIA button; DB-10 Excel export fallback
 - **Phase 5 (P5)** ✅ ALL DONE: P5-A (outcome tracker + attribution) ✅; P5-B (paper portfolio) ✅; P5-C (outcome seeder) ✅; P5-D (forward poller — batch live prices 16:30 IST, alpha_live/return_live/days_live, t+30 milestone) ✅; P5-E (live attribution dashboard — LivePerformancePanel + upgraded AgentAttributionPanel) ✅. Migration `db/migrations/p5d_live_performance_columns.sql` ✅ applied in Supabase.
-- **Phase 6 (P6)**: System perf tab (P6-A), backtest panel (P6-B), morning brief (P6-C), elite news engine (P6-D)
+- **Phase 6 (P6)**: P6-A ✅ (confidence calibration + top/worst calls in PerformanceTab); P6-B ✅ (backtest panel — TRAIN/TEST/FULL split selector, monthly runs table); P6-C (morning brief) ⬜; P6-D (elite news engine) ⬜
 - **OPS-2** 🔄 Recurring: Weekly interface + DB audit every Sunday — routes vs dashboard, column names vs code, worker imports, yfinance/Supabase API patterns
 
 **Estimated additional monthly cost at full build:** ₹1,039–3,498/month (Quantsapp options feed + Trendlyne fundamentals backup + OpenAI GPT-4o-mini judges)

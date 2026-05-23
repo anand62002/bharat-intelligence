@@ -2246,6 +2246,266 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
 }
 
 
+// ─── CONFIDENCE CALIBRATION CHART (P6-A) ─────────────────────────────────────
+function ConfidenceCalibrationChart({ calibration }) {
+  const buckets = calibration?.buckets || [];
+  const resolved = calibration?.total_resolved || 0;
+  const anyData = buckets.some(b => b.total > 0);
+
+  return (
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:9}}>
+        <div>
+          <div style={{fontSize:10,fontWeight:700,color:C.accent}}>Confidence Calibration</div>
+          <div style={{fontSize:8,color:C.muted,marginTop:1}}>
+            Does our stated confidence predict actual hit rates?
+          </div>
+        </div>
+        {resolved > 0 && (
+          <div style={{fontSize:8,color:C.muted,background:C.bg,borderRadius:5,padding:"3px 7px"}}>
+            {resolved} resolved
+          </div>
+        )}
+      </div>
+
+      {!anyData ? (
+        <div style={{textAlign:"center",padding:"16px 0"}}>
+          <div style={{fontSize:9,color:C.muted}}>📐 Calibration data will appear once</div>
+          <div style={{fontSize:9,color:C.muted}}>the first 90-day outcomes are resolved.</div>
+          <div style={{fontSize:8,color:C.textDim,marginTop:4}}>First results ~90 days after the system starts generating recommendations.</div>
+        </div>
+      ) : (
+        <>
+          {/* Bar chart: expected vs actual per tier */}
+          <div style={{display:"flex",alignItems:"flex-end",gap:6,height:80,marginBottom:6}}>
+            {buckets.filter(b=>b.total>0).map((b,i)=>{
+              const actual   = b.hit_rate_pct;
+              const expected = b.expected_pct;
+              const hActual  = actual   != null ? Math.round(actual   * 0.72) : 0;
+              const hExpected= expected != null ? Math.round(expected * 0.72) : 0;
+              const diff     = actual != null ? actual - expected : null;
+              const color    = diff == null ? C.muted
+                             : diff >= -5  ? C.green
+                             : diff >= -15 ? C.orange
+                             : C.red;
+              return (
+                <div key={b.label} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:1}}>
+                  {/* Actual bar */}
+                  <div style={{width:"100%",display:"flex",gap:2,alignItems:"flex-end",height:72}}>
+                    <div title={`Expected: ${expected}%`} style={{flex:1,height:hExpected,background:`${C.accent}55`,borderRadius:"2px 2px 0 0",minHeight:2}}/>
+                    <div title={`Actual: ${actual != null ? actual+"%" : "—"} (${b.hits}/${b.total} hits)`}
+                      style={{flex:1,height:hActual,background:color+"cc",borderRadius:"2px 2px 0 0",minHeight:actual!=null?2:0}}/>
+                  </div>
+                  <div style={{fontSize:7,color:C.muted,whiteSpace:"nowrap"}}>{b.label}</div>
+                  {actual != null && (
+                    <div style={{fontSize:7,fontWeight:700,color}}>
+                      {actual}%
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:"flex",gap:12,marginTop:4}}>
+            <div style={{display:"flex",alignItems:"center",gap:4}}>
+              <div style={{width:8,height:8,background:C.accent+"55",borderRadius:1}}/>
+              <span style={{fontSize:7,color:C.muted}}>Expected (midpoint)</span>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:4}}>
+              <div style={{width:8,height:8,background:C.green+"cc",borderRadius:1}}/>
+              <span style={{fontSize:7,color:C.muted}}>Actual hit rate</span>
+            </div>
+            <div style={{fontSize:7,color:C.muted,marginLeft:"auto"}}>
+              Well-calibrated: actual ≈ expected per tier
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ─── TOP / WORST CALLS PANEL (P6-A) ──────────────────────────────────────────
+function TopCallsPanel({ outcomes }) {
+  const all = Array.isArray(outcomes?.outcomes)
+    ? outcomes.outcomes.filter(r => r.alpha_t90 != null && r.outcome_t90 !== "PENDING")
+    : [];
+
+  if (all.length === 0) {
+    return (
+      <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
+        <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:6}}>Best & Worst Calls</div>
+        <div style={{fontSize:9,color:C.muted,textAlign:"center",padding:"12px 0"}}>
+          Top & worst performers will appear once 90-day outcomes are resolved.
+        </div>
+      </div>
+    );
+  }
+
+  const sorted  = [...all].sort((a,b) => b.alpha_t90 - a.alpha_t90);
+  const best5   = sorted.slice(0,5);
+  const worst5  = sorted.slice(-5).reverse();
+
+  const Row = ({r, rank, good}) => {
+    const pct = r.alpha_t90 != null ? (r.alpha_t90*100).toFixed(1) : null;
+    return (
+      <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 0",borderBottom:`1px solid ${C.border}22`}}>
+        <span style={{fontSize:8,color:C.muted,width:14,textAlign:"right"}}>{rank}</span>
+        <span style={{fontSize:9,fontWeight:700,color:"white",fontFamily:"JetBrains Mono",flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.symbol}</span>
+        <Tag color={r.action==="BUY"?C.green:r.action==="SELL"?C.red:r.action==="HOLD"?C.teal:C.orange}>{r.action}</Tag>
+        <span style={{fontSize:8,color:C.muted,minWidth:44,textAlign:"right"}}>{(r.rec_date||"").slice(0,10)}</span>
+        {pct != null && (
+          <span style={{fontSize:9,fontWeight:700,color:good?C.green:C.red,minWidth:44,textAlign:"right"}}>
+            {good?"+":""}{pct}%
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
+      <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:10}}>Best & Worst Calls (90-day alpha vs NIFTY)</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+        <div>
+          <div style={{fontSize:8,fontWeight:700,color:C.green,marginBottom:5,display:"flex",alignItems:"center",gap:4}}>
+            <span>▲</span><span>TOP 5 CALLS</span>
+          </div>
+          {best5.map((r,i) => <Row key={r.id||i} r={r} rank={i+1} good={true}/>)}
+        </div>
+        <div>
+          <div style={{fontSize:8,fontWeight:700,color:C.red,marginBottom:5,display:"flex",alignItems:"center",gap:4}}>
+            <span>▼</span><span>WORST 5 CALLS</span>
+          </div>
+          {worst5.map((r,i) => <Row key={r.id||i} r={r} rank={i+1} good={false}/>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── BACKTEST RESULTS PANEL (P6-B) ───────────────────────────────────────────
+function BacktestPanel({ backtestData, apiLoaded }) {
+  const [split, setSplit] = useState("TEST");
+  const SPLITS = ["TEST","TRAIN","FULL"];
+  const SPLIT_LABEL = { TEST:"Out-of-sample (2023–2024)", TRAIN:"In-sample (2021–2022)", FULL:"Full period" };
+
+  const rows = Array.isArray(backtestData?.results) ? backtestData.results : [];
+  const splitRows = rows.filter(r => r.split_type === split);
+
+  const avgMetric = (key) => {
+    const vals = splitRows.map(r => r[key]).filter(v => v != null);
+    return vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length) : null;
+  };
+
+  const avgHR    = avgMetric("hit_rate_90d");
+  const avgAlpha = avgMetric("avg_alpha_90d");
+  const avgSharpe= avgMetric("sharpe_ratio");
+  const avgDD    = avgMetric("max_drawdown");
+
+  return (
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+        <div>
+          <div style={{fontSize:10,fontWeight:700,color:C.accent}}>Walk-Forward Backtest</div>
+          <div style={{fontSize:8,color:C.muted,marginTop:1}}>
+            Monthly runs on NSE universe — signal quality validation
+          </div>
+        </div>
+        {/* Split selector */}
+        <div style={{display:"flex",gap:4}}>
+          {SPLITS.map(s => (
+            <button key={s} onClick={()=>setSplit(s)} style={{
+              background: split===s ? C.accent+"33" : "transparent",
+              border: `1px solid ${split===s ? C.accent : C.border}`,
+              borderRadius:5, padding:"3px 8px", color: split===s ? C.accent : C.muted,
+              fontSize:8, fontWeight:700, cursor:"pointer"
+            }}>{s}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Split description */}
+      <div style={{fontSize:8,color:C.textDim,marginBottom:10,padding:"4px 8px",background:C.bg,borderRadius:5}}>
+        {SPLIT_LABEL[split]}
+        {split==="TEST" && <span style={{color:C.green,marginLeft:6}}>← most meaningful (unseen data)</span>}
+      </div>
+
+      {splitRows.length === 0 ? (
+        <div style={{textAlign:"center",padding:"20px 0"}}>
+          <div style={{fontSize:9,color:C.muted}}>📊 Backtest runs on the 1st of each month.</div>
+          <div style={{fontSize:8,color:C.textDim,marginTop:4}}>
+            {apiLoaded
+              ? "First results available after the next monthly backtest run."
+              : "Loading..."}
+          </div>
+          <div style={{fontSize:8,color:C.textDim,marginTop:2}}>
+            Manual trigger: <code style={{color:C.accent}}>python -m agents.backtester --dry-run</code>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Summary tiles */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:12}}>
+            {[
+              { label:"Avg Hit Rate", value: avgHR!=null ? avgHR.toFixed(1)+"%":"-", good: avgHR!=null&&avgHR>=55, icon:"🎯" },
+              { label:"Avg Alpha 90d", value: avgAlpha!=null ? (avgAlpha>=0?"+":"")+avgAlpha.toFixed(2)+"%":"-", good: avgAlpha!=null&&avgAlpha>=3, icon:"📈" },
+              { label:"Avg Sharpe", value: avgSharpe!=null ? avgSharpe.toFixed(2):"-", good: avgSharpe!=null&&avgSharpe>=1.0, icon:"⚡" },
+              { label:"Avg Max DD", value: avgDD!=null ? (avgDD*100).toFixed(1)+"%":"-", good: avgDD!=null&&avgDD>-0.15, icon:"🛡️" },
+            ].map(({label,value,good,icon})=>(
+              <div key={label} style={{background:C.bg,borderRadius:7,padding:9,textAlign:"center",border:`1px solid ${good?C.green+"44":C.border}`}}>
+                <div style={{fontSize:12,marginBottom:3}}>{icon}</div>
+                <div style={{fontSize:12,fontWeight:800,color:good?C.green:value==="-"?C.muted:C.orange,fontFamily:"JetBrains Mono"}}>{value}</div>
+                <div style={{fontSize:7,color:C.muted,marginTop:2}}>{label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Runs table */}
+          <div style={{fontSize:9,fontWeight:700,color:C.muted,marginBottom:6}}>Monthly runs ({splitRows.length})</div>
+          <div style={{background:C.bg,borderRadius:6,overflow:"hidden"}}>
+            <div style={{display:"grid",gridTemplateColumns:"80px 100px 60px 70px 70px 60px 70px",gap:0,padding:"5px 10px",borderBottom:`1px solid ${C.border}`}}>
+              {["Run Date","Period","Signals","Hit Rate","Alpha 90d","Sharpe","Max DD"].map(h=>(
+                <span key={h} style={{fontSize:7,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</span>
+              ))}
+            </div>
+            {splitRows.map((r,i)=>{
+              const hrGood = r.hit_rate_90d!=null && r.hit_rate_90d>=55;
+              const alphaGood = r.avg_alpha_90d!=null && r.avg_alpha_90d>=3;
+              const ddBad = r.max_drawdown!=null && r.max_drawdown<-0.20;
+              return (
+                <div key={r.run_date||i} style={{display:"grid",gridTemplateColumns:"80px 100px 60px 70px 70px 60px 70px",gap:0,padding:"5px 10px",borderBottom:i<splitRows.length-1?`1px solid ${C.border}22`:"none",background:i%2===0?"transparent":C.surface+"44"}}>
+                  <span style={{fontSize:8,color:"white",fontFamily:"JetBrains Mono"}}>{(r.run_date||"").slice(0,10)}</span>
+                  <span style={{fontSize:7,color:C.muted}}>{(r.period_start||"").slice(0,7)} – {(r.period_end||"").slice(0,7)}</span>
+                  <span style={{fontSize:8,color:C.muted}}>{r.total_signals??"-"}</span>
+                  <span style={{fontSize:9,fontWeight:700,color:hrGood?C.green:r.hit_rate_90d!=null?C.orange:C.muted}}>
+                    {r.hit_rate_90d!=null ? r.hit_rate_90d.toFixed(1)+"%" : "—"}
+                  </span>
+                  <span style={{fontSize:9,fontWeight:700,color:alphaGood?C.green:r.avg_alpha_90d!=null?C.orange:C.muted}}>
+                    {r.avg_alpha_90d!=null ? (r.avg_alpha_90d>=0?"+":"")+r.avg_alpha_90d.toFixed(2)+"%" : "—"}
+                  </span>
+                  <span style={{fontSize:9,fontWeight:700,color:r.sharpe_ratio!=null&&r.sharpe_ratio>=1.0?C.green:r.sharpe_ratio!=null?C.orange:C.muted}}>
+                    {r.sharpe_ratio!=null ? r.sharpe_ratio.toFixed(2) : "—"}
+                  </span>
+                  <span style={{fontSize:9,fontWeight:700,color:ddBad?C.red:C.green}}>
+                    {r.max_drawdown!=null ? (r.max_drawdown*100).toFixed(1)+"%" : "—"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{marginTop:8,fontSize:7,color:C.muted}}>
+            Target: hit rate &gt;55% · avg alpha &gt;+3% · Sharpe &gt;1.0 · max drawdown &lt;-20%
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
 // ─── AGENT ATTRIBUTION PANEL (P5-A) ──────────────────────────────────────────
 function AgentAttributionPanel({attribution, liveAttribution}){
   // Prefer resolved 90d data; fall back to live attribution if not yet available
@@ -2453,7 +2713,7 @@ function LivePerformancePanel({livePerf}){
 
 
 // ─── PERFORMANCE TAB ─────────────────────────────────────────────────────────
-function PerformanceTab({accuracy, outcomes, alphaChart, attribution, livePerf, liveAttribution, apiLoaded}){
+function PerformanceTab({accuracy, outcomes, alphaChart, attribution, livePerf, liveAttribution, calibration, backtestData, apiLoaded}){
   const byAction = accuracy?.by_action || {};
   const total    = accuracy?.total_tracked || 0;
   const ACTIONS  = ["BUY","HOLD","SELL","AVOID"];
@@ -2570,8 +2830,15 @@ function PerformanceTab({accuracy, outcomes, alphaChart, attribution, livePerf, 
         </div>
       )}
 
+      {/* Confidence Calibration + Top/Worst Calls (P6-A) */}
+      <ConfidenceCalibrationChart calibration={calibration} />
+      <TopCallsPanel outcomes={outcomes} />
+
       {/* Agent Attribution (P5-A) */}
       <AgentAttributionPanel attribution={attribution} liveAttribution={liveAttribution} />
+
+      {/* Walk-Forward Backtest (P6-B) */}
+      <BacktestPanel backtestData={backtestData} apiLoaded={apiLoaded} />
 
       {/* Recent outcomes table */}
       {recent.length > 0 && (
@@ -2657,6 +2924,9 @@ export default function App(){
   // P5-D/E: Live performance + live attribution
   const [livePerf,          setLivePerf]          = useState(null);
   const [liveAttribution,   setLiveAttribution]   = useState(null);
+  // P6-A: Confidence calibration + P6-B: Backtest results
+  const [calibrationData,   setCalibrationData]   = useState(null);
+  const [backtestData,      setBacktestData]      = useState(null);
   // apiLoaded: false until the initial Promise.allSettled() round-trip completes.
   // Used to distinguish "loading" from "loaded + empty".
   const [apiLoaded,         setApiLoaded]         = useState(!IS_LIVE);
@@ -2735,6 +3005,12 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/attribution/live")    // P5-E: live agent attribution
         .then(d=>{ if(d) setLiveAttribution(d); })
+        .catch(()=>{}),
+      apiFetch("/api/performance/calibration")  // P6-A: confidence calibration
+        .then(d=>{ if(d) setCalibrationData(d); })
+        .catch(()=>{}),
+      apiFetch("/api/backtest/summary?split=TEST&limit=12")  // P6-B: backtest TEST split
+        .then(d=>{ if(d) setBacktestData(d); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -3151,6 +3427,8 @@ export default function App(){
                 attribution={agentAttribution}
                 livePerf={livePerf}
                 liveAttribution={liveAttribution}
+                calibration={calibrationData}
+                backtestData={backtestData}
                 apiLoaded={apiLoaded}
               />
             )}

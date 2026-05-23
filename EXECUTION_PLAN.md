@@ -77,12 +77,12 @@
 | P5-C | Recommendation outcome seeder — backfill open recs into recommendation_outcomes table | Phase 5 | ✅ **DONE** | 2026-05-17 |
 | P5-D | Forward outcome poller — batch live price snapshot daily at 16:30 IST + t+30 milestone; `run_forward_polling()` in outcome_tracker.py; new DB columns (price_live/alpha_live/return_live/days_live + price_t30/outcome_t30) | Phase 5 | ✅ **DONE** | 2026-05-20 |
 | P5-E | Attribution dashboard — `LivePerformancePanel` (live open positions table, avg alpha, by-action tiles); `AgentAttributionPanel` upgraded to show live attribution before 90d data; 2 new API endpoints (`/api/performance/live`, `/api/attribution/live`) | Phase 5 | ✅ **DONE** | 2026-05-20 |
-| P6-A | System performance dashboard tab | Phase 6 | ⬜ TODO | — |
-| P6-B | Backtest results dashboard panel | Phase 6 | ⬜ TODO | — |
+| P6-A | System performance dashboard — `ConfidenceCalibrationChart` (5 confidence tiers, expected vs actual hit rate); `TopCallsPanel` (top 5 best/worst calls by t90 alpha); new `/api/performance/calibration` endpoint; all empty-state-safe | Phase 6 | ✅ **DONE** | 2026-05-23 |
+| P6-B | Backtest results panel — `BacktestPanel` in PerformanceTab; TRAIN/TEST/FULL split selector; summary tiles (avg hit rate/alpha/Sharpe/max DD); monthly runs table; wires to `/api/backtest/summary`; empty-state: "runs on 1st of month" | Phase 6 | ✅ **DONE** | 2026-05-23 |
 | P6-C | Market tab: daily start-of-day + end-of-day India market news digest (Claude + OpenAI dual summary) — scheduled 08:45 IST + 16:15 IST, stored in Supabase, served via `/api/market/digest`, rendered in Markets tab as collapsible "Morning Brief" / "Closing Digest" cards | Phase 6 | ⬜ TODO | — |
 | P6-D | Elite News Intelligence Engine — FinBERT semantic layer + event classification (Janus-Q) + temporal decay + entity-centric aggregation + LLM ensemble (Claude+FinBERT) + India-native sources + backtesting loop | Phase 6 | ⬜ TODO | — |
 
-**Progress: 66 / 75 items complete (88%) — OPS-1 review due 2026-05-20 — Phase 7 + Phase 8 added — OPS-2 weekly audit recurring**
+**Progress: 68 / 77 items complete (88%) — OPS-1 review due 2026-05-20 — Phase 7 + Phase 8 added — OPS-2 weekly audit recurring**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -923,8 +923,8 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P5-C** | Rec outcome seeder (backfill open recs into recommendation_outcomes) | Code | None | S | ✅ Done |
 | **P5-D** | Forward outcome poller — daily t+30/60/90 alpha vs NIFTY | Code | None | M | ✅ Done |
 | **P5-E** | Attribution dashboard — per-agent hit rate + alpha over rolling 90d | Code | None | M | ✅ Done |
-| **P6-A** | System performance dashboard tab | Code | None | M | ⬜ TODO |
-| **P6-B** | Backtest results dashboard panel | Code | None | S | ⬜ TODO |
+| **P6-A** | System performance dashboard tab — calibration chart + top/worst calls + calibration API | Code | None | M | ✅ Done |
+| **P6-B** | Backtest results dashboard panel — TRAIN/TEST/FULL splits, monthly runs table | Code | None | S | ✅ Done |
 | **P6-C** | Market tab daily news digest (Morning Brief + Closing Digest, Claude+OpenAI) | Code | OpenAI API (existing) | L | ⬜ TODO |
 | **P7-A** | Live trading agent — signal + Telegram alert engine | Code | None (Telegram free) | L | ⬜ TODO |
 | **P7-B** | Paper-to-live promotion gate — 60d paper validation before live signals | Code | None | M | ⬜ TODO |
@@ -967,8 +967,8 @@ After every build session, before closing:
 
 ---
 
-*Document version: 4.4 — 2026-05-20 (P5-A/B/C/D/E all ✅ Done; OPS-2 weekly interface audit added as recurring maintenance)*  
-*Next milestone: P6-A system perf tab → P6-B backtest panel → P6-C morning brief → P6-D elite news engine*
+*Document version: 4.5 — 2026-05-23 (P6-A confidence calibration + top/worst calls ✅; P6-B backtest panel ✅; BF-17 sector PE three-layer lookup ✅)*  
+*Next milestone: P6-C morning brief → P6-D elite news engine → P7-A live trading agent*
 
 ---
 

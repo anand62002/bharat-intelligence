@@ -2444,6 +2444,87 @@ async def get_performance_accuracy(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/performance/calibration", tags=["performance"])
+async def get_performance_calibration(
+    _: None = Depends(require_api_key),
+):
+    """
+    Confidence calibration: how well does our stated confidence predict actual hit rate?
+
+    Buckets recommendation_outcomes by composite_score (0-100) into 5 tiers.
+    For each tier: expected hit rate (bucket midpoint) vs actual hit rate (% HIT).
+
+    A well-calibrated system → actual ≈ expected across all buckets.
+    Over-confident → actual < expected. Under-confident → actual > expected.
+
+    Returns:
+      {
+        buckets: [
+          { label: "50–60", min: 50, max: 60, total: 12, hits: 6,
+            hit_rate_pct: 50.0, expected_pct: 55.0 },
+          ...
+        ],
+        total_resolved: int,
+        note: str
+      }
+    """
+    if not _supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        rows = (
+            _supabase
+            .table("recommendation_outcomes")
+            .select("composite_score, outcome_t90")
+            .not_.is_("composite_score", "null")
+            .not_.is_("outcome_t90", "null")
+            .neq("outcome_t90", "PENDING")
+            .execute()
+            .data or []
+        )
+
+        # Five confidence tiers (composite_score is 0–100)
+        TIERS = [
+            ("50–60", 50, 60),
+            ("60–70", 60, 70),
+            ("70–80", 70, 80),
+            ("80–90", 80, 90),
+            ("90+",   90, 101),
+        ]
+
+        buckets = []
+        for label, lo, hi in TIERS:
+            tier_rows = [
+                r for r in rows
+                if r.get("composite_score") is not None
+                and lo <= float(r["composite_score"]) < hi
+            ]
+            hits  = sum(1 for r in tier_rows if r.get("outcome_t90") == "HIT")
+            total = len(tier_rows)
+            midpt = (lo + min(hi - 1, 95)) / 2   # expected midpoint
+            buckets.append({
+                "label":        label,
+                "min":          lo,
+                "max":          hi,
+                "total":        total,
+                "hits":         hits,
+                "hit_rate_pct": round(hits / total * 100, 1) if total > 0 else None,
+                "expected_pct": round(midpt, 1),
+            })
+
+        total_resolved = len(rows)
+        note = (
+            "Calibration data will appear once the first 90-day outcomes are resolved."
+            if total_resolved == 0
+            else f"{total_resolved} resolved outcomes across all tiers."
+        )
+        return {"buckets": buckets, "total_resolved": total_resolved, "note": note}
+
+    except Exception as exc:
+        log.error("performance/calibration error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/performance/alpha_chart", tags=["performance"])
 async def get_performance_alpha_chart(
     weeks: int = Query(26, description="Number of weeks of history"),
