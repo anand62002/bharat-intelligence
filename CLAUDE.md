@@ -248,8 +248,7 @@ Stock analysis/
 | `paper_portfolio_snapshots` | P5-B daily portfolio P&L | `snapshot_date (unique), total_invested, total_current_value, unrealized_pnl, realized_pnl, total_pnl, total_pnl_pct, open_positions, closed_positions, nifty_value, nifty_return_pct, alpha_pct` |
 | `market_digests` | P6-C daily market briefs | `id (UUID PK), digest_type (MORNING/CLOSING), digest_date (DATE), headline_count, top_themes (jsonb), summary, key_events (jsonb), market_mood, nifty_signal, sectors_in_focus (jsonb), raw_headlines (jsonb), created_at` — unique on (digest_type, digest_date) |
 
-> **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results, create_paper_portfolio, p5d_live_performance_columns)
-> ⚠️ **Pending migration**: `db/migrations/create_market_digests.sql` — run in Supabase SQL Editor to enable P6-C digest storage.
+> **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results, create_paper_portfolio, p5d_live_performance_columns, create_market_digests)
 
 ---
 
