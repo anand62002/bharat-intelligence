@@ -121,8 +121,10 @@ Stock analysis/
 │   #    07:30 — research agent
 │   #    08:00 — earnings calendar refresh
 │   #    08:30 — Breeze token refresh (P1-B)
+│   #    08:45 — market digest MORNING (P6-C)
 │   #    09:15, 11:30, 13:30, 15:15 — portfolio monitor
 │   #    15:45 — options snapshot (uses Breeze if configured)
+│   #    16:20 — market digest CLOSING (P6-C)
 │   #    07:45 (1st of month) — historical backtest (agents/backtester.py)
 │   #    08:15 (1st of month) — RAG corpus auto-refresh (db/auto_seed_rag.py)
 │
@@ -573,6 +575,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (fix macro test) | `tests/test_macro.py`: added `_fetch_india_macro_news` mock to `_mock_analyse_deps` helper — without it, live Google News RSS calls during tests produced a non-zero `news_adj`, breaking `test_score_components_sum` (95 ≠ 100). |
 | (data-leakage-audit) | `governance/performance_tracker.py`: `LeakageViolation` + `DataLeakageReport` dataclasses; `_check_technical_temporal_integrity()` (BLOCKING: ohlcv_last_date > signal_ts+1d; WARNING: stale >7d), `_check_fundamental_temporal_integrity()` (WARNING: data_as_of > signal_ts), `_check_rag_temporal_integrity()` (BLOCKING: matched_event.event_date > signal_ts); `audit_data_leakage()` orchestrates all checks. `agents/technical.py`: added `ohlcv_last_date` field. `agents/fundamental.py`: added `data_as_of` field. `scheduler/orchestrator.py`: leakage audit called in `synthesise_node()` pre-consensus-gate, violations stored in `synthesis_data["metadata"]["leakage_violations"]`. 43 tests added. |
 | (P6-C/D) | P6-C: `agents/market_digest.py` — Morning/Closing digest via single Haiku call; `db/migrations/create_market_digests.sql`; `GET /api/market/digest`; `MarketDigestPanel` React component (mood colour coding, impact badges, themes, sectors, nifty signal); worker jobs 08:45 IST (MORNING) + 16:20 IST (CLOSING). P6-D: `agents/sentiment.py` upgraded with D-1 BSE announcements (`get_bse_announcements()`), D-2 batch event classifier (Janus-Q: 8 event classes, `_batch_classify_headlines()`), D-3 temporal decay (`_temporal_weight()`, event-specific half-lives 2–48h), D-4 FinBERT ensemble (`_call_finbert_hf()`, 0.6×FinBERT+0.4×Haiku on top-5 headlines). `data/fetchers.py`: `get_bse_announcements()` added. 70 new tests (29 market_digest + 41 sentiment_elite); 4 pre-existing sentiment tests fixed (batch classifier mock + `haiku_calls` count fix). |
 | (P6-A/B) | P6-A: `ConfidenceCalibrationChart` — buckets composite_score into 5 tiers, shows expected vs actual hit rate (calibration quality); `TopCallsPanel` — top 5 best/worst calls by t90 alpha. New `/api/performance/calibration` endpoint. P6-B: `BacktestPanel` — TRAIN/TEST/FULL split selector, summary tiles (avg hit rate/alpha/Sharpe/drawdown), per-run monthly table; wires to existing `/api/backtest/summary`. Both panels show proper empty states until data accumulates. |
