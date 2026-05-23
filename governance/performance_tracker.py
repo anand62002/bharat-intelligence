@@ -611,6 +611,281 @@ def _save_proposal(client, proposal: dict, dry_run: bool) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Data Leakage Audit
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# These functions detect *temporal* data leakage — i.e. agent signals that
+# accidentally incorporate price or fundamental data dated AFTER the signal
+# generation timestamp.  Two common failure modes in backtesting / live runs:
+#
+#   1. Look-ahead in technical signals:  yfinance returns a bar whose date is
+#      the current day while the market is still open; indicators computed on
+#      that bar implicitly "know" the intraday close.
+#
+#   2. Future-dated RAG events:  a historical_rag match whose `event_date` is
+#      AFTER signal_ts means we are conditioning the synthesis on news that has
+#      not yet occurred at signal time.
+#
+# Severity levels:
+#   BLOCKING  — the leakage would directly bias the signal; action is
+#               downgraded to HOLD when block_on_leak=True.
+#   WARNING   — possible leakage or stale data; logged but never blocks.
+#
+# Usage (pre-synthesis hook):
+#   report = audit_data_leakage(symbol, agent_results, signal_ts,
+#                               block_on_leak=False)
+#   if report.leaks:
+#       log.warning("[%s] leakage audit: %d violations", symbol, len(report.leaks))
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OHLCV_MAX_FUTURE_BUFFER_DAYS = 1   # allow 1-day tolerance (T+0 bars)
+_OHLCV_MAX_STALE_DAYS         = 7   # flag if latest bar is >7d old
+
+
+@dataclass
+class LeakageViolation:
+    """Single leakage violation detected for one agent."""
+    agent_name: str
+    leak_type:  str      # e.g. "future_ohlcv", "future_rag_event", "stale_ohlcv"
+    details:    str
+    severity:   str      # "BLOCKING" | "WARNING"
+
+
+@dataclass
+class DataLeakageReport:
+    """Full leakage audit result for one symbol."""
+    symbol:       str
+    signal_ts:    datetime
+    leaks:        list = field(default_factory=list)   # list[LeakageViolation]
+    block_signal: bool = False
+
+
+def _check_technical_temporal_integrity(
+    symbol: str,
+    tech_result: dict,
+    signal_ts: datetime,
+) -> list:
+    """
+    Check that the most-recent OHLCV bar used by the technical agent is not
+    dated after the signal generation timestamp (look-ahead) and is not
+    excessively stale (data staleness).
+
+    Returns a list of LeakageViolation (empty = clean).
+    """
+    violations: list = []
+    ohlcv_last = tech_result.get("ohlcv_last_date")
+    if not ohlcv_last:
+        return violations  # field missing — no check possible
+
+    try:
+        last_bar_date = date.fromisoformat(ohlcv_last)
+    except ValueError:
+        return violations
+
+    signal_date = signal_ts.date() if isinstance(signal_ts, datetime) else signal_ts
+
+    # BLOCKING: bar dated more than 1 day after signal_ts
+    if last_bar_date > signal_date + timedelta(days=_OHLCV_MAX_FUTURE_BUFFER_DAYS):
+        violations.append(LeakageViolation(
+            agent_name="technical",
+            leak_type="future_ohlcv",
+            details=(
+                f"OHLCV last bar {ohlcv_last} is "
+                f"{(last_bar_date - signal_date).days}d AFTER signal_ts "
+                f"{signal_date.isoformat()} — look-ahead leakage"
+            ),
+            severity="BLOCKING",
+        ))
+
+    # WARNING: bar is more than 7 days old (data staleness)
+    elif signal_date - last_bar_date > timedelta(days=_OHLCV_MAX_STALE_DAYS):
+        violations.append(LeakageViolation(
+            agent_name="technical",
+            leak_type="stale_ohlcv",
+            details=(
+                f"OHLCV last bar {ohlcv_last} is "
+                f"{(signal_date - last_bar_date).days}d old — indicators may "
+                f"not reflect current market conditions"
+            ),
+            severity="WARNING",
+        ))
+
+    return violations
+
+
+def _check_fundamental_temporal_integrity(
+    symbol: str,
+    fund_result: dict,
+    signal_ts: datetime,
+) -> list:
+    """
+    Check that the fundamental snapshot was fetched on or before signal_ts.
+    Screener.in snapshots are fetched at run-time; this should only fail if
+    the agent result was cached across a date boundary.
+
+    Returns a list of LeakageViolation (empty = clean).
+    """
+    violations: list = []
+    data_as_of = fund_result.get("data_as_of")
+    if not data_as_of:
+        return violations
+
+    try:
+        snapshot_date = date.fromisoformat(data_as_of)
+    except ValueError:
+        return violations
+
+    signal_date = signal_ts.date() if isinstance(signal_ts, datetime) else signal_ts
+
+    # WARNING: snapshot dated after signal_ts
+    # (BLOCKING not used here — screener.in has no sub-day timestamps so we
+    # cannot distinguish deliberate future fetch from a benign T+0 race)
+    if snapshot_date > signal_date:
+        violations.append(LeakageViolation(
+            agent_name="fundamental",
+            leak_type="future_snapshot",
+            details=(
+                f"Fundamental snapshot date {data_as_of} is "
+                f"{(snapshot_date - signal_date).days}d AFTER signal_ts "
+                f"{signal_date.isoformat()} — possible cross-date cache hit"
+            ),
+            severity="WARNING",
+        ))
+
+    return violations
+
+
+def _check_rag_temporal_integrity(
+    symbol: str,
+    rag_result: dict,
+    signal_ts: datetime,
+) -> list:
+    """
+    Verify that no matched historical event in the RAG result is dated after
+    signal_ts.  A future-dated RAG match means the model conditioned on news
+    that had not yet occurred — a direct look-ahead violation.
+
+    Returns a list of LeakageViolation (empty = clean).
+    """
+    violations: list = []
+    matched = rag_result.get("matched_events") or []
+    if not matched:
+        return violations
+
+    signal_date_str = (
+        signal_ts.date().isoformat()
+        if isinstance(signal_ts, datetime)
+        else signal_ts.isoformat() if hasattr(signal_ts, "isoformat")
+        else str(signal_ts)
+    )
+
+    for evt in matched:
+        event_date = evt.get("event_date") or evt.get("date")
+        if not event_date:
+            continue
+        try:
+            # Normalise — event_date may be "YYYY-MM-DD" or full ISO timestamp
+            evt_date_str = str(event_date)[:10]
+            if evt_date_str > signal_date_str:
+                violations.append(LeakageViolation(
+                    agent_name="historical_rag",
+                    leak_type="future_rag_event",
+                    details=(
+                        f"RAG matched event dated {evt_date_str} is AFTER signal_ts "
+                        f"{signal_date_str} — look-ahead in historical context"
+                    ),
+                    severity="BLOCKING",
+                ))
+        except Exception:
+            continue
+
+    return violations
+
+
+def audit_data_leakage(
+    symbol: str,
+    agent_results: dict,
+    signal_ts: Optional[datetime] = None,
+    block_on_leak: bool = False,
+) -> "DataLeakageReport":
+    """
+    Run temporal data-leakage checks across all agent results for a symbol.
+
+    Parameters
+    ----------
+    symbol        : NSE/yfinance symbol string for logging
+    agent_results : dict mapping agent_name → result dict
+                    (as produced by _run_agents_for_symbol in orchestrator)
+    signal_ts     : datetime when the synthesis pipeline started; defaults to
+                    utcnow() when not provided
+    block_on_leak : if True, any BLOCKING violation sets report.block_signal=True
+
+    Returns
+    -------
+    DataLeakageReport  with .leaks list and .block_signal flag
+    """
+    if signal_ts is None:
+        signal_ts = datetime.now(timezone.utc)
+
+    report = DataLeakageReport(symbol=symbol, signal_ts=signal_ts)
+
+    # ── Technical agent ───────────────────────────────────────────────────────
+    tech_result = agent_results.get("technical") or {}
+    if tech_result:
+        for v in _check_technical_temporal_integrity(symbol, tech_result, signal_ts):
+            report.leaks.append(v)
+            if v.severity == "BLOCKING":
+                log.warning(
+                    "[%s] DATA LEAKAGE [BLOCKING] technical/%s: %s",
+                    symbol, v.leak_type, v.details,
+                )
+            else:
+                log.info(
+                    "[%s] DATA LEAKAGE [WARNING] technical/%s: %s",
+                    symbol, v.leak_type, v.details,
+                )
+
+    # ── Fundamental agent ─────────────────────────────────────────────────────
+    fund_result = agent_results.get("fundamental") or {}
+    if fund_result:
+        for v in _check_fundamental_temporal_integrity(symbol, fund_result, signal_ts):
+            report.leaks.append(v)
+            log.info(
+                "[%s] DATA LEAKAGE [WARNING] fundamental/%s: %s",
+                symbol, v.leak_type, v.details,
+            )
+
+    # ── Historical RAG agent ──────────────────────────────────────────────────
+    rag_result = agent_results.get("historical_rag") or {}
+    if rag_result:
+        for v in _check_rag_temporal_integrity(symbol, rag_result, signal_ts):
+            report.leaks.append(v)
+            if v.severity == "BLOCKING":
+                log.warning(
+                    "[%s] DATA LEAKAGE [BLOCKING] historical_rag/%s: %s",
+                    symbol, v.leak_type, v.details,
+                )
+            else:
+                log.info(
+                    "[%s] DATA LEAKAGE [WARNING] historical_rag/%s: %s",
+                    symbol, v.leak_type, v.details,
+                )
+
+    # ── Determine whether to block the signal ────────────────────────────────
+    if block_on_leak:
+        has_blocking = any(v.severity == "BLOCKING" for v in report.leaks)
+        if has_blocking:
+            report.block_signal = True
+            log.warning(
+                "[%s] audit_data_leakage: BLOCKING violation(s) found — "
+                "signal will be downgraded to HOLD",
+                symbol,
+            )
+
+    return report
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main run logic
 # ─────────────────────────────────────────────────────────────────────────────
 

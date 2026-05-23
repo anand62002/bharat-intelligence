@@ -1829,6 +1829,9 @@ def analyse(symbol: str, sector: Optional[str] = None) -> dict:
         "analyst_targets":   analyst_targets if analyst_targets else None,
         "analyst_signal":    analyst_interp.get("signal"),
         "analyst_summary":   analyst_interp.get("summary"),
+        # Temporal metadata for leakage audit — screener.in snapshot is fetched at
+        # signal generation time; we record today's date as the data reference point.
+        "data_as_of":        date.today().isoformat(),
     }
 
     # ── 10. Persist agent run ─────────────────────────────────────────────────

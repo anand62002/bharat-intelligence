@@ -32,7 +32,7 @@ import os
 import re
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, TypedDict
 
@@ -62,6 +62,7 @@ from agents.commodities    import analyse as comm_analyse      # noqa: E402
 from agents.warren_bot     import analyse as warren_analyse    # noqa: E402
 from agents.mgmt_quality   import analyse as mgmt_analyse      # noqa: E402
 from agents.discovery_screener import run_discovery             # noqa: E402
+from governance.performance_tracker import audit_data_leakage   # noqa: E402
 
 # ── LangGraph ─────────────────────────────────────────────────────────────────
 from langgraph.graph import StateGraph, END                    # noqa: E402
@@ -1022,6 +1023,42 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                         synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
             else:
                 synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
+
+            # ── Data leakage audit ────────────────────────────────────────────
+            # Pre-synthesis temporal integrity check: verifies technical OHLCV
+            # bars, fundamental snapshots, and RAG matched events are not dated
+            # after the pipeline start (look-ahead contamination).
+            # block_on_leak=False — warnings logged, action never silently
+            # downgraded.  Set to True in strict backtesting mode if needed.
+            try:
+                _signal_ts = datetime.now(timezone.utc)
+                _leakage_report = audit_data_leakage(
+                    symbol,
+                    agent_results,
+                    signal_ts=_signal_ts,
+                    block_on_leak=False,
+                )
+                if _leakage_report.leaks:
+                    _blocking = [v for v in _leakage_report.leaks if v.severity == "BLOCKING"]
+                    _warnings = [v for v in _leakage_report.leaks if v.severity == "WARNING"]
+                    if _blocking:
+                        log.warning(
+                            "[%s] leakage audit: %d BLOCKING + %d WARNING violation(s)",
+                            symbol, len(_blocking), len(_warnings),
+                        )
+                    else:
+                        log.info(
+                            "[%s] leakage audit: %d WARNING violation(s)",
+                            symbol, len(_warnings),
+                        )
+                    # Store violations in synthesis metadata for downstream reference
+                    synthesis_data.setdefault("metadata", {})["leakage_violations"] = [
+                        {"agent": v.agent_name, "type": v.leak_type,
+                         "severity": v.severity, "details": v.details}
+                        for v in _leakage_report.leaks
+                    ]
+            except Exception as _audit_exc:
+                log.debug("[%s] leakage audit error (non-critical): %s", symbol, _audit_exc)
 
             # ── Consensus gate — prevent single-agent BUY promotions ────────────
             # Applied before earnings guard and validation so adjusted confidence

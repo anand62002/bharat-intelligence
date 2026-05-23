@@ -798,14 +798,25 @@ def analyse(symbol: str) -> dict:
     elif vol_div.get("signal") == "BULLISH_DIVERGENCE":
         total_score = min(100, total_score + 3) # slight bonus for exhaustion signal
 
+    # ── Temporal integrity metadata ──────────────────────────────────────────
+    # ohlcv_last_date: the date of the last OHLCV bar used for indicator
+    # calculations. Used by the data leakage audit in governance/ to verify that
+    # no future-dated price data contaminated the signal.
+    try:
+        _ohlcv_last_date = df.index[-1].date().isoformat()
+    except Exception:
+        _ohlcv_last_date = None
+
     result = {
-        "signal":       signal,
-        "score":        total_score,
-        "detail":       detail,
-        "upside_pct":   round(upside_pct, 2) if upside_pct is not None else None,
-        "data_sources": data_sources,
-        "confidence":   confidence,
-        "agent_name":   AGENT_NAME,
+        "signal":          signal,
+        "score":           total_score,
+        "detail":          detail,
+        "upside_pct":      round(upside_pct, 2) if upside_pct is not None else None,
+        "data_sources":    data_sources,
+        "confidence":      confidence,
+        "agent_name":      AGENT_NAME,
+        # Temporal metadata for leakage audit
+        "ohlcv_last_date": _ohlcv_last_date,
     }
 
     # ── 9. Persist agent run ─────────────────────────────────────────────────
