@@ -442,6 +442,10 @@ def _mock_analyse_deps(monkeypatch, us10y=4.0, dxy=100.0, vix=18.0,
     monkeypatch.setattr("agents.macro.fetch_rbi_repo_rate",   lambda: repo)
     monkeypatch.setattr("agents.macro.get_inr_usd",           lambda: inr_usd)
     monkeypatch.setattr("agents.macro.get_india_vix",         lambda: india_vix)
+    # Suppress live Google News RSS fetch so news_adj is always 0 in unit tests.
+    # Without this, real network calls can return headlines that produce a non-zero
+    # adjustment, breaking assertions that expect score == sum(component_scores).
+    monkeypatch.setattr("agents.macro._fetch_india_macro_news", lambda hours=36: [])
 
 
 class TestAnalyse:
