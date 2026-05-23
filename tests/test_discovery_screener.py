@@ -253,13 +253,36 @@ class TestPrescreen:
         assert len(t1) >= len(t2)
 
     def test_growth_justifies_high_pe(self, monkeypatch):
+        # Tier C: PE within 2× sector median AND revenue growth > 30%
+        # Default sector_pe fallback = 22x → pe must be ≤ 44 for pe_vs_sector ≤ 2.0
+        # Use pe=40 (1.82× sector median), revenue_growth=45% → Tier C fires
+        monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
+                            lambda s, period: _make_df(252, drift=0.05))
+        monkeypatch.setattr("agents.discovery_screener.get_screener_data",
+                            lambda s: {"pe": 40.0, "revenue_growth": 45.0})
+        passes, triggers = prescreen("TEST.NS", fii_data=_good_fii())
+        growth_trigger = any("justified" in t for t in triggers)
+        assert growth_trigger, (
+            f"Expected Tier C 'justified' trigger for PE=40 (1.8x sector median) "
+            f"with 45% revenue growth. Got triggers: {triggers}"
+        )
+
+    def test_pe_exceeds_2x_sector_fails_tier_c(self, monkeypatch):
+        # PE=80 with default sector_pe=22 → pe_vs_sector=3.6x > 2.0 → Tier C fails
+        # Even with strong growth, PE too expensive vs sector → no PE trigger fires
         monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
                             lambda s, period: _make_df(252, drift=0.05))
         monkeypatch.setattr("agents.discovery_screener.get_screener_data",
                             lambda s: {"pe": 80.0, "revenue_growth": 45.0})
-        passes, triggers = prescreen("GROWTH.NS", fii_data=_good_fii())
-        growth_trigger = any("justifies" in t for t in triggers)
-        assert growth_trigger
+        passes, triggers = prescreen("TEST.NS", fii_data=_good_fii())
+        pe_trigger = any(
+            any(kw in t for kw in ("PE", "undervalued", "fair value", "justified"))
+            for t in triggers
+        )
+        assert not pe_trigger, (
+            f"PE=80 (3.6x sector median 22x) should fail all PE tiers. "
+            f"Got triggers: {triggers}"
+        )
 
     def test_screener_none_skips_fundamental_filters(self, monkeypatch):
         monkeypatch.setattr("agents.discovery_screener.get_ohlcv",
