@@ -269,13 +269,34 @@ def _fetch_historical_flows(sessions: int = 10) -> list[dict]:
         from supabase import create_client
         # Fetch more rows than needed so we still have enough after zero-filtering
         client = create_client(url, key)
-        resp = (
-            client.table("institutional_flows")
-            .select("session_date, fii_net, dii_net, fii_buy, fii_sell")
-            .order("session_date", desc=True)
-            .limit(sessions * 3)       # over-fetch to survive zero filtering
-            .execute()
-        )
+        # Try with fii_buy/fii_sell columns (requires add_institutional_flows_buysell.sql
+        # migration to have been applied).  Fall back to net-only columns if the migration
+        # has not been run yet (PGRST column-not-found → HTTP 400).
+        try:
+            resp = (
+                client.table("institutional_flows")
+                .select("session_date, fii_net, dii_net, fii_buy, fii_sell")
+                .order("session_date", desc=True)
+                .limit(sessions * 3)
+                .execute()
+            )
+        except Exception as col_exc:
+            err_str = str(col_exc).lower()
+            if "fii_buy" in err_str or "fii_sell" in err_str or "pgrst" in err_str or "400" in err_str:
+                log.info(
+                    "_fetch_historical_flows: fii_buy/fii_sell columns not yet in DB "
+                    "(run add_institutional_flows_buysell.sql migration) — falling back "
+                    "to net-only columns. Error: %s", col_exc
+                )
+                resp = (
+                    client.table("institutional_flows")
+                    .select("session_date, fii_net, dii_net")
+                    .order("session_date", desc=True)
+                    .limit(sessions * 3)
+                    .execute()
+                )
+            else:
+                raise
         rows = resp.data or []
         # Filter: skip rows where both fii_net and dii_net are 0 or None
         # (treat as data-unavailable placeholders, not real zero-flow days)

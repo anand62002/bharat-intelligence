@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional, Tuple, Type
@@ -66,6 +67,15 @@ _screener_session: requests.Session | None = None
 _screener_session_warmed: bool = False
 _screener_session_logged_in: bool = False   # True once login POST succeeded
 
+# Rate-limiting semaphore for screener.in requests.
+# The discovery screener runs ~24 symbols concurrently; without throttling this
+# fires 48 HTTP requests simultaneously (consolidated + standalone for each symbol)
+# which causes HTTP 429 / "Too Many Requests" responses from screener.in.
+# 5 concurrent requests is a safe limit that keeps throughput high while
+# avoiding triggering screener.in's per-IP rate limiter.
+_SCREENER_CONCURRENCY = 5
+_screener_semaphore = threading.Semaphore(_SCREENER_CONCURRENCY)
+
 
 def _screener_inject_session(session: "requests.Session") -> bool:
     """
@@ -122,7 +132,13 @@ def _get_screener_session() -> requests.Session:
 
     if _screener_session is None:
         from data.proxy_session import apply_proxy_to_session, proxy_configured
+        import requests.adapters as _ra
         _screener_session = requests.Session()
+        # Increase pool size: 24 symbols run concurrently and all share this session.
+        # Default pool_maxsize=10 causes "Connection pool is full" warnings.
+        _adapter = _ra.HTTPAdapter(pool_connections=5, pool_maxsize=25)
+        _screener_session.mount("https://", _adapter)
+        _screener_session.mount("http://",  _adapter)
         _screener_session.headers.update(_screener_headers())
         apply_proxy_to_session(_screener_session)   # routes via SCRAPERAPI/Fixie if configured
         if not proxy_configured():
@@ -989,14 +1005,15 @@ def get_screener_data(symbol: str) -> dict | None:
         for variant in ("consolidated/", ""):   # consolidated first
             url = f"https://www.screener.in/company/{candidate}/{variant}"
             try:
-                r = session.get(
-                    url,
-                    headers=_screener_headers({
-                        "Referer": "https://screener.in/",
-                        "User-Agent": random.choice(_SCREENER_USER_AGENTS),
-                    }),
-                    timeout=12,
-                )
+                with _screener_semaphore:   # max 5 concurrent screener.in requests
+                    r = session.get(
+                        url,
+                        headers=_screener_headers({
+                            "Referer": "https://screener.in/",
+                            "User-Agent": random.choice(_SCREENER_USER_AGENTS),
+                        }),
+                        timeout=12,
+                    )
                 _last_status = str(r.status_code)
                 if r.status_code == 200:
                     resp = r
@@ -1870,14 +1887,15 @@ def get_screener_history(symbol: str) -> dict | None:
         for variant in ("consolidated/", ""):   # consolidated first
             url = f"https://www.screener.in/company/{candidate}/{variant}"
             try:
-                r = session.get(
-                    url,
-                    headers=_screener_headers({
-                        "Referer": "https://screener.in/",
-                        "User-Agent": random.choice(_SCREENER_USER_AGENTS),
-                    }),
-                    timeout=15,
-                )
+                with _screener_semaphore:   # max 5 concurrent screener.in requests
+                    r = session.get(
+                        url,
+                        headers=_screener_headers({
+                            "Referer": "https://screener.in/",
+                            "User-Agent": random.choice(_SCREENER_USER_AGENTS),
+                        }),
+                        timeout=15,
+                    )
                 _last_status = str(r.status_code)
                 if r.status_code == 200:
                     resp = r

@@ -75,7 +75,7 @@ SONNET_MAX_TOKENS   = 1024
 RELEVANCE_THRESHOLD = 75    # papers scoring >= this get a Sonnet proposal
 MAX_PAPERS_PER_SOURCE = 15  # per source per run
 DAYS_LOOKBACK       = 7     # only process papers from the last N days
-SS_REQUESTS_DELAY   = 2.0   # seconds between Semantic Scholar calls (rate limit)
+SS_REQUESTS_DELAY   = 15.0  # seconds between Semantic Scholar calls (was 2s — too fast, gets 429)
 
 # arXiv RSS categories to scan
 ARXIV_RSS_CATEGORIES = [
@@ -490,8 +490,8 @@ def _fetch_semantic_scholar(
     try:
         resp = requests.get(endpoint, params=params, headers=headers, timeout=20)
         if resp.status_code == 429:
-            log.warning("Semantic Scholar rate limited -- sleeping 10s")
-            time.sleep(10)
+            log.warning("Semantic Scholar rate limited -- sleeping 30s then retrying once")
+            time.sleep(30)
             resp = requests.get(endpoint, params=params,
                                 headers=headers, timeout=20)
         resp.raise_for_status()
@@ -737,17 +737,29 @@ def _gather_papers(
     _add(_fetch_arxiv_rss(days=days))
 
     # Tier 2 — arXiv API keyword search
+    # arXiv API rate-limit: ~3 req/s burst, with generous sustained allowance.
+    # Sleep 3s between queries to avoid 429s during the multi-query loop.
     log.info("[Tier 2] arXiv API (%d queries)...", len(ARXIV_KEYWORD_QUERIES))
+    tier2_429 = False
     for query in ARXIV_KEYWORD_QUERIES:
-        _add(_fetch_arxiv_api(query, max_results=10, days=days))
-        time.sleep(0.5)
+        if tier2_429:
+            break
+        results = _fetch_arxiv_api(query, max_results=10, days=days)
+        if not results and not tier2_429:
+            # Heuristic: empty result on a broad query likely means 429/timeout
+            tier2_429 = True
+            log.warning("[Tier 2] arXiv API appears rate-limited — skipping remaining Tier 2 queries")
+            break
+        _add(results)
+        time.sleep(3.0)  # was 0.5s — too aggressive, triggered 429
 
     # Tier 3 — Semantic Scholar (covers arXiv + SSRN + conference venues)
+    # Semantic Scholar free tier: ~100 req/5min. Sleep 15s between queries.
     log.info("[Tier 3] Semantic Scholar (%d queries)...",
              len(SEMANTIC_SCHOLAR_QUERIES))
     for query in SEMANTIC_SCHOLAR_QUERIES:
         _add(_fetch_semantic_scholar(query, max_results=10))
-        time.sleep(SS_REQUESTS_DELAY)
+        time.sleep(SS_REQUESTS_DELAY)  # 15s between queries
 
     # Tier 4 — HuggingFace Daily Papers
     log.info("[Tier 4] HuggingFace Daily Papers...")
@@ -1336,10 +1348,27 @@ def run(dry_run: bool = False) -> dict:
     print("-" * 72)
 
     # ── Step 2: Deduplicate against DB ────────────────────────────────────────
-    new_papers = [
-        p for p in papers
-        if not _url_already_processed(client, p.url)
-    ]
+    # Bulk-fetch all existing URLs in one query (was N+1 — one query per paper).
+    existing_urls: set[str] = set()
+    if client:
+        try:
+            resp = (
+                client.table("research_proposals")
+                .select("url")
+                .limit(2000)
+                .execute()
+            )
+            existing_urls = {r["url"] for r in (resp.data or []) if r.get("url")}
+            log.debug("Loaded %d existing proposal URLs for deduplication", len(existing_urls))
+        except Exception as exc:
+            log.debug("Could not prefetch existing URLs: %s — will use per-URL checks", exc)
+
+    if existing_urls:
+        new_papers = [p for p in papers if p.url not in existing_urls]
+    else:
+        # Fallback: original per-URL check if bulk fetch failed
+        new_papers = [p for p in papers if not _url_already_processed(client, p.url)]
+
     log.info("%d papers after DB deduplication (skipped %d)",
              len(new_papers), len(papers) - len(new_papers))
 

@@ -211,7 +211,7 @@ _SECTOR_YF_REPS: dict[str, list[str]] = {
     "cement":                 ["ULTRACEMCO.NS", "AMBUJACEM.NS", "SHREECEM.NS"],
     "infrastructure":         ["LT.NS", "ADANIPORTS.NS", "NCC.NS"],
     "utilities":              ["NTPC.NS", "POWERGRID.NS", "TATAPOWER.NS"],
-    "telecom":                ["BHARTIARTL.NS", "INDUSTOWER.NS", "VODAFONEIDEA.NS"],
+    "telecom":                ["BHARTIARTL.NS", "INDUSTOWER.NS", "IDEA.NS"],
     "consumer cyclical":      ["TITAN.NS", "DMART.NS", "TRENT.NS"],
 }
 

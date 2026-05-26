@@ -346,63 +346,124 @@ def _parse_analyst_targets_page(html: str) -> dict:
     result: dict = {}
     soup = BeautifulSoup(html, "html.parser")
 
+    # ── Strategy 0: Next.js __NEXT_DATA__ / inline JSON blob ─────────────────
+    # Trendlyne is a Next.js app — all page data is serialised in a
+    # <script id="__NEXT_DATA__"> tag.  This is the most reliable source.
+    next_script = soup.find("script", {"id": "__NEXT_DATA__"})
+    if next_script:
+        try:
+            nd = json.loads(next_script.get_text())
+            # Walk the pageProps tree looking for analyst data keys
+            def _walk(obj, depth=0):
+                if depth > 10 or not isinstance(obj, (dict, list)):
+                    return
+                if isinstance(obj, list):
+                    for item in obj:
+                        _walk(item, depth + 1)
+                    return
+                for k, v in obj.items():
+                    kl = k.lower()
+                    if kl in ("targetprice", "consensustarget", "analysttarget", "mediantarget"):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn and vn > 10:
+                            result.setdefault("consensus_target", vn)
+                    elif kl in ("hightarget", "targethigh", "maxprice"):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn and vn > 10:
+                            result.setdefault("target_high", vn)
+                    elif kl in ("lowtarget", "targetlow", "minprice"):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn and vn > 10:
+                            result.setdefault("target_low", vn)
+                    elif kl in ("analystcount", "numanalysts", "totalanalysts", "coveragecount"):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn and 1 <= vn <= 200:
+                            result.setdefault("analyst_count", int(vn))
+                    elif kl in ("strongbuycount", "strongbuy"):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn is not None:
+                            result.setdefault("strong_buy", int(vn))
+                    elif kl in ("buycount", "buys"):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn is not None:
+                            result.setdefault("buy", int(vn))
+                    elif kl in ("holdcount", "holds", "neutral"):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn is not None:
+                            result.setdefault("hold", int(vn))
+                    elif kl in ("sellcount", "sells", "underperformcount"):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn is not None:
+                            result.setdefault("sell", int(vn))
+                    elif isinstance(v, (dict, list)):
+                        _walk(v, depth + 1)
+            _walk(nd)
+        except (json.JSONDecodeError, TypeError, RecursionError):
+            pass
+
     # ── Strategy 1: Look for structured data tables ───────────────────────────
     # Some pages render a table with rows: Strong Buy | Buy | Hold | Sell | Total
-    rating_map = {"strong_buy": 0, "buy": 0, "hold": 0, "sell": 0}
-    total_analysts = 0
+    if not result.get("analyst_count"):  # skip if Strategy 0 already got it
+        rating_map = {"strong_buy": 0, "buy": 0, "hold": 0, "sell": 0}
+        total_analysts = 0
 
-    for row in soup.select("table tr, .analyst-row, [class*='rating-row']"):
-        text = row.get_text(separator=" ", strip=True).lower()
-        cells = row.find_all(["td", "th", "span", "div"], recursive=False)
-        count_text = cells[-1].get_text(strip=True) if cells else ""
-        count = _safe_number(count_text)
-        if count is None:
-            continue
-        if "strong buy" in text:
-            rating_map["strong_buy"] = int(count)
-            total_analysts += int(count)
-        elif "strong sell" in text or "underperform" in text:
-            rating_map["sell"] += int(count)
-            total_analysts += int(count)
-        elif "buy" in text and "strong" not in text:
-            rating_map["buy"] = int(count)
-            total_analysts += int(count)
-        elif "hold" in text or "neutral" in text:
-            rating_map["hold"] = int(count)
-            total_analysts += int(count)
-        elif "sell" in text and "strong" not in text and "under" not in text:
-            rating_map["sell"] += int(count)
-            total_analysts += int(count)
+        for row in soup.select("table tr, .analyst-row, [class*='rating-row'], [class*='analyst-rating']"):
+            text = row.get_text(separator=" ", strip=True).lower()
+            cells = row.find_all(["td", "th", "span", "div"], recursive=False)
+            count_text = cells[-1].get_text(strip=True) if cells else ""
+            count = _safe_number(count_text)
+            if count is None:
+                continue
+            if "strong buy" in text:
+                rating_map["strong_buy"] = int(count)
+                total_analysts += int(count)
+            elif "strong sell" in text or "underperform" in text:
+                rating_map["sell"] += int(count)
+                total_analysts += int(count)
+            elif "buy" in text and "strong" not in text:
+                rating_map["buy"] = int(count)
+                total_analysts += int(count)
+            elif "hold" in text or "neutral" in text:
+                rating_map["hold"] = int(count)
+                total_analysts += int(count)
+            elif "sell" in text and "strong" not in text and "under" not in text:
+                rating_map["sell"] += int(count)
+                total_analysts += int(count)
 
-    if total_analysts > 0:
-        result.update(rating_map)
-        result["analyst_count"] = total_analysts
+        if total_analysts > 0:
+            result.update({k: result.get(k) or v for k, v in rating_map.items()})
+            result.setdefault("analyst_count", total_analysts)
 
     # ── Strategy 2: Look for consensus target price spans ────────────────────
-    # Trendlyne shows "Target Price ₹1,234" in a highlighted section.
-    # Common class names: "target-price", "consensus-price", "analyst-target"
-    target_selectors = [
-        "[class*='target-price']",
-        "[class*='consensus']",
-        "[class*='analyst-target']",
-        "[data-label*='target']",
-        "[data-label*='Target']",
-    ]
-    for sel in target_selectors:
-        el = soup.select_one(sel)
-        if el:
-            val = _safe_number(el.get_text(strip=True))
-            if val and val > 10:  # sanity: target price should be > 10
-                result["consensus_target"] = val
-                break
+    # Common class names across Trendlyne page versions
+    if "consensus_target" not in result:
+        target_selectors = [
+            "[class*='target-price']",
+            "[class*='consensus']",
+            "[class*='analyst-target']",
+            "[class*='price-target']",
+            "[class*='targetPrice']",
+            "[data-label*='target']",
+            "[data-label*='Target']",
+            "[data-key*='target']",
+        ]
+        for sel in target_selectors:
+            el = soup.select_one(sel)
+            if el:
+                val = _safe_number(el.get_text(strip=True))
+                if val and val > 10:
+                    result["consensus_target"] = val
+                    break
 
     # ── Strategy 3: Regex scan for "Target Price ₹X,XXX" patterns ───────────
     if "consensus_target" not in result:
-        # Match patterns like "Target Price ₹1,234" or "Analyst Target: 1234"
         for pat in [
             r"[Tt]arget\s*[Pp]rice[^₹\d]*[₹]?\s*([\d,]+(?:\.\d+)?)",
             r"[Cc]onsensus\s*[Tt]arget[^₹\d]*[₹]?\s*([\d,]+(?:\.\d+)?)",
             r"[Mm]edian\s*[Tt]arget[^₹\d]*[₹]?\s*([\d,]+(?:\.\d+)?)",
+            r'"targetPrice"\s*:\s*"?([\d.]+)"?',
+            r'"consensusTarget"\s*:\s*"?([\d.]+)"?',
+            r'"analystTarget"\s*:\s*"?([\d.]+)"?',
         ]:
             m = re.search(pat, html)
             if m:
@@ -416,11 +477,12 @@ def _parse_analyst_targets_page(html: str) -> dict:
         (r"[Hh]igh\s*[Tt]arget[^₹\d]*[₹]?\s*([\d,]+(?:\.\d+)?)", "target_high"),
         (r"[Ll]ow\s*[Tt]arget[^₹\d]*[₹]?\s*([\d,]+(?:\.\d+)?)",  "target_low"),
     ]:
-        m = re.search(pat, html)
-        if m:
-            val = _safe_number(m.group(1))
-            if val and val > 10:
-                result[key] = val
+        if key not in result:
+            m = re.search(pat, html)
+            if m:
+                val = _safe_number(m.group(1))
+                if val and val > 10:
+                    result[key] = val
 
     # ── Strategy 5: Number-of-analysts ───────────────────────────────────────
     if "analyst_count" not in result or result["analyst_count"] == 0:
@@ -432,12 +494,11 @@ def _parse_analyst_targets_page(html: str) -> dict:
             m = re.search(pat, html)
             if m:
                 n = int(m.group(1))
-                if 1 <= n <= 200:  # sanity range
+                if 1 <= n <= 200:
                     result.setdefault("analyst_count", n)
                     break
 
     # ── Strategy 6: EPS estimates ─────────────────────────────────────────────
-    # Trendlyne shows EPS estimates for current FY and next FY.
     for pat, key in [
         (r"EPS\s*(?:FY\d{2}|current\s*year|CY)[^₹\d]*[₹]?\s*([\d,]+(?:\.\d+)?)", "eps_current_yr"),
         (r"EPS\s*(?:FY\d{2}|next\s*year|NY)[^₹\d]*[₹]?\s*([\d,]+(?:\.\d+)?)", "eps_next_yr"),
@@ -446,15 +507,13 @@ def _parse_analyst_targets_page(html: str) -> dict:
         if m:
             val = _safe_number(m.group(1))
             if val is not None:
-                result[key] = val
+                result.setdefault(key, val)
 
     # ── Strategy 7: Embedded JSON in <script> tags ────────────────────────────
-    # Trendlyne sometimes serialises the analyst summary as JSON.
     for script in soup.find_all("script"):
         src = script.get_text()
         if "analystTarget" not in src and "targetPrice" not in src:
             continue
-        # Try to find JSON blobs
         for m in re.finditer(r'\{[^{}]{20,}\}', src):
             try:
                 blob = json.loads(m.group())
@@ -633,8 +692,9 @@ def get_analyst_targets(symbol: str, force_refresh: bool = False) -> dict:
         hold = int(result.get("hold") or 0)
         sell = int(result.get("sell") or 0)
         total = sb + buy + hold + sell
-        if result.get("analyst_count") and not total:
-            total = int(result["analyst_count"])
+        # NOTE: do NOT fall back to analyst_count when buy/hold/sell breakdown is
+        # unavailable — that would set buy_pct=0 and force a fake SELL rating.
+        # If we have analyst_count but no breakdown, leave buy_pct=None (honest).
 
         if total > 0:
             buy_total = sb + buy

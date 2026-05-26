@@ -58,7 +58,7 @@ if str(_ROOT) not in sys.path:
 
 NIFTY_SYMBOL     = "^NSEI"
 VIX_SYMBOL       = "^INDIAVIX"
-MIDCAP_SYMBOL    = "^CNXMIDCAP"   # NIFTY Midcap 100
+MIDCAP_SYMBOL    = "^CNXMDCP50"   # NIFTY Midcap 50 (^CNXMIDCAP delisted on Yahoo Finance)
 HISTORY_PERIOD   = "1y"           # enough for EMA-200, RSI-14
 
 # FII flow thresholds (₹ Crore, 10-day cumulative)
