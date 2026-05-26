@@ -43,8 +43,26 @@ logger = logging.getLogger(__name__)
 _TL_SESS = os.getenv("TRENDLYNE_SESSION", "bce34ncrlhwelezjn884vaxvyh0g543w")
 _TL_CSRF = os.getenv("TRENDLYNE_CSRF",   "8pNPblqCbfTikxjVbCLRZwDbQq6cdZZwSWRsNjBE5AXZGgDVcZMNZNzNhtycXVDS")
 
-_FNO_PAGE_URL = "https://trendlyne.com/futures-options/contracts-excel-download/"
+_FNO_PAGE_URL      = "https://trendlyne.com/futures-options/contracts-excel-download/"
+_FNO_ALT_URLS: list[str] = [
+    # Alternative download endpoints to try when primary returns 405
+    "https://trendlyne.com/futures-options/fno-excel-download/",
+    "https://trendlyne.com/equity/download/fno-excel/",
+    "https://trendlyne.com/futures-options/contracts-excel-download",   # no trailing slash
+]
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+# Full browser headers — needed since Trendlyne's WAF rejects requests that
+# look like bots (User-Agent alone is not sufficient as of mid-2025).
+_FNO_HEADERS = {
+    "User-Agent":      _UA,
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer":         "https://trendlyne.com/futures-options/",
+    "Origin":          "https://trendlyne.com",
+    "Connection":      "keep-alive",
+}
 
 # ── in-process cache ────────────────────────────────────────────────────────
 # Holds compact pre-processed dicts, NOT the raw DataFrames.
@@ -57,43 +75,144 @@ _CACHE_TTL = 3600 * 6     # 6 hours — data is EOD, no point re-downloading int
 # Download helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _get_presigned_url() -> str:
-    """Follow the Trendlyne redirect (needs session cookies) to get the S3 URL."""
+def _make_fno_session() -> requests.Session:
+    """Build a requests.Session with full browser-like headers + Trendlyne cookies."""
     s = requests.Session()
-    s.headers.update({"User-Agent": _UA})
+    s.headers.update(_FNO_HEADERS)
     if _TL_SESS:
         s.cookies.set(".trendlyne", _TL_SESS, domain="trendlyne.com")
     if _TL_CSRF:
         s.cookies.set("csrftoken",  _TL_CSRF, domain="trendlyne.com")
+    return s
 
-    r = s.get(_FNO_PAGE_URL, timeout=15, allow_redirects=False)
-    if r.status_code not in (301, 302):
-        raise RuntimeError(f"Expected redirect from Trendlyne, got HTTP {r.status_code}")
 
+def _extract_s3_url(r: requests.Response, url: str) -> str:
+    """
+    Extract the S3 presigned URL from a redirect response.
+    Returns the URL string or raises RuntimeError.
+    """
+    if "login" in r.headers.get("Location", ""):
+        raise RuntimeError("Trendlyne session expired — update TRENDLYNE_SESSION env var")
     loc = r.headers.get("Location", "")
     if "amazonaws" in loc:
-        return loc                        # direct S3 presigned URL
-    if "officeapps" in loc:              # wrapped in Office viewer
+        return loc
+    if "officeapps" in loc:
         parsed = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)
         return parsed.get("src", [loc])[0]
-    if "login" in loc:
-        raise RuntimeError("Trendlyne session expired — update TRENDLYNE_SESSION env var")
-    return loc
+    if loc:
+        return loc
+    raise RuntimeError(f"Redirect from {url} had no Location header")
+
+
+def _get_presigned_url() -> str:
+    """
+    Follow the Trendlyne redirect to get the S3 presigned URL for the F&O Excel.
+
+    Tries four strategies in order:
+      1. GET with full browser headers, allow_redirects=False  (original approach)
+      2. POST with CSRF token (Django download views sometimes require POST)
+      3. GET with allow_redirects=True + check if we got the Excel content directly
+      4. Retry strategies 1-2 on each alternative URL in _FNO_ALT_URLS
+
+    Raises RuntimeError if all strategies fail.
+    """
+    s = _make_fno_session()
+    last_status = "no_attempt"
+
+    def _try_url(url: str) -> str | None:
+        """Try GET (no-redirect) → POST → GET (follow redirects) for one URL.
+        Returns S3 URL string on success, None on failure."""
+        nonlocal last_status
+
+        # Strategy 1: GET, don't follow redirects (original approach)
+        try:
+            r = s.get(url, timeout=15, allow_redirects=False)
+            last_status = str(r.status_code)
+            if r.status_code in (301, 302):
+                return _extract_s3_url(r, url)
+            logger.debug("FNO GET %s → HTTP %d", url, r.status_code)
+        except Exception as exc:
+            logger.debug("FNO GET %s failed: %s", url, exc)
+
+        # Strategy 2: POST with CSRF token (Django sometimes requires POST for downloads)
+        try:
+            r = s.post(
+                url,
+                timeout=15,
+                allow_redirects=False,
+                headers={"X-CSRFToken": _TL_CSRF, "Content-Type": "application/x-www-form-urlencoded"},
+                data={"csrfmiddlewaretoken": _TL_CSRF},
+            )
+            last_status = f"POST_{r.status_code}"
+            if r.status_code in (301, 302):
+                logger.info("FNO POST to %s succeeded (redirect)", url)
+                return _extract_s3_url(r, url)
+            logger.debug("FNO POST %s → HTTP %d", url, r.status_code)
+        except Exception as exc:
+            logger.debug("FNO POST %s failed: %s", url, exc)
+
+        # Strategy 3: GET, follow all redirects — maybe they serve the file directly now
+        try:
+            r = s.get(url, timeout=20, allow_redirects=True)
+            last_status = f"FOLLOW_{r.status_code}"
+            content_type = r.headers.get("Content-Type", "")
+            if r.status_code == 200 and (
+                "spreadsheet" in content_type or
+                "excel" in content_type or
+                "octet-stream" in content_type or
+                len(r.content) > 50_000          # large binary — likely the Excel
+            ):
+                # Trendlyne now serves the Excel directly instead of redirecting
+                logger.info("FNO: Excel served directly from %s (%d bytes)", url, len(r.content))
+                return f"__DIRECT__:{url}"        # sentinel for caller
+            logger.debug("FNO FOLLOW %s → HTTP %d content-type=%s", url, r.status_code, content_type)
+        except Exception as exc:
+            logger.debug("FNO FOLLOW %s failed: %s", url, exc)
+
+        return None
+
+    # Try primary URL first, then alternatives
+    for candidate_url in [_FNO_PAGE_URL] + _FNO_ALT_URLS:
+        result = _try_url(candidate_url)
+        if result is not None:
+            return result
+
+    raise RuntimeError(
+        f"All FNO download strategies failed (last HTTP status: {last_status}). "
+        "Trendlyne may have changed the download endpoint or is blocking Railway's IP. "
+        "Check TRENDLYNE_SESSION / TRENDLYNE_CSRF env vars."
+    )
 
 
 def _download_excel() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Download the F&O Excel and return (fno_data_df, fno_stocks_df)."""
+    """
+    Download the F&O Excel and return (fno_data_df, fno_stocks_df).
+
+    Handles both the redirect-to-S3 pattern (historical) and the
+    direct-serve pattern (Trendlyne may serve the file directly now).
+    """
     try:
         import openpyxl  # noqa: F401 — checked here for a clear error message
     except ImportError:
         raise ImportError("openpyxl is required: pip install openpyxl")
 
-    url = _get_presigned_url()
-    logger.info("Downloading Trendlyne F&O Excel from S3 …")
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
+    url_or_sentinel = _get_presigned_url()
 
-    wb_bytes = io.BytesIO(r.content)
+    if url_or_sentinel.startswith("__DIRECT__:"):
+        # Trendlyne served the Excel content directly (no S3 redirect).
+        # Re-fetch with allow_redirects=True to get the content.
+        direct_url = url_or_sentinel[len("__DIRECT__:"):]
+        logger.info("Downloading Trendlyne F&O Excel directly from %s …", direct_url)
+        s = _make_fno_session()
+        r = s.get(direct_url, timeout=60, allow_redirects=True)
+        r.raise_for_status()
+        wb_bytes = io.BytesIO(r.content)
+    else:
+        logger.info("Downloading Trendlyne F&O Excel from S3 …")
+        r = requests.get(url_or_sentinel, timeout=60)
+        r.raise_for_status()
+        wb_bytes = io.BytesIO(r.content)
+
     fno_data   = pd.read_excel(wb_bytes, sheet_name="F&O Data",   engine="openpyxl")
     wb_bytes.seek(0)
     fno_stocks = pd.read_excel(wb_bytes, sheet_name="F&O Stocks", engine="openpyxl")

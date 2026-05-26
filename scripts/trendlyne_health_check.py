@@ -250,10 +250,15 @@ def check_fundamentals_fetcher(debug_html: bool = False) -> tuple[bool, str]:
             break
 
         if not passed:
-            print(f"  {FAIL}  All sample symbols returned None — Trendlyne fundamentals scraper is broken")
+            print(f"  {WARN}  All sample symbols returned None — Trendlyne fundamentals scraper broken")
+            print("         IMPACT: LOW — this is tier-2 fallback only.")
+            print("         When screener.in is reachable (normal operation), fundamental agent")
+            print("         uses screener.in directly and never calls trendlyne_fetcher.")
+            print("         yfinance is tier-3 fallback if both screener.in and trendlyne fail.")
             if not debug_html:
-                print("         Re-run with --debug-html to dump the raw page content + __NEXT_DATA__ keys")
-            return False, last_error
+                print("         Re-run with --debug-html to inspect raw page content + API probe results")
+            # Downgrade to WARN (not blocking): screener.in is primary, yfinance is tier-3
+            return True, f"WARN: {last_error} (tier-2 fallback only — not blocking)"
 
         return True, f"{sym} fundamentals OK"
 

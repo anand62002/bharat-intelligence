@@ -658,6 +658,62 @@ def _fetch_and_cache(symbol: str) -> Optional[dict]:
         logger.warning("trendlyne_fetcher: no HTML for symbol %s", clean)
         return None
 
+    # Extract the numeric Trendlyne stock ID from the og:url meta tag in the HTML.
+    # The redirect from /equity/RELIANCE/NSE/ resolves to
+    #   /equity/1127/RELIANCE/reliance-industries-ltd/
+    # and Trendlyne always embeds this canonical URL in the og:url meta tag.
+    # We use this ID to probe internal AJAX API endpoints (the parameters widget
+    # is fully client-side rendered — no financial data in the initial HTML).
+    stock_id: Optional[str] = None
+    _og_m = re.search(r'og:url[^>]*content=["\']https?://trendlyne\.com/equity/(\d+)/', html)
+    if _og_m:
+        stock_id = _og_m.group(1)
+        logger.debug("trendlyne_fetcher: stock_id=%s for %s", stock_id, clean)
+
+    # Strategy 00: Try Trendlyne's internal AJAX API endpoints using the stock ID.
+    # Trendlyne's parameters widget loads data via XHR after page render — the HTML
+    # shell alone won't contain any financial metrics.  These are the known API patterns.
+    metrics_api: dict = {}
+    if stock_id:
+        api_candidates = [
+            f"{_BASE_URL}/api/equity-single-stock/{stock_id}/parameters/",
+            f"{_BASE_URL}/api/equity-single-stock/{stock_id}/",
+            f"{_BASE_URL}/api/stock-parameters/{stock_id}/",
+            f"{_BASE_URL}/equity-single-stock/{stock_id}/parameters/",
+        ]
+        try:
+            from data.trendlyne_analyst_fetcher import _get_session as _tl_api_session
+            s_api = _tl_api_session()
+            for api_url in api_candidates:
+                try:
+                    api_resp = s_api.get(
+                        api_url, timeout=10, allow_redirects=False,
+                        headers={"Accept": "application/json",
+                                 "X-Requested-With": "XMLHttpRequest"},
+                    )
+                    if api_resp.status_code == 200:
+                        ct = api_resp.headers.get("Content-Type", "")
+                        if "json" in ct or api_resp.text.lstrip().startswith("{"):
+                            try:
+                                data = json.loads(api_resp.text)
+                                # Wrap in synthetic __NEXT_DATA__ so our walker handles it
+                                synthetic = f'<script id="__NEXT_DATA__">{json.dumps(data)}</script>'
+                                metrics_api = _parse_next_data_fundamentals(synthetic)
+                                n_found = sum(1 for v in metrics_api.values() if v is not None)
+                                if n_found > 0:
+                                    logger.info(
+                                        "trendlyne_fetcher: API %s returned %d metrics for %s",
+                                        api_url, n_found, clean,
+                                    )
+                                    break
+                            except (json.JSONDecodeError, Exception):
+                                pass
+                    logger.debug("trendlyne_fetcher: API %s → HTTP %d", api_url, api_resp.status_code)
+                except Exception as api_exc:
+                    logger.debug("trendlyne_fetcher: API %s failed: %s", api_url, api_exc)
+        except Exception as _exc:
+            logger.debug("trendlyne_fetcher: API probe failed: %s", _exc)
+
     soup = BeautifulSoup(html, "html.parser")
 
     # Strategy 0: __NEXT_DATA__ JSON blob (primary since Trendlyne migrated to Next.js)
@@ -671,11 +727,12 @@ def _fetch_and_cache(symbol: str) -> Optional[dict]:
     metrics_primary   = _parse_data_metrics(soup)
     metrics_secondary = _parse_parameters_section(soup)
 
-    # Merge all strategies: __NEXT_DATA__ wins, then data-metrics, then text scan
+    # Merge all strategies: API > __NEXT_DATA__ > data-metrics > text scan
     merged: dict = {
         **metrics_secondary,
         **{k: v for k, v in metrics_primary.items() if v is not None},
-        **metrics_nd,   # __NEXT_DATA__ is most authoritative
+        **metrics_nd,   # __NEXT_DATA__ is more authoritative than DOM parsers
+        **metrics_api,  # internal API is most authoritative
     }
 
     # DVM: merge Next.js data with legacy HTML attribute strategies
