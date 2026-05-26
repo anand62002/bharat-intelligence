@@ -216,7 +216,7 @@ def _fetch_page(url: str, *, retry_on_login: bool = True) -> Optional[str]:
     """
     s = _get_session()
     try:
-        resp = s.get(url, timeout=20, allow_redirects=False)
+        resp = s.get(url, timeout=30, allow_redirects=False)
 
         # Redirect to login page — session expired
         if resp.status_code in (301, 302):
@@ -353,51 +353,150 @@ def _parse_analyst_targets_page(html: str) -> dict:
     if next_script:
         try:
             nd = json.loads(next_script.get_text())
-            # Walk the pageProps tree looking for analyst data keys
+
+            # Debug: log top-level keys so future failures are self-diagnosing
+            top_keys = list(nd.keys()) if isinstance(nd, dict) else []
+            logger.debug("__NEXT_DATA__ top-level keys: %s", top_keys)
+            # Also log pageProps keys if present
+            page_props = nd.get("props", {}).get("pageProps", {}) if isinstance(nd, dict) else {}
+            if page_props and isinstance(page_props, dict):
+                logger.debug("__NEXT_DATA__ pageProps keys: %s", list(page_props.keys())[:30])
+
+            # Walk the pageProps tree looking for analyst data keys.
+            # NOTE: Trendlyne has a persistent typo "analyist" (extra 'i') in
+            # many of their data keys (e.g. analyistCount, analyistMeanPrice).
+            # Both the correct spelling and the typo must be included in every tuple.
             def _walk(obj, depth=0):
-                if depth > 10 or not isinstance(obj, (dict, list)):
+                if depth > 12 or not isinstance(obj, (dict, list)):
                     return
                 if isinstance(obj, list):
                     for item in obj:
                         _walk(item, depth + 1)
                     return
+                # Log keys at depth 1-3 for diagnosis (only when DEBUG)
+                if depth <= 3 and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("  _walk depth=%d keys=%s", depth, list(obj.keys())[:20])
                 for k, v in obj.items():
                     kl = k.lower()
-                    if kl in ("targetprice", "consensustarget", "analysttarget", "mediantarget"):
+                    # ── Consensus / mean target price ─────────────────────────
+                    if kl in (
+                        # correct spelling variants
+                        "targetprice", "consensustarget", "analysttarget",
+                        "mediantarget", "meantargetprice", "avgpricetarget",
+                        "meanpricetarget", "medianpricetarget", "pricetarget",
+                        "targetmedian", "analystmeantarget", "analystmeanprice",
+                        # Trendlyne "analyist" typo variants
+                        "analyisttargetprice", "analyistconsensustarget",
+                        "analyistmeantarget", "analyistmeanprice",
+                        "analyisttarget", "analyistmediantarget",
+                        "analyistavgprice", "analyistpricetarget",
+                    ):
                         vn = _safe_number(str(v)) if v else None
                         if vn and vn > 10:
                             result.setdefault("consensus_target", vn)
-                    elif kl in ("hightarget", "targethigh", "maxprice"):
+                    # ── High target ───────────────────────────────────────────
+                    elif kl in (
+                        "hightarget", "targethigh", "maxprice",
+                        "hightargetprice", "targetpricehigh", "maxtargetprice",
+                        "analyisthightarget", "analyistmaxtarget",
+                        "analyisthighprice", "analyistpricehigh",
+                    ):
                         vn = _safe_number(str(v)) if v else None
                         if vn and vn > 10:
                             result.setdefault("target_high", vn)
-                    elif kl in ("lowtarget", "targetlow", "minprice"):
+                    # ── Low target ────────────────────────────────────────────
+                    elif kl in (
+                        "lowtarget", "targetlow", "minprice",
+                        "lowtargetprice", "targetpricelow", "mintargetprice",
+                        "analyistlowtarget", "analyistmintarget",
+                        "analyistlowprice", "analyistpricelow",
+                    ):
                         vn = _safe_number(str(v)) if v else None
                         if vn and vn > 10:
                             result.setdefault("target_low", vn)
-                    elif kl in ("analystcount", "numanalysts", "totalanalysts", "coveragecount"):
+                    # ── Analyst count ─────────────────────────────────────────
+                    elif kl in (
+                        "analystcount", "numanalysts", "totalanalysts",
+                        "coveragecount", "analystcoverage", "numofanalysts",
+                        # Trendlyne typo
+                        "analyistcount", "numanalysts", "totalanalyists",
+                        "analyistcoverage", "numofanalyists",
+                    ):
                         vn = _safe_number(str(v)) if v else None
-                        if vn and 1 <= vn <= 200:
+                        if vn and 1 <= vn <= 500:
                             result.setdefault("analyst_count", int(vn))
-                    elif kl in ("strongbuycount", "strongbuy"):
+                    # ── Strong Buy ────────────────────────────────────────────
+                    elif kl in (
+                        "strongbuycount", "strongbuy", "strongbuys",
+                        "numstrongbuy", "strongbuyrating",
+                        "analyiststrongbuy", "analyiststrongbuycount",
+                        "analyistsstrongbuy",
+                    ):
                         vn = _safe_number(str(v)) if v else None
                         if vn is not None:
                             result.setdefault("strong_buy", int(vn))
-                    elif kl in ("buycount", "buys"):
+                    # ── Buy ───────────────────────────────────────────────────
+                    elif kl in (
+                        "buycount", "buys", "numbuy", "buyrating",
+                        "analystbuy", "analystbuycount",
+                        "analyistbuy", "analyistbuycount", "analyistsbuy",
+                    ):
                         vn = _safe_number(str(v)) if v else None
                         if vn is not None:
                             result.setdefault("buy", int(vn))
-                    elif kl in ("holdcount", "holds", "neutral"):
+                    # ── Hold ──────────────────────────────────────────────────
+                    elif kl in (
+                        "holdcount", "holds", "neutral", "numhold",
+                        "holdrating", "neutralcount",
+                        "analyisthold", "analyistholdcount", "analyistshold",
+                        "analyistneutral",
+                    ):
                         vn = _safe_number(str(v)) if v else None
                         if vn is not None:
                             result.setdefault("hold", int(vn))
-                    elif kl in ("sellcount", "sells", "underperformcount"):
+                    # ── Sell / Underperform ───────────────────────────────────
+                    elif kl in (
+                        "sellcount", "sells", "underperformcount", "numsell",
+                        "sellrating", "underperform",
+                        "analyistsell", "analyistsellcount", "analyistssell",
+                        "analyistunderperform", "analyistunderperformcount",
+                    ):
                         vn = _safe_number(str(v)) if v else None
                         if vn is not None:
                             result.setdefault("sell", int(vn))
+                    # ── EPS estimates ─────────────────────────────────────────
+                    elif kl in (
+                        "epscurrentyr", "epscurrentyear", "epsfy",
+                        "analyistepscurrentyr", "analyistepscurrentyear",
+                        "analyistepsfy", "consensusepscurrentyr",
+                    ):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn is not None:
+                            result.setdefault("eps_current_yr", vn)
+                    elif kl in (
+                        "epsnextyr", "epsnextyear", "epsnfy",
+                        "analyistepsnextyr", "analyistepsnextyear",
+                        "consensusepsnextyr",
+                    ):
+                        vn = _safe_number(str(v)) if v else None
+                        if vn is not None:
+                            result.setdefault("eps_next_yr", vn)
+                    # ── Recurse ───────────────────────────────────────────────
                     elif isinstance(v, (dict, list)):
                         _walk(v, depth + 1)
             _walk(nd)
+
+            # Log what was (and wasn't) found for diagnosis
+            found = [k for k in ("consensus_target", "analyst_count", "buy_pct",
+                                  "strong_buy", "buy", "hold", "sell") if result.get(k)]
+            missing = [k for k in ("consensus_target", "analyst_count") if not result.get(k)]
+            if missing:
+                logger.info(
+                    "_parse_analyst_targets_page __NEXT_DATA__: found=%s missing=%s "
+                    "(pageProps top-keys=%s)",
+                    found, missing,
+                    list(page_props.keys())[:15] if page_props else "n/a",
+                )
         except (json.JSONDecodeError, TypeError, RecursionError):
             pass
 
@@ -559,9 +658,19 @@ def _parse_main_stock_page(html: str) -> dict:
     return _parse_analyst_targets_page(widget_html)
 
 
-def _current_price_from_page(html: str) -> Optional[float]:
-    """Extract the current traded price from a Trendlyne stock page."""
+def _current_price_from_page(html: str, min_price: float = 50.0) -> Optional[float]:
+    """
+    Extract the current traded price from a Trendlyne stock page.
+
+    Args:
+        min_price: Minimum plausible stock price.  Trendlyne covers liquid NSE
+                   stocks, so ₹50 is a reasonable floor.  Values below this
+                   (e.g. EPS numbers, P/E ratios, page template artefacts like
+                   ₹26) are rejected.  Set min_price=1 to disable the guard.
+    """
     soup = BeautifulSoup(html, "html.parser")
+    candidates: list[float] = []
+
     for sel in [
         "[class*='current-price']",
         "[class*='last-price']",
@@ -571,20 +680,34 @@ def _current_price_from_page(html: str) -> Optional[float]:
         el = soup.select_one(sel)
         if el:
             val = _safe_number(el.get_text(strip=True))
-            if val and val > 1:
-                return val
-    # Regex fallback
+            if val and val >= min_price:
+                candidates.append(val)
+
+    # Regex fallback — anchored to price-labelled context
     for pat in [
         r'[Cc]urrent\s*[Pp]rice[^₹\d]*[₹]?\s*([\d,]+(?:\.\d+)?)',
         r'"lastPrice"\s*:\s*"?([\d.]+)',
         r'"currentPrice"\s*:\s*"?([\d.]+)',
+        r'"ltp"\s*:\s*"?([\d.]+)',
+        r'"price"\s*:\s*"?([\d,]+(?:\.\d+)?)',
     ]:
         m = re.search(pat, html)
         if m:
             val = _safe_number(m.group(1))
-            if val and val > 1:
-                return val
-    return None
+            if val and val >= min_price:
+                candidates.append(val)
+
+    if not candidates:
+        return None
+
+    # Return the most common candidate; if all unique, return the largest
+    # (page templates sometimes embed low anchor values that appear first)
+    from collections import Counter
+    freq = Counter(candidates)
+    most_common_val, most_common_count = freq.most_common(1)[0]
+    if most_common_count > 1:
+        return most_common_val
+    return max(candidates)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -706,6 +829,19 @@ def get_analyst_targets(symbol: str, force_refresh: bool = False) -> dict:
                 result["consensus_rating"] = "HOLD"
             else:
                 result["consensus_rating"] = "SELL"
+
+        # Sanity-check current_price_tl against consensus_target.
+        # If the scraped price is < 10% of the consensus target it's almost
+        # certainly a page artefact (EPS value, template number, etc.).
+        cp_tl = result.get("current_price_tl")
+        ct    = result.get("consensus_target")
+        if cp_tl and ct and ct > 0 and cp_tl < ct * 0.10:
+            logger.warning(
+                "get_analyst_targets(%s): current_price_tl=%.2f looks bogus vs "
+                "consensus_target=%.2f — discarding scraped price",
+                sym, cp_tl, ct,
+            )
+            result["current_price_tl"] = None
 
         # Upside to consensus
         if result.get("consensus_target") and result.get("current_price_tl"):
