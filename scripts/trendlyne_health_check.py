@@ -151,59 +151,108 @@ def check_fno_fetcher() -> tuple[bool, str]:
 # Module 2 — Fundamentals / DVM fetcher
 # ─────────────────────────────────────────────────────────────────────────────
 
-def check_fundamentals_fetcher() -> tuple[bool, str]:
+def check_fundamentals_fetcher(debug_html: bool = False) -> tuple[bool, str]:
     """
     Scrapes fundamentals and DVM score from Trendlyne equity page.
     Returns (passed, detail_string).
+    debug_html=True dumps the first 2000 chars of page HTML + __NEXT_DATA__ keys
+    for diagnosing parser failures.
     """
     print("\n── Module 2: trendlyne_fetcher (fundamentals / DVM tier-2) ────")
     try:
-        from data.trendlyne_fetcher import get_trendlyne_fundamentals, get_trendlyne_dvm
+        from data.trendlyne_fetcher import (
+            get_trendlyne_fundamentals, get_trendlyne_dvm,
+            _fetch_and_cache, _parse_next_data_fundamentals,
+        )
 
         passed = False
         last_error = "no symbols tried"
 
         for sym in SAMPLE_SYMBOLS:
             t0 = time.time()
-            fundamentals = get_trendlyne_fundamentals(sym)
+
+            # Run the internal cache fetch so we can inspect raw HTML on failure
+            entry = _fetch_and_cache(sym)
             elapsed = time.time() - t0
 
-            if fundamentals is None:
-                print(f"  {WARN}  get_trendlyne_fundamentals({sym}): returned None ({elapsed:.1f}s)")
-                last_error = f"{sym} returned None"
+            if entry is None:
+                print(f"  {FAIL}  _fetch_and_cache({sym}): returned None ({elapsed:.1f}s) — page not reachable")
+                print("         Trendlyne equity page fetch failed entirely (HTTP error / timeout)")
+                last_error = f"{sym} page not reachable"
+                if debug_html:
+                    print("         (no HTML to inspect)")
                 continue
 
-            # Show a few key fields
-            pe     = _fmt(fundamentals.get("pe"))
-            roe    = _fmt(fundamentals.get("roe"), "%")
+            # Show __NEXT_DATA__ parse result for diagnosis
+            html = entry.get("_html", "")
+            nd_metrics = _parse_next_data_fundamentals(html)
+            nd_filled  = sum(1 for v in nd_metrics.values() if v is not None)
+
+            has_next_data = '<script id="__NEXT_DATA__"' in html or "<script id='__NEXT_DATA__'" in html
+            merged = entry.get("fundamentals", {})
+            merged_filled = sum(1 for v in merged.values() if v is not None)
+
+            if debug_html:
+                print(f"\n  [DEBUG] {sym} page HTML (first 1500 chars):")
+                print("  " + html[:1500].replace("\n", "\n  "))
+                print(f"\n  [DEBUG] __NEXT_DATA__ present: {has_next_data}")
+                print(f"  [DEBUG] __NEXT_DATA__ metrics found: {nd_metrics}")
+
+            if not has_next_data:
+                print(f"  {WARN}  {sym}: no __NEXT_DATA__ script tag found in page HTML ({elapsed:.1f}s)")
+                print("         Page may be a login redirect, CAPTCHA, or Cloudflare challenge.")
+                print("         Check the page content with --debug-html")
+            else:
+                print(f"  {'✓' if nd_filled > 0 else '!'} {sym}: __NEXT_DATA__ found, "
+                      f"metrics extracted={nd_filled}/{len(nd_metrics)} ({elapsed:.1f}s)")
+
+            # Now check get_trendlyne_fundamentals result
+            fundamentals = get_trendlyne_fundamentals(sym)
+
+            if fundamentals is None:
+                print(f"  {FAIL}  get_trendlyne_fundamentals({sym}): returned None "
+                      f"(merged_filled={merged_filled}, nd_filled={nd_filled})")
+                if nd_filled == 0 and has_next_data:
+                    print("         __NEXT_DATA__ present but yielded 0 metrics — Trendlyne changed their")
+                    print("         data schema. Add new key aliases to _parse_next_data_fundamentals().")
+                    print("         Run with --debug-html to see the raw __NEXT_DATA__ JSON keys.")
+                elif nd_filled > 0 and merged_filled < 2:
+                    print(f"         __NEXT_DATA__ found {nd_filled} metrics but merged result has only")
+                    print(f"         {merged_filled} — completeness threshold (needs ≥2 key fields) not met.")
+                last_error = f"{sym} returned None (nd={nd_filled} fields)"
+                continue
+
+            # Pass
+            pe      = _fmt(fundamentals.get("pe"))
+            roe     = _fmt(fundamentals.get("roe"), "%")
             debt_eq = _fmt(fundamentals.get("debt_equity"))
-            rev_gr = _fmt(fundamentals.get("revenue_growth"), "%")
+            rev_gr  = _fmt(fundamentals.get("revenue_growth"), "%")
             print(f"  {PASS}  {sym} fundamentals ({elapsed:.1f}s): PE={pe}  ROE={roe}  D/E={debt_eq}  RevGrowth={rev_gr}")
 
-            # Non-zero field count (data quality indicator)
             non_none = sum(1 for v in fundamentals.values() if v is not None)
             total    = len(fundamentals)
             print(f"         Data completeness: {non_none}/{total} fields populated")
             if non_none < 5:
-                print(f"  {WARN}  Very low completeness ({non_none}/{total}) — HTML structure may have changed")
+                print(f"  {WARN}  Very low completeness ({non_none}/{total}) — parser may need new key aliases")
 
             # DVM score
             dvm = get_trendlyne_dvm(sym)
-            if dvm:
-                composite = _fmt(dvm.get("composite_dvm"))
-                durability = _fmt(dvm.get("durability"))
-                valuation  = _fmt(dvm.get("valuation"))
-                momentum   = _fmt(dvm.get("momentum"))
+            if dvm and dvm.get("composite_dvm") is not None:
+                composite  = _fmt(dvm.get("composite_dvm"))
+                durability = _fmt(dvm.get("durability_score"))
+                valuation  = _fmt(dvm.get("valuation_score"))
+                momentum   = _fmt(dvm.get("momentum_score"))
                 print(f"  {PASS}  {sym} DVM: composite={composite}  D={durability}  V={valuation}  M={momentum}")
             else:
-                print(f"  {WARN}  get_trendlyne_dvm({sym}): returned None (DVM scores not critical)")
+                print(f"  {WARN}  get_trendlyne_dvm({sym}): composite_dvm=None (DVM not critical but useful)")
 
             passed = True
             break
 
         if not passed:
             print(f"  {FAIL}  All sample symbols returned None — Trendlyne fundamentals scraper is broken")
-            print("         Check: TRENDLYNE_SESSION/CSRF valid? Trendlyne HTML structure changed?")
+            if not debug_html:
+                print("         Re-run with --debug-html to dump the raw page content + __NEXT_DATA__ keys")
             return False, last_error
 
         return True, f"{sym} fundamentals OK"
@@ -377,6 +426,11 @@ def main() -> int:
         action="store_true",
         help="Only run the F&O fetcher check (fastest, no cookie needed)",
     )
+    parser.add_argument(
+        "--debug-html",
+        action="store_true",
+        help="Dump raw page HTML + __NEXT_DATA__ keys when fundamentals check fails (for diagnosis)",
+    )
     args = parser.parse_args()
 
     print("=" * 65)
@@ -397,7 +451,7 @@ def main() -> int:
 
     if not args.fno_only:
         # Module 2: Fundamentals (requires valid session)
-        results["fundamentals"] = check_fundamentals_fetcher()
+        results["fundamentals"] = check_fundamentals_fetcher(debug_html=args.debug_html)
 
         # Module 3: Analyst targets (requires valid session)
         results["analyst"] = check_analyst_fetcher()

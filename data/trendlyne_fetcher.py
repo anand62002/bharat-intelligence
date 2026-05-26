@@ -148,6 +148,212 @@ def _safe_float(text: Optional[str]) -> Optional[float]:
     return None
 
 
+def _parse_next_data_fundamentals(html: str) -> dict:
+    """
+    Strategy 0: extract fundamental metrics from the Next.js __NEXT_DATA__ blob.
+
+    Trendlyne is a Next.js app; all server-side data is serialised into
+        <script id="__NEXT_DATA__" type="application/json">{ ... }</script>
+    This is the authoritative source now that `data-metrics` HTML attributes
+    are no longer rendered server-side.
+
+    We walk the entire JSON tree recursively (depth-limited to 15) and map
+    any key whose name matches a known alias to our canonical metric name.
+    Returns a flat dict of canonical_name → float (None omitted).
+    """
+    metrics: dict[str, float] = {}
+
+    # Find the __NEXT_DATA__ script tag
+    nd_start = html.find('"__NEXT_DATA__"')
+    # More reliable: look for the script tag directly
+    tag_start = html.find('<script id="__NEXT_DATA__"')
+    if tag_start == -1:
+        tag_start = html.find("<script id='__NEXT_DATA__'")
+    if tag_start == -1:
+        return metrics
+
+    tag_end = html.find("</script>", tag_start)
+    if tag_end == -1:
+        return metrics
+
+    json_start = html.find(">", tag_start) + 1
+    raw_json = html[json_start:tag_end].strip()
+    try:
+        nd = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return metrics
+
+    # Alias map: canonical_key → set of possible JSON key names (lower-cased)
+    # Covers camelCase, snake_case, and abbreviated variants seen in Trendlyne's
+    # Next.js data layer across multiple page versions.
+    _ALIASES: dict[str, list[str]] = {
+        "pe": [
+            "pe", "pe_ratio", "peRatio", "price_earnings", "price_to_earnings",
+            "trailingpe", "trailingPE", "pricetoearningsratio",
+        ],
+        "ebitda_margin": [
+            "opm", "opm_pct", "opmPercent", "operating_profit_margin",
+            "ebitda_margin", "ebitdaMargin", "ebitdamargins", "operatingmargin",
+            "operatingMargin", "opmPercent", "operating_margin",
+        ],
+        "revenue_growth": [
+            "revenue_growth", "revenueGrowth", "sales_growth", "salesGrowth",
+            "revenue_growth_1y", "sales_growth_1y", "toplineGrowth",
+            "revenuegrowthpct", "salesGrowthPct",
+        ],
+        "revenue_cagr_3y": [
+            "revenue_cagr_3y", "revenueCagr3y", "sales_cagr_3y", "salesCagr3y",
+            "revenueGrowth3y", "salesGrowth3y", "revenue_growth_3yr",
+        ],
+        "revenue_cagr_5y": [
+            "revenue_cagr_5y", "revenueCagr5y", "sales_cagr_5y", "salesCagr5y",
+            "revenueGrowth5y", "salesGrowth5y",
+        ],
+        "eps_cagr_3y": [
+            "eps_cagr_3y", "epsCagr3y", "profit_cagr_3y", "profitCagr3y",
+            "pat_cagr_3y", "earningsGrowth3y", "profitGrowth3y", "netprofitGrowth3y",
+        ],
+        "eps_cagr_5y": [
+            "eps_cagr_5y", "epsCagr5y", "profit_cagr_5y", "profitCagr5y",
+            "pat_cagr_5y", "earningsGrowth5y",
+        ],
+        "roce": [
+            "roce", "rocePercent", "return_on_capital_employed",
+            "returnOnCapitalEmployed", "returnoncapital",
+        ],
+        "roe": [
+            "roe", "roePercent", "return_on_equity", "returnOnEquity",
+            "returnOnEquityPercent",
+        ],
+        "debt_equity": [
+            "de_ratio", "deRatio", "debt_equity", "debtEquity", "debtToEquity",
+            "debt_to_equity", "debttoequity",
+        ],
+        "promoter_holding": [
+            "promoter_holding", "promoterHolding", "promoterHoldingPct",
+            "promoter_shareholding", "promoterShareholding",
+        ],
+        "promoter_pledging": [
+            "promoter_pledging", "promoterPledging", "pledgingPct",
+            "pledgedPct", "pledgepct",
+        ],
+        "fii_holding_pct": [
+            "fii_holding", "fiiHolding", "fiiHoldingPct", "fii_pct",
+            "fpiHolding", "foreign_institutional", "foreignInstitutional",
+        ],
+        "dii_holding_pct": [
+            "dii_holding", "diiHolding", "diiHoldingPct", "dii_pct",
+            "domestic_institutional", "domesticInstitutional",
+        ],
+        "market_cap": [
+            "market_cap", "marketCap", "market_cap_cr", "marketCapCr",
+            "marketCapitalisation", "mcap",
+        ],
+        "interest_coverage": [
+            "interest_coverage", "interestCoverage", "interestCoverageRatio",
+            "icr", "interest_cover",
+        ],
+    }
+
+    # Build a flat lookup: alias_lower → canonical
+    _alias_lookup: dict[str, str] = {}
+    for canonical, aliases in _ALIASES.items():
+        for alias in aliases:
+            _alias_lookup[alias.lower()] = canonical
+
+    def _walk(obj: object, depth: int = 0) -> None:
+        if depth > 15 or not isinstance(obj, (dict, list)):
+            return
+        if isinstance(obj, list):
+            for item in obj:
+                _walk(item, depth + 1)
+            return
+        for k, v in obj.items():
+            canonical = _alias_lookup.get(k.lower())
+            if canonical and canonical not in metrics:
+                # Value may be a bare number, string, or nested {"value": ...}
+                raw_val = v
+                if isinstance(v, dict):
+                    raw_val = v.get("value") or v.get("val") or v.get("data")
+                if raw_val is not None:
+                    parsed = _safe_float(str(raw_val))
+                    if parsed is not None:
+                        metrics[canonical] = parsed
+            elif isinstance(v, (dict, list)):
+                _walk(v, depth + 1)
+
+    _walk(nd)
+    return metrics
+
+
+def _parse_next_data_dvm(html: str) -> dict:
+    """
+    Strategy 0 for DVM scores: extract durability/valuation/momentum from
+    the __NEXT_DATA__ JSON blob.  Returns dict with same keys as _parse_dvm_scores().
+    """
+    result: dict[str, Optional[float]] = {
+        "durability_score": None,
+        "valuation_score":  None,
+        "momentum_score":   None,
+        "composite_dvm":    None,
+    }
+
+    tag_start = html.find('<script id="__NEXT_DATA__"')
+    if tag_start == -1:
+        tag_start = html.find("<script id='__NEXT_DATA__'")
+    if tag_start == -1:
+        return result
+
+    tag_end = html.find("</script>", tag_start)
+    if tag_end == -1:
+        return result
+
+    json_start = html.find(">", tag_start) + 1
+    try:
+        nd = json.loads(html[json_start:tag_end].strip())
+    except (json.JSONDecodeError, TypeError):
+        return result
+
+    _DVM_ALIASES = {
+        "durability_score": ["durability", "durabilityScore", "durability_score", "d_score", "dscore"],
+        "valuation_score":  ["valuation", "valuationScore", "valuation_score", "v_score", "vscore"],
+        "momentum_score":   ["momentum", "momentumScore", "momentum_score", "m_score", "mscore"],
+    }
+    _dvm_lookup: dict[str, str] = {}
+    for canonical, aliases in _DVM_ALIASES.items():
+        for alias in aliases:
+            _dvm_lookup[alias.lower()] = canonical
+
+    def _walk_dvm(obj: object, depth: int = 0) -> None:
+        if depth > 15 or not isinstance(obj, (dict, list)):
+            return
+        if isinstance(obj, list):
+            for item in obj:
+                _walk_dvm(item, depth + 1)
+            return
+        for k, v in obj.items():
+            canonical = _dvm_lookup.get(k.lower())
+            if canonical and result[canonical] is None:
+                raw_val = v
+                if isinstance(v, dict):
+                    raw_val = v.get("value") or v.get("val") or v.get("score")
+                if raw_val is not None:
+                    parsed = _safe_float(str(raw_val))
+                    if parsed is not None and 0 <= parsed <= 100:
+                        result[canonical] = parsed
+            elif isinstance(v, (dict, list)):
+                _walk_dvm(v, depth + 1)
+
+    _walk_dvm(nd)
+
+    scores = [v for v in (result["durability_score"], result["valuation_score"],
+                           result["momentum_score"]) if v is not None]
+    if scores:
+        result["composite_dvm"] = round(sum(scores) / len(scores), 1)
+
+    return result
+
+
 def _parse_data_metrics(soup: BeautifulSoup) -> dict:
     """
     Extract the `data-metrics` JSON attribute from the page.
@@ -157,6 +363,10 @@ def _parse_data_metrics(soup: BeautifulSoup) -> dict:
 
     The JSON keys vary across page versions; we apply a comprehensive
     alias map so any known variant is captured.
+
+    NOTE: As of mid-2025 Trendlyne migrated to Next.js and this attribute
+    is no longer server-side rendered.  _parse_next_data_fundamentals() is
+    now the primary parser; this function is kept as a legacy fallback.
 
     Returns a flat dict of normalised metric names → float.
     """
@@ -450,14 +660,31 @@ def _fetch_and_cache(symbol: str) -> Optional[dict]:
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Parse metrics using all strategies; merge (data-metrics takes priority)
+    # Strategy 0: __NEXT_DATA__ JSON blob (primary since Trendlyne migrated to Next.js)
+    metrics_nd  = _parse_next_data_fundamentals(html)
+    dvm_nd      = _parse_next_data_dvm(html)
+
+    filled_nd = sum(1 for v in metrics_nd.values() if v is not None)
+    logger.debug("trendlyne_fetcher: __NEXT_DATA__ yielded %d metrics for %s", filled_nd, clean)
+
+    # Strategy 1+2: legacy data-metrics attribute + label-text scan (fallback)
     metrics_primary   = _parse_data_metrics(soup)
     metrics_secondary = _parse_parameters_section(soup)
 
-    # Merge: primary wins where both have values
-    merged: dict = {**metrics_secondary, **{k: v for k, v in metrics_primary.items() if v is not None}}
+    # Merge all strategies: __NEXT_DATA__ wins, then data-metrics, then text scan
+    merged: dict = {
+        **metrics_secondary,
+        **{k: v for k, v in metrics_primary.items() if v is not None},
+        **metrics_nd,   # __NEXT_DATA__ is most authoritative
+    }
 
-    dvm = _parse_dvm_scores(soup, html)
+    # DVM: merge Next.js data with legacy HTML attribute strategies
+    dvm_legacy = _parse_dvm_scores(soup, html)
+    # __NEXT_DATA__ wins for fields it found; legacy fills gaps
+    dvm: dict = {
+        k: (dvm_nd.get(k) if dvm_nd.get(k) is not None else dvm_legacy.get(k))
+        for k in dvm_legacy
+    }
 
     # Market cap: Trendlyne often shows it in Crores — convert to absolute ₹
     # (matches yfinance.marketCap scale)
