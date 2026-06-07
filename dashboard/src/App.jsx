@@ -2162,14 +2162,17 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
           {/* Open positions */}
           {open.length>0&&(
             <div style={{marginBottom:10}}>
-              <div style={{fontSize:9,fontWeight:700,color:C.muted,marginBottom:5,textTransform:"uppercase"}}>Open Positions ({open.length})</div>
-              <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden"}}>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 55px 65px 65px 70px 80px",background:C.panel,padding:"5px 9px",gap:4}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                <div style={{fontSize:9,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Open Positions ({open.length})</div>
+                {open.length>15&&<button onClick={()=>setExpanded(e=>!e)} style={{fontSize:7,color:C.purple,background:"none",border:"none",cursor:"pointer",padding:0}}>showing all {open.length}</button>}
+              </div>
+              <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden",maxHeight:400,overflowY:"auto"}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 55px 65px 65px 70px 80px",background:C.panel,padding:"5px 9px",gap:4,position:"sticky",top:0,zIndex:1}}>
                   {["Symbol","Qty","Entry","Current","P&L%","Tier"].map(h=>(
                     <div key={h} style={{fontSize:7,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</div>
                   ))}
                 </div>
-                {open.slice(0,10).map((p,i)=>{
+                {open.map((p,i)=>{
                   const pct = p.unrealized_pnl_pct??0;
                   return(
                     <div key={p.id} style={{

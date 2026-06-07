@@ -130,15 +130,78 @@ def _fetch_price_on_date(
 
 
 def _fetch_current_price(yf_symbol: str) -> Optional[float]:
-    """Fetch latest available closing price."""
+    """Fetch latest available closing price (single symbol fallback)."""
     try:
-        hist = yf.Ticker(yf_symbol).history(period="5d", auto_adjust=True)
+        hist = yf.Ticker(yf_symbol).history(period="10d", auto_adjust=True)
         if hist.empty:
             return None
         return float(hist["Close"].dropna().iloc[-1])
     except Exception as exc:
-        log.debug("Current price fetch failed for %s: %s", yf_symbol, exc)
+        log.warning("Current price fetch failed for %s: %s", yf_symbol, exc)
         return None
+
+
+def _batch_fetch_prices(yf_symbols: list[str]) -> dict[str, Optional[float]]:
+    """
+    Fetch latest closing prices for a batch of symbols in a single yfinance call.
+
+    Returns mapping {yf_symbol → price_or_None}.  Falls back to single-ticker
+    calls only when the batch download returns no data at all, to avoid
+    per-symbol rate-limiting that causes ~50 of 60 symbols to silently fail.
+    """
+    if not yf_symbols:
+        return {}
+
+    prices: dict[str, Optional[float]] = {s: None for s in yf_symbols}
+
+    try:
+        import pandas as pd
+        # Single download for all symbols — one HTTP session, no per-call rate-limit
+        raw = yf.download(
+            yf_symbols,
+            period="10d",
+            auto_adjust=True,
+            actions=False,
+        )
+        if raw.empty:
+            raise ValueError("Empty batch download response")
+
+        close = raw.get("Close", raw.get("Adj Close"))
+        if close is None or (hasattr(close, "empty") and close.empty):
+            raise ValueError("No Close column in batch result")
+
+        # Handle single-symbol result (returns plain Series, not DataFrame)
+        if isinstance(close, pd.Series):
+            close = close.to_frame(name=yf_symbols[0])
+
+        for sym in yf_symbols:
+            try:
+                col = close[sym] if sym in close.columns else None
+                if col is not None:
+                    last = col.dropna()
+                    if not last.empty:
+                        prices[sym] = float(last.iloc[-1])
+            except Exception:
+                pass  # will stay None, handled below
+
+        missing = [s for s, v in prices.items() if v is None]
+        log.info(
+            "Batch price fetch: %d symbols, %d resolved, %d missing",
+            len(yf_symbols), len(yf_symbols) - len(missing), len(missing),
+        )
+
+        # Per-symbol retry only for the small subset that failed
+        for sym in missing:
+            prices[sym] = _fetch_current_price(sym)
+            if prices[sym] is not None:
+                log.debug("Single-ticker fallback resolved %s → %.2f", sym, prices[sym])
+
+    except Exception as exc:
+        log.warning("Batch price fetch failed (%s) — falling back to single-ticker calls", exc)
+        for sym in yf_symbols:
+            prices[sym] = _fetch_current_price(sym)
+
+    return prices
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,24 +301,31 @@ def open_new_positions(client, dry_run: bool = True) -> dict:
         log.info("No BUY recommendations found")
         return {"opened": 0, "skipped": 0, "errors": []}
 
-    # Fetch existing paper position rec_ids
+    # Fetch existing paper position rec_ids + open symbols (for symbol-level dedup)
     try:
         existing_rows = (
             client.table("paper_portfolio_positions")
-            .select("rec_id")
+            .select("rec_id,symbol,status")
             .execute()
             .data or []
         )
         existing_rec_ids: set[str] = {
             str(r["rec_id"]) for r in existing_rows if r.get("rec_id")
         }
+        # Symbol-level dedup: don't open a new position if one is already OPEN
+        open_symbols: set[str] = {
+            r["symbol"].upper() for r in existing_rows
+            if r.get("status") == "OPEN" and r.get("symbol")
+        }
     except Exception as exc:
         log.warning("Could not fetch existing positions: %s — assuming none", exc)
         existing_rec_ids = set()
+        open_symbols = set()
 
     log.info(
-        "BUY recs: %d total, %d already have positions, %d to process",
-        len(recs), len(existing_rec_ids), len(recs) - len(existing_rec_ids),
+        "BUY recs: %d total, %d already have positions, %d open symbols, %d to process",
+        len(recs), len(existing_rec_ids), len(open_symbols),
+        len(recs) - len(existing_rec_ids),
     )
 
     for rec in recs:
@@ -264,6 +334,16 @@ def open_new_positions(client, dry_run: bool = True) -> dict:
         action  = rec.get("action", "BUY")
 
         if rec_id in existing_rec_ids:
+            skipped += 1
+            continue
+
+        # Symbol-level dedup: skip if this stock already has an OPEN position
+        # (same stock recommended multiple days should not stack positions)
+        if symbol.upper() in open_symbols:
+            log.debug(
+                "[%s] Already has OPEN paper position — skipping duplicate rec %s",
+                symbol, rec_id,
+            )
             skipped += 1
             continue
 
@@ -341,6 +421,7 @@ def open_new_positions(client, dry_run: bool = True) -> dict:
         try:
             client.table("paper_portfolio_positions").insert(row).execute()
             opened += 1
+            open_symbols.add(symbol.upper())   # prevent double-open in same batch
             log.info(
                 "[%s] Paper position opened: entry=%.2f qty=%d alloc=₹%.0f %s",
                 symbol, entry_price, quantity, allocation_inr, entry_date,
@@ -390,6 +471,22 @@ def update_open_positions(client, dry_run: bool = True) -> dict:
 
     log.info("Updating %d OPEN positions", len(positions))
 
+    # ── Batch price fetch (one yfinance call for all symbols) ───────────────
+    all_yf_syms = list({
+        pos.get("yf_symbol") or _resolve_yf_symbol(pos["symbol"])
+        for pos in positions
+    })
+    all_yf_syms.append(NIFTY_SYMBOL)   # pre-fetch Nifty for exit alpha calc
+    price_cache: dict[str, Optional[float]] = _batch_fetch_prices(all_yf_syms)
+    nifty_now: Optional[float] = price_cache.get(NIFTY_SYMBOL)
+    log.info(
+        "Price cache ready: %d symbols, %d with prices (Nifty=%.0f)",
+        len(all_yf_syms),
+        sum(1 for v in price_cache.values() if v is not None),
+        nifty_now or 0,
+    )
+    # ────────────────────────────────────────────────────────────────────────
+
     for pos in positions:
         pos_id       = pos["id"]
         symbol       = pos["symbol"]
@@ -406,13 +503,13 @@ def update_open_positions(client, dry_run: bool = True) -> dict:
             log.warning("[%s] Invalid entry_date '%s' — skipping", symbol, pos.get("entry_date"))
             continue
 
-        # T+1 rule: don't close positions opened today
-        if entry_date >= today:
-            log.debug("[%s] Entry today — skipping exit checks (T+1 rule)", symbol)
-            continue
+        # T+1 rule: don't close positions opened today (but still update price)
+        skip_exits = (entry_date >= today)
+        if skip_exits:
+            log.debug("[%s] Entry today — updating price but skipping exit checks (T+1 rule)", symbol)
 
-        # Fetch current price
-        current_price = _fetch_current_price(yf_sym)
+        # Get price from cache (already fetched in batch above)
+        current_price = price_cache.get(yf_sym)
         if current_price is None:
             log.warning("[%s] Could not fetch current price — skipping update", symbol)
             errors.append(f"{symbol}: current price unavailable")
@@ -422,19 +519,20 @@ def update_open_positions(client, dry_run: bool = True) -> dict:
         unrealized_pnl   = current_value - (entry_price * quantity)
         unrealized_pnl_pct = ((current_price / entry_price) - 1) * 100 if entry_price else 0
 
-        # Check exit conditions
+        # Check exit conditions (skip for T+1 — positions opened today)
         exit_reason = None
-        if _is_stoploss_hit(current_price, entry_price, stoploss_price):
-            exit_reason = "STOPLOSS"
-        elif _is_target_hit(current_price, entry_price, target_price):
-            exit_reason = "TARGET"
-        elif _is_horizon_reached(entry_date, today):
-            exit_reason = "HORIZON"
+        if not skip_exits:
+            if _is_stoploss_hit(current_price, entry_price, stoploss_price):
+                exit_reason = "STOPLOSS"
+            elif _is_target_hit(current_price, entry_price, target_price):
+                exit_reason = "TARGET"
+            elif _is_horizon_reached(entry_date, today):
+                exit_reason = "HORIZON"
 
         if exit_reason:
             # Close position
             exit_price   = current_price
-            nifty_exit   = _fetch_current_price(NIFTY_SYMBOL)
+            nifty_exit   = nifty_now  # already in price_cache from batch fetch
             realized_pnl = (exit_price - entry_price) * quantity
             realized_pnl_pct = ((exit_price / entry_price) - 1) * 100 if entry_price else 0
 
