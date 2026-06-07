@@ -6,14 +6,25 @@ BlockingScheduler instance. Deploy as the `worker` dyno on Railway.
 
 Schedule (all times IST / Asia/Kolkata)
 ----------------------------------------
-  06:00  Daily orchestrator   — runs all 9 agents, synthesises recs, saves to DB
+  05:30  Market Digest MORNING — overnight global cues + domestic news before orchestrator
+  06:00  Daily orchestrator   — runs all 9 agents, synthesises recs (digest injected as context)
+  06:30  Regime detector      — market regime classification before orchestrator
+  06:55  Rec outcome seeder   — seed PENDING rows for new recs (P5-C)
   07:00  Performance tracker  — audits agent accuracy, writes agent_performance
+  07:05  Paper portfolio open — open paper positions for today's BUY recs (P5-B)
   07:30  Research agent       — scans arXiv / Semantic Scholar, saves proposals
+  08:00  Earnings calendar    — refresh earnings dates for portfolio + discovery symbols
+  08:15  RAG refresh (1st)    — monthly RAG corpus auto-refresh
+  08:30  GIFT Nifty signal    — pre-market futures premium (P6-D-7)
+  08:35  Breeze token refresh — ICICI session token (DEPRECATED, P4-D)
   09:15, 11:30, 13:30, 15:15  Portfolio monitor — danger/alert checks (market hours)
-  16:00  Portfolio risk      — concentration + correlation metrics after close
-  16:15  Paper portfolio     — refresh prices, check exits, save daily snapshot (P5-B)
-  16:30  Forward poller      — live price snapshot for all open recs + t+30 resolve (P5-D)
-  18:30  Outcome tracker     — resolve t+90/180/365 milestones (fires once horizons pass)
+  10:30  Discovery screener   — proactive stock discovery with live market prices
+  15:45  Options snapshot     — F&O metrics (PCR, max pain, ATM IV)
+  16:00  Portfolio risk       — concentration + correlation metrics after close
+  16:15  Paper portfolio      — refresh prices, check exits, save daily snapshot (P5-B)
+  16:20  Market Digest CLOSING — end-of-day recap
+  16:30  Forward poller       — live price snapshot for all open recs + t+30 resolve (P5-D)
+  18:30  Outcome tracker      — resolve t+90/180/365 milestones + sentiment validation (P5-D/P6-D-8)
 
 Usage
 -----
@@ -106,9 +117,14 @@ def job_research_agent() -> None:
 
 
 def job_market_digest_morning() -> None:
-    """08:45 IST — generate Morning Brief for Indian equity market (P6-C)."""
+    """05:30 IST — generate Morning Brief for Indian equity market (P6-C).
+
+    Runs BEFORE the orchestrator (06:00 IST) so the digest's market_mood,
+    nifty_signal, and sectors_in_focus are available to inject into every
+    synthesis prompt during the main pipeline run.
+    """
     log.info("-" * 50)
-    log.info("  JOB START: Market Digest Morning Brief (08:45 IST)")
+    log.info("  JOB START: Market Digest Morning Brief (05:30 IST)")
     log.info("-" * 50)
     try:
         from agents.market_digest import generate_digest, save_digest
@@ -436,6 +452,35 @@ def job_breeze_token_refresh() -> None:
         log.error("Breeze token refresh job failed: %s", exc, exc_info=True)
 
 
+def job_discovery_screener() -> None:
+    """10:30 IST — proactive discovery screener (P6 schedule redesign).
+
+    Moved from the orchestrator's LangGraph pipeline (was at 06:00 IST) to a
+    standalone post-open job at 10:30 IST. Running after market open means:
+    - Live intraday prices used instead of yesterday's close
+    - RSI / EMA signals reflect today's opening moves
+    - Overnight gap-ups/downs already priced in
+    - GIFT Nifty pre-market signal already processed by orchestrator
+    """
+    log.info("-" * 50)
+    log.info("  JOB START: Discovery Screener (10:30 IST — live prices)")
+    log.info("-" * 50)
+    try:
+        from agents.discovery_screener import run_discovery
+        results = run_discovery(save_to_db=True)
+        log.info(
+            "Discovery screener done — %d discoveries found",
+            len(results),
+        )
+        for dr in results:
+            log.info(
+                "  [%s] %s upside=%.1f%% conf=%.1f",
+                dr.opportunity_tier, dr.symbol, dr.upside_pct, dr.upside_confidence,
+            )
+    except Exception as exc:
+        log.error("Discovery screener job failed: %s", exc, exc_info=True)
+
+
 def job_portfolio_monitor() -> None:
     """Every 2h during market hours — danger / stoploss / target alerts."""
     log.info("-" * 50)
@@ -565,13 +610,16 @@ def build_scheduler():
     )
 
     # ── Market Digest — Morning Brief (P6-C) ─────────────────────────────────
-    # Runs at 08:45 IST: after Breeze refresh (08:30), before market open (09:15).
-    # Fetches overnight global cues + domestic news → Claude Haiku digest.
+    # Runs at 05:30 IST: 30 min before orchestrator (06:00).
+    # This is the key change from the previous schedule (was 08:45 IST, AFTER
+    # the orchestrator ran). Now the digest runs first so its market_mood /
+    # nifty_signal / sectors_in_focus are available to inject into every
+    # synthesis prompt during the 06:00 orchestrator run.
     scheduler.add_job(
         job_market_digest_morning,
-        CronTrigger(hour=8, minute=45, timezone=IST),
+        CronTrigger(hour=5, minute=30, timezone=IST),
         id="market_digest_morning",
-        name="Market Digest Morning Brief (08:45 IST)",
+        name="Market Digest Morning Brief (05:30 IST)",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=1800,
@@ -689,6 +737,20 @@ def build_scheduler():
             misfire_grace_time=600,
         )
 
+    # ── Discovery screener — post-market-open with live prices ───────────────
+    # 10:30 IST: ~75 min after NSE open (09:15). Using live intraday prices
+    # means RSI/EMA signals reflect today's real moves, not yesterday's close.
+    # Moved out of the orchestrator pipeline so it no longer blocks the morning
+    # synthesis run and can use the freshest available price data.
+    scheduler.add_job(
+        job_discovery_screener,
+        CronTrigger(hour=10, minute=30, timezone=IST),
+        id="discovery_screener",
+        name="Discovery Screener — Live Prices (10:30 IST)",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # ── Portfolio risk — after market close ───────────────────────────────────
     scheduler.add_job(
         job_portfolio_risk,
@@ -771,6 +833,7 @@ def main() -> None:
         job_gift_nifty_fetch()
         job_market_digest_morning()
         job_market_digest_closing()
+        job_discovery_screener()
         log.info("--now run complete. Starting scheduler...")
 
     try:

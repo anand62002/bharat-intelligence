@@ -675,3 +675,132 @@ async def validate_synthesis(
         judge_errors       = judge_errors,
         elapsed_seconds    = elapsed,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Discovery-specific validation (P6-D light hallucination check)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Lower kappa threshold for discovery — screens for hallucination only,
+# not trading-order quality.  constraint_awareness is excluded because
+# discovery recs are research ideas, not trade instructions.
+KAPPA_SUPPRESS_DISCOVERY = 0.35
+
+# Only the three rubrics that catch hallucination / logic errors.
+# constraint_awareness and risk_disclosure are omitted (not applicable to
+# discovery ideas — they have no stoploss/position-sizing fields).
+DISCOVERY_RUBRICS: dict[str, str] = {
+    k: v for k, v in RUBRICS.items()
+    if k in {"data_provenance", "logic_coherence", "market_state_alignment"}
+}
+
+
+async def validate_discovery_synthesis(
+    symbol:         str,
+    synthesis_data: dict,
+    agent_results:  dict[str, dict],
+    ant_client:     Any,
+) -> ValidationOutcome:
+    """
+    Light hallucination check for CRITICAL discovery recommendations.
+
+    Runs only 3 rubrics (data_provenance, logic_coherence, market_state_alignment)
+    and suppresses at κ < 0.35 (vs 0.50 for portfolio recs).
+
+    constraint_awareness and risk_disclosure are intentionally excluded:
+    discovery cards are "watch this stock" signals, not trading orders —
+    they don't have stoploss/position fields for those rubrics to evaluate.
+
+    Args:
+        symbol, synthesis_data, agent_results, ant_client: same as validate_synthesis().
+
+    Returns:
+        ValidationOutcome with .status ∈ {'PASS', 'QUALIFIED', 'SUPPRESSED'}.
+    """
+    t0            = time.time()
+    judge_errors: list[str] = []
+
+    agent_summary = _build_agent_summary(agent_results)
+    syn_fields    = _synthesis_fields(symbol, synthesis_data)
+
+    task_keys:  list[tuple[str, str]] = []
+    coroutines: list                  = []
+
+    for rubric_name, rubric_def in DISCOVERY_RUBRICS.items():
+        prompt = _JUDGE_PROMPT.format(
+            rubric_name       = rubric_name,
+            rubric_definition = rubric_def,
+            agent_summary     = agent_summary,
+            **syn_fields,
+        )
+        for judge_name, model_id in JUDGE_MODELS.items():
+            task_keys.append((rubric_name, judge_name))
+            coroutines.append(
+                _call_judge(judge_name, model_id, rubric_name, prompt, ant_client)
+            )
+
+    log.info(
+        "[%s] Discovery validation: %d judge calls (%d rubrics × %d models, κ≥%.2f)...",
+        symbol, len(coroutines), len(DISCOVERY_RUBRICS), len(JUDGE_MODELS),
+        KAPPA_SUPPRESS_DISCOVERY,
+    )
+
+    gather_results = await asyncio.gather(*coroutines, return_exceptions=True)
+
+    raw: dict[tuple[str, str], tuple[int, str] | None] = {}
+    for (rubric_name, judge_name), result in zip(task_keys, gather_results):
+        if isinstance(result, Exception):
+            judge_errors.append(str(result))
+            raw[(rubric_name, judge_name)] = None
+        else:
+            raw[(rubric_name, judge_name)] = result
+
+    dimensions: dict[str, DimensionResult] = {}
+    for rubric_name in DISCOVERY_RUBRICS:
+        scores:     dict[str, int] = {}
+        rationales: dict[str, str] = {}
+        for judge_name in JUDGE_MODELS:
+            result = raw.get((rubric_name, judge_name))
+            if result is not None:
+                scores[judge_name], rationales[judge_name] = result
+        quality, agreement, kappa = _compute_dimension_kappa(list(scores.values()))
+        dimensions[rubric_name] = DimensionResult(
+            name=rubric_name, scores=scores, rationales=rationales,
+            quality=quality, agreement=agreement, kappa=kappa,
+        )
+
+    aggregate_kappa = round(
+        sum(d.kappa for d in dimensions.values()) / max(len(dimensions), 1), 4,
+    )
+
+    status: str = "PASS"
+    suppression_reason: Optional[str] = None
+
+    if aggregate_kappa < KAPPA_SUPPRESS_DISCOVERY:
+        status = "SUPPRESSED"
+        dim_detail = ", ".join(f"{n}={d.kappa:.3f}" for n, d in dimensions.items())
+        suppression_reason = (
+            f"Discovery validation: aggregate κ {aggregate_kappa:.3f} < "
+            f"{KAPPA_SUPPRESS_DISCOVERY} (hallucination threshold). "
+            f"Breakdown: [{dim_detail}]."
+        )
+
+    elapsed = round(time.time() - t0, 2)
+    log.info(
+        "[%s] Discovery validation %s  κ=%.3f  %.1fs",
+        symbol, status, aggregate_kappa, elapsed,
+    )
+    if status == "SUPPRESSED":
+        log.warning("[%s] CRITICAL discovery SUPPRESSED by hallucination check: %s",
+                    symbol, suppression_reason)
+
+    return ValidationOutcome(
+        status             = status,
+        aggregate_kappa    = aggregate_kappa,
+        dimensions         = dimensions,
+        failed_dimensions  = [n for n, d in dimensions.items() if d.failed],
+        caveats            = [],
+        suppression_reason = suppression_reason,
+        judge_errors       = judge_errors,
+        elapsed_seconds    = elapsed,
+    )

@@ -1563,6 +1563,89 @@ def run_discovery(
                 eps_growth_pct    = fwd_eps_gr,
             )
 
+            # ── CRITICAL discovery: light hallucination check (P6-D κ≥0.35) ──────
+            # STANDARD discoveries skip the validator — existing consensus gate is
+            # sufficient.  CRITICAL discoveries run a 3-rubric kappa check to catch
+            # hallucinations before they reach the dashboard.
+            if tier == "CRITICAL":
+                try:
+                    import asyncio as _asyncio
+                    import anthropic as _anthropic
+                    from scheduler.synthesis_validator import validate_discovery_synthesis as _vds
+
+                    _ant_key = os.environ.get("ANTHROPIC_API_KEY", "")
+                    if _ant_key:
+                        _ant_client = _anthropic.Anthropic(api_key=_ant_key)
+                        # run_discovery() is synchronous — use asyncio.run() to call async validator
+                        try:
+                            _loop = _asyncio.get_event_loop()
+                            if _loop.is_running():
+                                # running inside async context (orchestrator) — create a sub-loop
+                                import concurrent.futures as _cf
+                                with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                                    _future = _ex.submit(
+                                        _asyncio.run,
+                                        _vds(symbol, {"action": "BUY", "upside_pct": upside_pct,
+                                                      "confidence": upside_conf}, agent_results, _ant_client)
+                                    )
+                                    _vout = _future.result(timeout=90)
+                            else:
+                                _vout = _loop.run_until_complete(
+                                    _vds(symbol, {"action": "BUY", "upside_pct": upside_pct,
+                                                  "confidence": upside_conf}, agent_results, _ant_client)
+                                )
+                        except RuntimeError:
+                            _vout = _asyncio.run(
+                                _vds(symbol, {"action": "BUY", "upside_pct": upside_pct,
+                                              "confidence": upside_conf}, agent_results, _ant_client)
+                            )
+
+                        if _vout.status == "SUPPRESSED":
+                            log.warning(
+                                "  ⛔ %s CRITICAL suppressed by hallucination check (κ=%.3f) — "
+                                "demoting to STANDARD: %s",
+                                symbol, _vout.aggregate_kappa, _vout.suppression_reason,
+                            )
+                            # Demote to STANDARD rather than discard — signal may still be real
+                            if upside_pct >= _STANDARD_UPSIDE and upside_conf >= _STANDARD_CONF:
+                                tier = "STANDARD"
+                                dr = DiscoveryResult(
+                                    symbol            = symbol,
+                                    opportunity_tier  = "STANDARD",
+                                    upside_pct        = dr.upside_pct,
+                                    upside_confidence = dr.upside_confidence,
+                                    upside_basis      = dr.upside_basis,
+                                    upside_horizon    = dr.upside_horizon,
+                                    screen_triggers   = dr.screen_triggers,
+                                    agent_signals     = dr.agent_signals,
+                                    composite_score   = dr.composite_score,
+                                    current_price     = dr.current_price,
+                                    sector            = dr.sector,
+                                    liquidity_tier    = dr.liquidity_tier,
+                                    impact_cost_pct   = dr.impact_cost_pct,
+                                    forward_pe        = dr.forward_pe,
+                                    peg_ratio_fwd     = dr.peg_ratio_fwd,
+                                    eps_growth_pct    = dr.eps_growth_pct,
+                                )
+                            else:
+                                log.info("  %s also fails STANDARD thresholds — discarding", symbol)
+                                continue
+                        else:
+                            log.info(
+                                "  ✅ %s CRITICAL passed hallucination check (κ=%.3f, %s)",
+                                symbol, _vout.aggregate_kappa, _vout.status,
+                            )
+                    else:
+                        log.debug(
+                            "  %s CRITICAL hallucination check skipped (no ANTHROPIC_API_KEY)",
+                            symbol,
+                        )
+                except Exception as _ve:
+                    log.warning(
+                        "  %s CRITICAL hallucination check failed (%s) — keeping CRITICAL",
+                        symbol, _ve,
+                    )
+
             # ── Persist ───────────────────────────────────────────────────────
             if save_to_db:
                 rec_id = _save_discovery(dr)

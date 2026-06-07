@@ -907,6 +907,59 @@ async def synthesise_node(state: OrchestratorState) -> dict:
 
     recommendations: list[dict] = []
 
+    # ── Morning Digest context (P6-C wiring) ─────────────────────────────────
+    # Fetch today's MORNING digest (or yesterday's CLOSING as fallback) to inject
+    # market_mood / nifty_signal / sectors_in_focus into every synthesis prompt.
+    # This costs nothing extra — a single DB read shared across all symbols.
+    # The morning digest now runs at 05:30 IST, before this orchestrator (06:00),
+    # so it will always be available by the time we reach this node.
+    _digest_context: str = ""
+    try:
+        _db = _supabase()
+        if _db:
+            import datetime as _dt
+            _today_str = _dt.date.today().isoformat()
+            _yesterday_str = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
+            _digest_row = None
+            # Try today MORNING first
+            _dr = _db.table("market_digests").select(
+                "market_mood,nifty_signal,sectors_in_focus,summary,digest_type,digest_date"
+            ).eq("digest_type", "MORNING").eq("digest_date", _today_str).limit(1).execute()
+            if _dr.data:
+                _digest_row = _dr.data[0]
+            else:
+                # Fallback: yesterday's CLOSING digest
+                _dc = _db.table("market_digests").select(
+                    "market_mood,nifty_signal,sectors_in_focus,summary,digest_type,digest_date"
+                ).eq("digest_type", "CLOSING").eq("digest_date", _yesterday_str).limit(1).execute()
+                if _dc.data:
+                    _digest_row = _dc.data[0]
+            if _digest_row:
+                _sectors = _digest_row.get("sectors_in_focus") or []
+                if isinstance(_sectors, list):
+                    _sectors_str = ", ".join(_sectors) if _sectors else "—"
+                else:
+                    _sectors_str = str(_sectors)
+                _digest_context = (
+                    f"\n## TODAY'S MARKET DIGEST "
+                    f"({_digest_row.get('digest_type')} — {_digest_row.get('digest_date')})\n"
+                    f"Market Mood: **{_digest_row.get('market_mood', 'NEUTRAL')}**\n"
+                    f"NIFTY Signal: {_digest_row.get('nifty_signal', 'N/A')}\n"
+                    f"Sectors in Focus: {_sectors_str}\n"
+                    f"Summary: {_digest_row.get('summary', '')}\n\n"
+                    "Use this market context to calibrate your conviction appropriately. "
+                    "A BEARISH mood should raise the bar for BUY calls; a BULLISH mood "
+                    "should not inflate confidence beyond what the stock fundamentals support.\n\n"
+                )
+                log.info(
+                    "Morning digest injected into synthesis: mood=%s nifty=%s sectors=%s",
+                    _digest_row.get("market_mood"), _digest_row.get("nifty_signal"), _sectors_str,
+                )
+            else:
+                log.debug("No morning/closing digest found for %s — synthesis proceeds without digest context", _today_str)
+    except Exception as _de:
+        log.warning("Morning digest fetch for synthesis failed (non-fatal): %s", _de)
+
     for symbol, agent_results in symbol_results.items():
         try:
             regime_label = current_regime.get("regime") if current_regime else None
@@ -971,6 +1024,13 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                         f"  - Momentum (RSI): {current_regime.get('momentum_state')}\n\n"
                     )
                     prompt = regime_line + prompt
+
+                # ── Morning digest context injection ──────────────────────────
+                # Prepend today's market mood / NIFTY signal / sector focus so
+                # synthesis calibrates conviction against the current market day.
+                # Fetched once before the per-symbol loop (see _digest_context above).
+                if _digest_context:
+                    prompt = _digest_context + prompt
 
                 log.info("[%s] Calling Claude Sonnet for synthesis...", symbol)
                 # Retry up to 3 times on 529 Overloaded / 529-like transient errors.
@@ -1536,6 +1596,14 @@ async def log_run_node(state: OrchestratorState) -> dict:
     except Exception as exc:
         log.warning("daily_runs log failed: %s", exc)
 
+    # ── Completion sentinel ──────────────────────────────────────────────────
+    # Intentionally verbose so it survives Railway's 1000-line log-window cap
+    # and confirms the full pipeline ran to completion.
+    import datetime as _dt
+    log.info(
+        "ORCHESTRATOR_COMPLETE run_date=%s pipeline=OK",
+        _dt.date.today().isoformat(),
+    )
     return {}
 
 
@@ -1660,7 +1728,9 @@ def _build_graph():
     builder.add_node("save_recs",          save_recs_node)
     builder.add_node("monitor",            monitor_node)
     builder.add_node("log_run",            log_run_node)
-    builder.add_node("run_discovery",      run_discovery_node)
+    # NOTE: run_discovery_node removed from pipeline (P6 schedule redesign).
+    # Discovery now runs as a standalone job at 10:30 IST in worker.py after
+    # market open, so it uses live intraday prices instead of yesterday's close.
 
     builder.set_entry_point("sector_pe_snapshot")
     builder.add_edge("sector_pe_snapshot", "load_symbols")
@@ -1671,8 +1741,7 @@ def _build_graph():
     builder.add_edge("fact_check",         "save_recs")
     builder.add_edge("save_recs",          "monitor")
     builder.add_edge("monitor",            "log_run")
-    builder.add_edge("log_run",            "run_discovery")
-    builder.add_edge("run_discovery",      END)
+    builder.add_edge("log_run",            END)
 
     return builder.compile()
 
