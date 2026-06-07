@@ -289,9 +289,52 @@ def _compute_dimension_kappa(scores: list[int]) -> tuple[float, float, float]:
 
 def _build_agent_summary(agent_results: dict[str, dict]) -> str:
     """
-    Compact one-line-per-agent summary of agent signals for judge context.
-    Capped at 20 lines (~600 chars) to stay within judge token budget.
+    One-line-per-agent summary with key metrics for judges to verify data
+    provenance claims in the synthesis.  Capped at 30 lines (~1 200 chars).
+
+    Per-agent key fields extracted for traceability:
+      fundamental : pe_ratio, roce_pct, revenue_growth_pct, debt_equity, market_cap_cr
+      technical   : rsi, ema200_gap_pct, trend
+      macro       : vix_level, fii_net_5d, macro_score
+      institutional: fii_5d_flow, dii_5d_flow, net_institutional
+      warren_bot  : score, moat_type, margin_of_safety_pct
+      (all others): signal + score + upside_pct + danger_drop_pct
     """
+    # Per-agent key fields for traceability (field name in agent result → label)
+    _AGENT_KEYS: dict[str, list[str]] = {
+        "fundamental":   ["pe_ratio", "roce_pct", "revenue_growth_pct",
+                          "debt_equity", "market_cap_cr", "upside_pct"],
+        "technical":     ["rsi", "ema200_gap_pct", "trend",
+                          "upside_pct", "danger_drop_pct"],
+        "macro":         ["macro_score", "fii_net_5d", "vix_level",
+                          "macro_news_signal"],
+        "institutional": ["fii_5d_flow", "dii_5d_flow", "net_institutional",
+                          "institutional_holding_pct"],
+        "sector_valuation": ["pe_ratio", "regime", "sector_pe_vs_avg"],
+        "warren_bot":    ["moat_type", "margin_of_safety_pct", "roce_avg",
+                          "eps_cagr_5yr", "disqualifiers"],
+        "historical_rag": ["matched_event", "similarity_score"],
+        "sentiment":     ["sentiment_score", "event_count", "top_event_type"],
+    }
+
+    def _extract_extras(name: str, res: dict) -> list[str]:
+        extras: list[str] = []
+        # Per-agent specific keys first
+        for k in _AGENT_KEYS.get(name, []):
+            v = res.get(k)
+            if v is None:
+                # Also check inside detail dict
+                det = res.get("detail") or {}
+                if isinstance(det, dict):
+                    v = det.get(k)
+            if v is not None:
+                extras.append(f"{k}={v}")
+        # Always append generic upside / danger if not already included
+        for k in ("upside_pct", "danger_drop_pct"):
+            if k not in _AGENT_KEYS.get(name, []) and res.get(k) is not None:
+                extras.append(f"{k}={res[k]}")
+        return extras[:8]  # cap at 8 per agent to control length
+
     lines: list[str] = []
     for name, res in agent_results.items():
         if not res:
@@ -299,19 +342,11 @@ def _build_agent_summary(agent_results: dict[str, dict]) -> str:
         sig   = res.get("signal", "N/A")
         score = res.get("score",  "N/A")
         line  = f"{name}: {sig}  score={score}"
-        extras: list[str] = []
-        for k in ("upside_pct", "danger_drop_pct", "fii_net_5d"):
-            if res.get(k) is not None:
-                extras.append(f"{k}={res[k]}")
-        # One detail field from the detail dict (e.g. rsi value)
-        det = res.get("detail") or {}
-        if isinstance(det, dict):
-            for dk, dv in list(det.items())[:1]:
-                extras.append(f"{dk}={dv}")
+        extras = _extract_extras(name, res)
         if extras:
-            line += f"  [{', '.join(extras)}]"
+            line += f"  [{', '.join(str(e) for e in extras)}]"
         lines.append(line)
-    return "\n".join(lines[:20])
+    return "\n".join(lines[:30])
 
 
 def _synthesis_fields(symbol: str, sd: dict) -> dict[str, str]:
@@ -326,6 +361,15 @@ def _synthesis_fields(symbol: str, sd: dict) -> dict[str, str]:
             return "; ".join(str(x) for x in v)[:300]
         return str(v)[:300]
 
+    # Inline the market_constraints note into synthesis_text so the judge
+    # prompt includes it when scoring the constraint_awareness rubric.
+    raw_synthesis = _s(sd.get("synthesis"), "Not provided")
+    mc_note       = sd.get("market_constraints")
+    if mc_note:
+        synthesis_with_constraints = f"{raw_synthesis}  [Market constraints: {_s(mc_note)}]"
+    else:
+        synthesis_with_constraints = raw_synthesis
+
     return {
         "symbol":         symbol,
         "action":         _s(sd.get("action")),
@@ -333,7 +377,7 @@ def _synthesis_fields(symbol: str, sd: dict) -> dict[str, str]:
         "headline":       _s(sd.get("headline"), ""),
         "bull_case":      _s(sd.get("bull_case"),    "Not provided"),
         "bear_case":      _s(sd.get("bear_case"),    "Not provided"),
-        "synthesis_text": _s(sd.get("synthesis"),    "Not provided"),
+        "synthesis_text": synthesis_with_constraints,
         "entry_low":      _s(sd.get("entry_low")),
         "entry_high":     _s(sd.get("entry_high")),
         "target":         _s(sd.get("target")),

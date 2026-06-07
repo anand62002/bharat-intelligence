@@ -205,15 +205,17 @@ def _try_refresh_cookies() -> bool:
 # HTTP fetch helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _fetch_page(url: str, *, retry_on_login: bool = True) -> Optional[str]:
+def _fetch_page(url: str, *, retry_on_login: bool = True,
+                _proxy_retries: int = 2) -> Optional[str]:
     """
     Fetch a Trendlyne page, handling:
-      • 302 redirect to /login/  → attempt cookie refresh once then retry
+      • 302 redirect to /login/   → attempt cookie refresh once then retry
       • Non-200 responses
-      • Network errors
+      • Network / proxy disconnects → rebuild session and retry up to 2×
 
     Returns HTML string or None on failure.
     """
+    global _session
     s = _get_session()
     try:
         resp = s.get(url, timeout=30, allow_redirects=False)
@@ -261,6 +263,20 @@ def _fetch_page(url: str, *, retry_on_login: bool = True) -> Optional[str]:
         logger.warning("Trendlyne HTTP %d for %s", resp.status_code, url)
         return None
 
+    except requests.exceptions.ProxyError as exc:
+        # Proxy connection dropped (RemoteDisconnected).  Rebuild the session
+        # (new connection pool) and retry up to _proxy_retries times.
+        if _proxy_retries > 0:
+            logger.warning(
+                "Trendlyne proxy disconnect for %s (%s) — rebuilding session "
+                "and retrying (%d retries left)",
+                url, exc, _proxy_retries,
+            )
+            _session = _make_session()   # fresh connection pool
+            return _fetch_page(url, retry_on_login=retry_on_login,
+                               _proxy_retries=_proxy_retries - 1)
+        logger.warning("Trendlyne proxy error (retries exhausted) for %s: %s", url, exc)
+        return None
     except requests.RequestException as exc:
         logger.warning("Trendlyne request failed for %s: %s", url, exc)
         return None

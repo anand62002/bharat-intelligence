@@ -1377,6 +1377,12 @@ async def save_recs_node(state: OrchestratorState) -> dict:
             row["valid_till"] = str(
                 date.today() + timedelta(days=int(rec.get("horizon_days", 180)))
             )
+            # Nest market_constraints inside metadata JSONB (no separate column needed)
+            mc = rec.get("market_constraints")
+            if mc:
+                row.setdefault("metadata", {})
+                if isinstance(row["metadata"], dict):
+                    row["metadata"]["market_constraints"] = mc
             # Nest warren_bot output inside agent_signals JSONB before saving.
             # warren_bot is not a top-level DB column — it lives under agent_signals["warren_bot"].
             if "agent_signals" in row and isinstance(row["agent_signals"], dict):

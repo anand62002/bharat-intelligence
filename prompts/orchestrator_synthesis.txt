@@ -24,7 +24,7 @@ Conduct a rigorous bull-bear debate covering all material risks and opportunitie
 
 **Bear Case** — Identify exactly 3 distinct risks or concerns. Each must be specific and cite evidence from the agent outputs above.
 
-**Synthesis** — One paragraph (2–4 sentences) that weighs the bull and bear cases, acknowledges key uncertainties, and justifies the final action.
+**Synthesis** — One paragraph (2–4 sentences) that weighs the bull and bear cases, acknowledges key uncertainties, and justifies the final action. The synthesis paragraph MUST include a brief market-constraints note at the end: (a) the applicable NSE circuit-breaker band — ±5% for large-cap NIFTY 50/100 index constituents, ±10% for most NSE EQ stocks, ±20% for small-cap/SME/T-group; (b) a one-word liquidity assessment (LIQUID / THIN / ILLIQUID) based on average daily trading volume; (c) the appropriate position-size tier for this market-cap segment (FULL for large-cap, HALF for mid-cap, QUARTER for small-cap < ₹2 000 Cr); (d) any known upcoming ex-dividend or corporate-action dates that would affect T+2 settlement timing of the entry order.
 
 **Final Recommendation** — Based on the debate and composite score, provide:
 - action: BUY (strong conviction, upside ≥25%), HOLD (neutral, wait for clearer signal), SELL (deteriorating fundamentals/trend), or AVOID (high risk, capital preservation)
@@ -38,6 +38,7 @@ Conduct a rigorous bull-bear debate covering all material risks and opportunitie
 - upside_confidence: 0–100 confidence in the upside_pct estimate
 - danger_drop_pct: maximum expected downside if the bear case materialises (positive number, e.g. 20 means 20% drawdown)
 - danger_confidence: 0–100 confidence in the danger_drop_pct estimate
+- market_constraints: one sentence covering the four required items — e.g. "Circuit: ±10% NSE band; Liquidity: LIQUID (avg ~5L shares/day); Position: HALF tier (mid-cap ₹8 500 Cr); Settlement: No ex-dates in next 10 days."
 - headline: one crisp sentence (≤100 chars) summarising the call — e.g. "BUY: HDFC Bank at inflection, 32% upside over 9 months"
 
 ---
@@ -71,6 +72,7 @@ Respond ONLY with a single valid JSON object. Do not include any text, explanati
   "upside_confidence": 68,
   "danger_drop_pct": 12.0,
   "danger_confidence": 55,
+  "market_constraints": "Circuit: ±10% NSE band; Liquidity: LIQUID; Position: HALF tier (mid-cap); Settlement: No ex-dates in next 10 days.",
   "headline": "BUY: {symbol} — composite score {composite_score}/100, strong fundamental base"
 }
 ```
