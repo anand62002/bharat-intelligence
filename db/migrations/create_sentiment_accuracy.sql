@@ -25,8 +25,17 @@ CREATE INDEX IF NOT EXISTS idx_sentiment_accuracy_correct    ON sentiment_accura
 
 -- RLS: service_role can read/write
 ALTER TABLE sentiment_accuracy ENABLE ROW LEVEL SECURITY;
-CREATE POLICY IF NOT EXISTS "service_role_all_sentiment_accuracy"
-    ON sentiment_accuracy FOR ALL TO service_role USING (true) WITH CHECK (true);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'sentiment_accuracy'
+      AND policyname = 'service_role_all_sentiment_accuracy'
+  ) THEN
+    CREATE POLICY "service_role_all_sentiment_accuracy"
+        ON sentiment_accuracy FOR ALL TO service_role USING (true) WITH CHECK (true);
+  END IF;
+END$$;
 
 NOTIFY pgrst, 'reload schema';
 
