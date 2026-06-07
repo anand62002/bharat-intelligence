@@ -565,6 +565,12 @@ def _transform_holding(row: dict) -> dict:
     status_map = {"OPEN": "holding", "CLOSED": "exited", "PARTIAL": "partial"}
     db_status  = (row.get("status") or "OPEN").upper()
 
+    # ── P7-A: dynamic target tracking fields ─────────────────────────────────
+    orig_target   = row.get("original_target")
+    upd_count     = int(row.get("target_update_count") or 0)
+    ratchet_level = row.get("stoploss_ratchet_level") or "ORIGINAL"
+    protect_gains = bool(row.get("protect_gains_flag") or False)
+
     return {
         "id":               row["id"],
         "symbol":           row["symbol"],
@@ -585,6 +591,13 @@ def _transform_holding(row: dict) -> dict:
         "dangerWindow":     str(row.get("danger_window") or ""),
         "dangerSources":    danger_sources,
         "earningsAlert":    row.get("_earnings_alert"),  # injected by get_portfolio
+        # P7-A: dynamic target tracking
+        "originalTarget":        float(orig_target) if orig_target is not None else None,
+        "targetUpdateCount":     upd_count,
+        "targetUpdatedAt":       str(row.get("target_updated_at") or ""),
+        "protectGainsFlag":      protect_gains,
+        "stoplossRatchetLevel":  ratchet_level,
+        "lastReviewAt":          str(row.get("last_review_at") or ""),
     }
 
 

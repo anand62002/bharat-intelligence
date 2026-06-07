@@ -296,6 +296,35 @@ def job_outcome_tracker() -> None:
         log.warning("Sentiment validation job failed (non-critical): %s", exc)
 
 
+def job_target_updater() -> None:
+    """17:00 IST — P7-A: dynamic stoploss ratchet + target extension + laggard review."""
+    log.info("-" * 50)
+    log.info("  JOB START: Target Updater (17:00 IST)")
+    log.info("-" * 50)
+    try:
+        from agents.target_updater import run_target_updates
+        result = run_target_updates(dry_run=False)
+        log.info(
+            "Target updater done — holdings=%d  ratchets=%d  extended=%d  protect=%d  reviews=%d  errors=%d",
+            result.get("total_holdings", 0),
+            len(result.get("stoploss_ratchets", [])),
+            len(result.get("targets_extended", [])),
+            len(result.get("protect_gains", [])),
+            len(result.get("laggard_reviews", [])),
+            len(result.get("errors", [])),
+        )
+        for r in result.get("stoploss_ratchets", []):
+            log.info("  🔒 SL ratchet %s: %s → ₹%.0f (%s)", r["symbol"], r.get("level"), r.get("new_sl", 0), r.get("level"))
+        for r in result.get("targets_extended", []):
+            log.info("  📈 Target raised %s: ₹%.0f → ₹%.0f (#%d)", r["symbol"], r.get("old_target", 0), r.get("new_target", 0), r.get("revision", 0))
+        for r in result.get("protect_gains", []):
+            log.info("  🛡 Protect gains %s: %s", r["symbol"], r.get("reason", ""))
+        for r in result.get("laggard_reviews", []):
+            log.info("  ⚠ Laggard review %s: signal=%s gain=%.1f%%", r["symbol"], r.get("signal"), r.get("gain_pct", 0))
+    except Exception as exc:
+        log.error("Target updater job failed: %s", exc, exc_info=True)
+
+
 def job_forward_poller() -> None:
     """16:30 IST — P5-D: update live price snapshot for all pending recs + resolve t+30 milestone."""
     log.info("-" * 50)
@@ -713,6 +742,19 @@ def build_scheduler():
         coalesce=True,
     )
 
+    # ── Target updater — after forward poller (P7-A) ─────────────────────────
+    # 17:00 IST: after paper portfolio (16:15), closing digest (16:20),
+    # and forward poller (16:30). Uses final closing prices from yfinance.
+    # Runs: stoploss ratchet + target extension (warren_bot) + laggard review.
+    scheduler.add_job(
+        job_target_updater,
+        CronTrigger(hour=17, minute=0, timezone=IST),
+        id="target_updater",
+        name="Dynamic Target & Stoploss Updater (17:00 IST)",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # ── Outcome tracker — after market close ─────────────────────────────────
     scheduler.add_job(
         job_outcome_tracker,
@@ -834,6 +876,7 @@ def main() -> None:
         job_market_digest_morning()
         job_market_digest_closing()
         job_discovery_screener()
+        job_target_updater()
         log.info("--now run complete. Starting scheduler...")
 
     try:

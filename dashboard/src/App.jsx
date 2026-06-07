@@ -1727,6 +1727,27 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBrok
                       {isDanger&&<span style={{background:C.red,color:"white",borderRadius:3,padding:"0px 4px",fontSize:8,fontWeight:800,animation:"criticalBadge 1.5s ease-in-out infinite"}}>🚨</span>}
                       {h.earningsAlert?.warning_level==="CRITICAL"&&<span title={`Earnings ${h.earningsAlert.days_until}d away${h.earningsAlert.quarter?" ("+h.earningsAlert.quarter+")":""} — CRITICAL`} style={{fontSize:11,cursor:"default"}}>🗓</span>}
                       {h.earningsAlert?.warning_level==="WARNING"&&<span title={`Earnings ${h.earningsAlert.days_until}d away${h.earningsAlert.quarter?" ("+h.earningsAlert.quarter+")":""} — WARNING`} style={{fontSize:11,cursor:"default",opacity:0.75}}>🗓</span>}
+                      {/* P7-A: dynamic target badges */}
+                      {(h.targetUpdateCount>0)&&<span
+                        title={`Target raised ${h.targetUpdateCount}× by AI (original: ₹${h.originalTarget?.toLocaleString()||'—'})`}
+                        style={{background:C.green+"22",border:`1px solid ${C.green}55`,color:C.green,borderRadius:3,padding:"0px 4px",fontSize:7,fontWeight:800,cursor:"default"}}>
+                        📈 ×{h.targetUpdateCount}
+                      </span>}
+                      {h.protectGainsFlag&&<span
+                        title="Steam detected — valuation extended. Target locked; protect profits."
+                        style={{background:C.accent+"22",border:`1px solid ${C.accent}55`,color:C.accent,borderRadius:3,padding:"0px 4px",fontSize:7,fontWeight:800,cursor:"default",animation:"criticalBadge 2s ease-in-out infinite"}}>
+                        🛡 Protect
+                      </span>}
+                      {h.stoplossRatchetLevel==="LOCK_20"&&<span
+                        title="Stoploss ratcheted to lock in 20% gain"
+                        style={{background:"#7c3aed22",border:"1px solid #7c3aed55",color:"#a78bfa",borderRadius:3,padding:"0px 4px",fontSize:7,fontWeight:700,cursor:"default"}}>
+                        🔒 +20%SL
+                      </span>}
+                      {h.stoplossRatchetLevel==="BREAKEVEN"&&<span
+                        title="Stoploss ratcheted to breakeven — position protected from loss"
+                        style={{background:C.teal+"22",border:`1px solid ${C.teal}55`,color:C.teal,borderRadius:3,padding:"0px 4px",fontSize:7,fontWeight:700,cursor:"default"}}>
+                        🔒 BE
+                      </span>}
                     </div>
                     <div style={{fontSize:8,color:C.muted}}>{h.sector}</div>
                   </div>
@@ -1740,7 +1761,14 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBrok
                   <div>
                     {isDanger
                       ? <div><div style={{fontSize:9,fontWeight:700,color:C.red}}>-{h.dangerDropPct}% risk</div><div style={{fontSize:8,color:"#fca5a5"}}>{h.dangerWindow}</div></div>
-                      : <div><div style={{fontSize:9,color:toTarget>0?C.textDim:C.green}}>{toTarget>0?`+${toTarget.toFixed(0)}% to tgt`:"✓ past tgt"}</div><div style={{fontSize:8,color:toStop<8?C.red:C.muted}}>{toStop.toFixed(0)}% to stop</div></div>
+                      : <div>
+                          <div style={{fontSize:9,color:toTarget>0?C.textDim:C.green}}>{toTarget>0?`+${toTarget.toFixed(0)}% to tgt`:"✓ past tgt"}</div>
+                          {/* Show original target if it's been raised */}
+                          {h.originalTarget&&h.originalTarget!==h.targetPrice&&(
+                            <div style={{fontSize:7,color:C.muted,textDecoration:"line-through"}}>was ₹{h.originalTarget?.toLocaleString()}</div>
+                          )}
+                          <div style={{fontSize:8,color:toStop<8?C.red:C.muted}}>{toStop.toFixed(0)}% to stop</div>
+                        </div>
                     }
                   </div>
                   <button onClick={()=>onOpenARIA("holding",h)} style={{
