@@ -247,7 +247,7 @@ def job_rec_outcome_seeder() -> None:
 
 
 def job_outcome_tracker() -> None:
-    """18:30 IST — resolve pending recommendation outcomes at 90/180/365d horizons."""
+    """18:30 IST — resolve pending recommendation outcomes at 90/180/365d horizons + sentiment validation."""
     log.info("=" * 60)
     log.info("  JOB START: Outcome Tracker (18:30 IST)")
     log.info("=" * 60)
@@ -265,6 +265,19 @@ def job_outcome_tracker() -> None:
                 log.warning("  outcome tracker error: %s", e)
     except Exception as exc:
         log.error("Outcome tracker job failed: %s", exc, exc_info=True)
+
+    # ── P6-D-8: Sentiment signal validation ───────────────────────────────────
+    try:
+        from agents.outcome_tracker import run_sentiment_validation
+        sv = run_sentiment_validation(dry_run=False)
+        log.info(
+            "Sentiment validation done — validated=%d accuracy_30d=%s degrading=%s",
+            sv.get("validated", 0),
+            f"{sv['accuracy_30d']:.1f}%" if sv.get("accuracy_30d") is not None else "N/A",
+            sv.get("degrading", False),
+        )
+    except Exception as exc:
+        log.warning("Sentiment validation job failed (non-critical): %s", exc)
 
 
 def job_forward_poller() -> None:
@@ -377,6 +390,27 @@ def job_options_snapshot() -> None:
             )
     except Exception as exc:
         log.error("Options snapshot job failed: %s", exc, exc_info=True)
+
+
+def job_gift_nifty_fetch() -> None:
+    """08:30 IST — fetch GIFT Nifty pre-market signal (P6-D-7)."""
+    log.info("-" * 50)
+    log.info("  JOB START: GIFT Nifty Fetch (08:30 IST)")
+    log.info("-" * 50)
+    try:
+        from data.gift_nifty_fetcher import get_gift_nifty_signal
+        signal = get_gift_nifty_signal(force_refresh=True)
+        log.info(
+            "GIFT Nifty: %s %s (%.2f pts / %.3f%%) source=%s",
+            signal.get("signal", "?"),
+            signal.get("signal_strength", "?"),
+            signal.get("premium_pts") or 0,
+            signal.get("premium_pct") or 0,
+            signal.get("source", "?"),
+        )
+        log.info("  %s", signal.get("market_note", ""))
+    except Exception as exc:
+        log.error("GIFT Nifty fetch job failed: %s", exc, exc_info=True)
 
 
 def job_breeze_token_refresh() -> None:
@@ -505,13 +539,24 @@ def build_scheduler():
         misfire_grace_time=1800,
     )
 
+    # ── GIFT Nifty pre-market signal (P6-D-7) ────────────────────────────────
+    # 08:30 IST: 45 min before NSE open; feeds macro.py + portfolio_monitor pre-open alert.
+    scheduler.add_job(
+        job_gift_nifty_fetch,
+        CronTrigger(hour=8, minute=30, timezone=IST),
+        id="gift_nifty_fetch",
+        name="GIFT Nifty Pre-Market Signal (08:30 IST)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1800,
+    )
+
     # ── Breeze token refresh — before market open ─────────────────────────────
-    # Runs at 08:30 IST: after earnings calendar (08:00), before first options
-    # snapshot at 09:15.  Auto-refreshes if ICICI_USER_ID/PASSWORD/TOTP_SECRET
-    # are set; otherwise logs a reminder to rotate BREEZE_SESSION_TOKEN manually.
+    # Runs at 08:35 IST (slightly after GIFT Nifty).
+    # DEPRECATED (P4-D) — will be removed when Angel One SmartAPI is integrated.
     scheduler.add_job(
         job_breeze_token_refresh,
-        CronTrigger(hour=8, minute=30, timezone=IST),
+        CronTrigger(hour=8, minute=35, timezone=IST),
         id="breeze_token_refresh",
         name="Breeze Token Refresh",
         max_instances=1,
@@ -723,6 +768,7 @@ def main() -> None:
         job_paper_portfolio_update()
         job_options_snapshot()
         job_rag_refresh()
+        job_gift_nifty_fetch()
         job_market_digest_morning()
         job_market_digest_closing()
         log.info("--now run complete. Starting scheduler...")

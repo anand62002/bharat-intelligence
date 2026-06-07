@@ -1136,18 +1136,20 @@ def _normalise_symbol(sym: str) -> str:
 # Supabase persistence
 # ──────────────────────────────────────────────────────────────────────────────
 
+_DISCOVERY_COOLDOWN_DAYS = 10   # same symbol won't create a new row within this window
+
+
 def _save_discovery(result: DiscoveryResult) -> Optional[str]:
     """
-    Upsert a discovery into the recommendations table.
-    Returns the saved row UUID or None on failure.
+    Save or update a discovery recommendation.
 
-    Uses INSERT (not upsert) so each daily run can produce a fresh rec.
-    If the same symbol was already promoted today, the INSERT succeeds because
-    there is no unique constraint on (symbol, date) — each discovery run is
-    independent.
+    10-day deduplication:  if the same symbol already has an is_discovery=True
+    row created within the last 10 days, we UPDATE that row's metadata to
+    increment discovery_count and append today's date to discovery_dates instead
+    of creating a new row.  This keeps one card per symbol in the dashboard while
+    preserving the "repeated signal" information as a conviction badge.
 
-    Note: the recommendations table needs an `is_discovery` BOOLEAN column.
-    Run the migration in db/schema.sql if it doesn't exist yet.
+    New symbols (first appearance or outside the 10-day window) get a fresh INSERT.
     """
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -1157,8 +1159,8 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
     try:
         from supabase import create_client
 
-        tier = result.opportunity_tier
-        action = "BUY"     # CRITICAL and STANDARD both BUY for discoveries
+        tier   = result.opportunity_tier
+        action = "BUY"
 
         # ── P3-A: Position sizing ─────────────────────────────────────────────
         pos_pct   = None
@@ -1175,24 +1177,78 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
         except Exception as pe:
             log.debug("_save_discovery(%s): position sizing failed: %s", result.symbol, pe)
 
+        client   = create_client(url, key)
+        today    = date.today().isoformat()
+        cooldown = (date.today() - timedelta(days=_DISCOVERY_COOLDOWN_DAYS)).isoformat()
+
+        # ── Check 10-day cooldown window ──────────────────────────────────────
+        existing = (
+            client.table("recommendations")
+            .select("id,metadata,upside_pct,upside_confidence,created_at")
+            .eq("symbol", result.symbol)
+            .eq("is_discovery", True)
+            .gte("created_at", cooldown)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+
+        if existing:
+            # ── UPDATE: increment conviction counter ──────────────────────────
+            existing_row   = existing[0]
+            rec_id         = existing_row["id"]
+            old_meta       = existing_row.get("metadata") or {}
+            discovery_dates = old_meta.get("discovery_dates", [existing_row["created_at"][:10]])
+            if today not in discovery_dates:
+                discovery_dates.append(today)
+            discovery_count = len(discovery_dates)
+
+            updated_meta = {
+                **old_meta,
+                "price":            result.current_price,  # refresh snapshot price
+                "discovery_score":  result.composite_score,
+                "discovery_count":  discovery_count,
+                "discovery_dates":  discovery_dates,
+                "last_confirmed_at": today,
+            }
+            client.table("recommendations").update({
+                "metadata":          updated_meta,
+                "upside_pct":        result.upside_pct,
+                "upside_confidence": result.upside_confidence,
+                "confidence":        result.upside_confidence,
+                "valid_till":        _valid_till(result.upside_horizon),
+                "headline": (
+                    f"{'⚡ CRITICAL' if tier == 'CRITICAL' else '✅ STANDARD'} DISCOVERY"
+                    f" ×{discovery_count}: {result.symbol} — {result.upside_pct:.0f}% upside"
+                ),
+                "summary": result.upside_basis,
+            }).eq("id", rec_id).execute()
+            log.info(
+                "_save_discovery(%s): UPDATED existing rec %s (count=%d) tier=%s upside=%.1f%%",
+                result.symbol, rec_id, discovery_count, tier, result.upside_pct,
+            )
+            return rec_id
+
+        # ── INSERT: first appearance within cooldown window ───────────────────
         row = {
             "symbol":                 result.symbol,
             "action":                 action,
             "confidence":             result.upside_confidence,
             "upside_pct":             result.upside_pct,
             "upside_confidence":      result.upside_confidence,
-            "risk_score":             None,   # discovery recs don't run the danger model
+            "risk_score":             None,
             "entry_low":              None,
             "entry_high":             None,
             "target":                 None,
             "stoploss":               None,
             "horizon_days":           _horizon_to_days(result.upside_horizon),
-            "headline":               (
+            "headline": (
                 f"{'⚡ CRITICAL' if tier == 'CRITICAL' else '✅ STANDARD'} DISCOVERY: "
                 f"{result.symbol} — {result.upside_pct:.0f}% upside potential"
             ),
             "summary":                result.upside_basis,
-            "agent_signals":          {
+            "agent_signals": {
                 k: {"signal": v.get("signal"), "score": v.get("score")}
                 for k, v in result.agent_signals.items()
             },
@@ -1201,29 +1257,26 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             "valid_till":             _valid_till(result.upside_horizon),
             "suggested_position_pct": pos_pct,
             "position_label":         pos_label,
-            # metadata persists price snapshot + discovery context so
-            # GET /api/discovery can serve a baseline price even when the
-            # live yfinance refresh fails (weekend / holiday / network issue).
-            # The API overwrites metadata.price with a fresh quote on every request.
             "metadata": {
-                "price":           result.current_price,          # snapshot at discovery time
-                "sector":          result.sector,
-                "discovery_score": result.composite_score,
-                "screen_triggers": result.screen_triggers,
-                "upside_basis":    result.upside_basis,
-                "upside_horizon":  result.upside_horizon,
-                "liquidity_tier":  result.liquidity_tier,
-                "impact_cost_pct": result.impact_cost_pct,
-                # Forward estimates
-                "forward_pe":      result.forward_pe,
-                "peg_ratio_fwd":   result.peg_ratio_fwd,
-                "eps_growth_pct":  result.eps_growth_pct,
+                "price":             result.current_price,
+                "sector":            result.sector,
+                "discovery_score":   result.composite_score,
+                "screen_triggers":   result.screen_triggers,
+                "upside_basis":      result.upside_basis,
+                "upside_horizon":    result.upside_horizon,
+                "liquidity_tier":    result.liquidity_tier,
+                "impact_cost_pct":   result.impact_cost_pct,
+                "forward_pe":        result.forward_pe,
+                "peg_ratio_fwd":     result.peg_ratio_fwd,
+                "eps_growth_pct":    result.eps_growth_pct,
+                # Discovery streak tracking
+                "discovery_count":   1,
+                "discovery_dates":   [today],
+                "last_confirmed_at": today,
             },
         }
 
-        client = create_client(url, key)
-        resp   = client.table("recommendations").insert(row).execute()
-
+        resp = client.table("recommendations").insert(row).execute()
         if resp.data:
             rec_id = resp.data[0].get("id")
             log.info(
@@ -1232,18 +1285,10 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             )
             return rec_id
 
-        # insert returned no data (unusual — log it clearly)
-        log.warning(
-            "_save_discovery(%s): INSERT returned no data — resp=%s",
-            result.symbol, resp,
-        )
+        log.warning("_save_discovery(%s): INSERT returned no data — resp=%s", result.symbol, resp)
 
     except Exception as exc:
-        # Log with full traceback so Railway logs show the actual DB error
-        log.error(
-            "_save_discovery(%s): FAILED — %s",
-            result.symbol, exc, exc_info=True,
-        )
+        log.error("_save_discovery(%s): FAILED — %s", result.symbol, exc, exc_info=True)
     return None
 
 

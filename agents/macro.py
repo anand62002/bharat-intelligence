@@ -608,6 +608,26 @@ def analyse() -> dict:
     base_total = s_us10y + s_dxy + s_vix + s_ivix + s_inr + s_rbi
     total = max(0, min(100, base_total + news_adj))
 
+    # ── 2b. P6-D-7: GIFT Nifty pre-market adjustment ─────────────────────────
+    # Only applied when running within the pre-market window (06:30–09:15 IST)
+    # to avoid stale futures prices influencing afternoon runs.
+    gift_nifty_data: dict = {}
+    try:
+        from data.gift_nifty_fetcher import get_gift_nifty_signal, get_gift_nifty_macro_adjustment
+        gift_nifty_data = get_gift_nifty_signal()
+        if gift_nifty_data.get("is_pre_market") and gift_nifty_data.get("signal") != "UNAVAILABLE":
+            gift_adj = get_gift_nifty_macro_adjustment(gift_nifty_data)
+            if gift_adj != 0:
+                total = max(0, min(100, total + gift_adj))
+                log.info(
+                    "GIFT Nifty %s %s → macro score adjusted by %+d (total=%d)",
+                    gift_nifty_data.get("signal"), gift_nifty_data.get("signal_strength"),
+                    gift_adj, total,
+                )
+            data_sources.append(f"gift_nifty_{gift_nifty_data.get('source', 'unknown')}")
+    except Exception as exc:
+        log.debug("GIFT Nifty integration skipped: %s", exc)
+
     # ── 3. Signal ─────────────────────────────────────────────────────────────
     if total >= 65:
         signal = "RISK_ON"
@@ -642,8 +662,9 @@ def analyse() -> dict:
     result = {
         "signal":               signal,
         "score":                total,
-        "macro_news_signal":    news_signal,     # top-level shortcut for synthesiser
-        "macro_news_events":    key_news_events, # top-level shortcut for synthesiser
+        "macro_news_signal":    news_signal,        # top-level shortcut for synthesiser
+        "macro_news_events":    key_news_events,    # top-level shortcut for synthesiser
+        "gift_nifty":           gift_nifty_data,    # P6-D-7: pre-market futures signal
         "detail":               detail,
         "sector_impacts":       sector_impacts,
         "data_sources":         list(dict.fromkeys(data_sources)),

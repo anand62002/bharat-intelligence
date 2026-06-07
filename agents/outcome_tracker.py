@@ -973,6 +973,169 @@ def _print_accuracy_report() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# P6-D-8: Sentiment signal validation loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_sentiment_validation(dry_run: bool = False) -> dict:
+    """
+    P6-D-8: For each recommendation_outcomes row that resolved today (HIT/MISS/PARTIAL),
+    fetch the associated sentiment agent signal and write a sentiment_accuracy row.
+
+    Also computes rolling-30d direction accuracy and flags agent_performance as
+    DEGRADING if accuracy < 52% (near-random — signal is noise).
+
+    Returns:
+        {
+          "validated": int,   # rows written to sentiment_accuracy
+          "accuracy_30d": float | None,  # rolling direction accuracy
+          "degrading": bool,  # True if < 52% direction accuracy
+          "errors": list[str],
+        }
+    """
+    client = _supabase()
+    if not client:
+        return {"validated": 0, "accuracy_30d": None, "degrading": False, "errors": ["No DB"]}
+
+    errors: list[str] = []
+    validated = 0
+
+    # Fetch recently-resolved outcomes (today + yesterday buffer)
+    from datetime import date as _date, timedelta
+    cutoff = (_date.today() - timedelta(days=1)).isoformat()
+    try:
+        resolved = (
+            client.table("recommendation_outcomes")
+            .select(
+                "rec_id,symbol,rec_date,alpha_t90,outcome_t90,"
+                "recommendations!inner(agent_signals,confidence)"
+            )
+            .in_("outcome_t90", ["HIT", "MISS", "PARTIAL"])
+            .gte("rec_date", cutoff)
+            .execute()
+            .data or []
+        )
+    except Exception as exc:
+        log.error("P6-D-8: failed to fetch resolved outcomes: %s", exc)
+        return {"validated": 0, "accuracy_30d": None, "degrading": False, "errors": [str(exc)]}
+
+    for row in resolved:
+        try:
+            # Check if already written
+            existing = (
+                client.table("sentiment_accuracy")
+                .select("id")
+                .eq("rec_id", row["rec_id"])
+                .execute()
+                .data or []
+            )
+            if existing:
+                continue
+
+            # Extract sentiment signal from agent_signals
+            rec_data = row.get("recommendations") or {}
+            agent_sigs = rec_data.get("agent_signals") or {}
+            sentiment_data = agent_sigs.get("sentiment") or {}
+            sentiment_score = float(sentiment_data.get("score") or 50)
+            sentiment_signal = sentiment_data.get("signal") or "NEUTRAL"
+            event_class = sentiment_data.get("dominant_event_class") or None
+
+            # Determine correct_direction:
+            #   sentiment ≥60 → expected BUY; correct if alpha_t90 > 0
+            #   sentiment ≤40 → expected SELL; correct if alpha_t90 < 0
+            #   40–60 → NEUTRAL; skip direction scoring
+            alpha_t90 = row.get("alpha_t90")
+            correct_direction: bool | None = None
+            if alpha_t90 is not None and sentiment_score is not None:
+                if sentiment_score >= 60:
+                    correct_direction = float(alpha_t90) > 0
+                elif sentiment_score <= 40:
+                    correct_direction = float(alpha_t90) < 0
+                # 40–60 → neutral, leave None
+
+            accuracy_row = {
+                "rec_id":             row["rec_id"],
+                "symbol":             row["symbol"],
+                "rec_date":           row.get("rec_date"),
+                "sentiment_score":    round(sentiment_score, 2),
+                "sentiment_signal":   sentiment_signal,
+                "event_class":        event_class,
+                "actual_alpha_t90":   float(alpha_t90) if alpha_t90 is not None else None,
+                "correct_direction":  correct_direction,
+            }
+
+            if not dry_run:
+                client.table("sentiment_accuracy").insert(accuracy_row).execute()
+            validated += 1
+            log.debug(
+                "P6-D-8: %s sentiment=%.0f signal=%s alpha=%.2f%% correct=%s",
+                row["symbol"], sentiment_score, sentiment_signal,
+                float(alpha_t90) * 100 if alpha_t90 else 0,
+                correct_direction,
+            )
+        except Exception as exc:
+            errors.append(f"{row.get('symbol')}: {exc}")
+            log.warning("P6-D-8 row failed: %s", exc)
+
+    # ── Rolling-30d accuracy ──────────────────────────────────────────────────
+    accuracy_30d: float | None = None
+    degrading = False
+    try:
+        from datetime import date as _dt, timedelta as _td
+        thirty_ago = (_dt.today() - _td(days=30)).isoformat()
+        acc_rows = (
+            client.table("sentiment_accuracy")
+            .select("correct_direction")
+            .gte("rec_date", thirty_ago)
+            .not_.is_("correct_direction", "null")
+            .execute()
+            .data or []
+        )
+        if acc_rows:
+            correct_vals = [r["correct_direction"] for r in acc_rows]
+            accuracy_30d = round(sum(correct_vals) / len(correct_vals) * 100, 1)
+            degrading = accuracy_30d < 52.0
+            log.info(
+                "P6-D-8: rolling-30d sentiment accuracy=%.1f%% (%d samples) degrading=%s",
+                accuracy_30d, len(correct_vals), degrading,
+            )
+
+            # Auto-flag agent_performance if degrading
+            if degrading and not dry_run:
+                try:
+                    from datetime import date as _d2
+                    client.table("agent_performance").upsert({
+                        "agent_name":        "sentiment",
+                        "accuracy_90d":      accuracy_30d / 100,
+                        "hallucination_rate": 0.0,
+                        "trend":             "DEGRADING",
+                        "audit_date":        _d2.today().isoformat(),
+                        "notes":             (
+                            f"P6-D-8: sentiment direction accuracy {accuracy_30d:.1f}% "
+                            f"< 52% threshold (near-random). Review event classifier."
+                        ),
+                    }, on_conflict="agent_name,audit_date").execute()
+                    log.warning(
+                        "P6-D-8: sentiment agent flagged DEGRADING (accuracy=%.1f%%)",
+                        accuracy_30d,
+                    )
+                except Exception as flag_exc:
+                    log.warning("P6-D-8: failed to flag agent_performance: %s", flag_exc)
+    except Exception as exc:
+        errors.append(f"accuracy_30d calc: {exc}")
+
+    log.info(
+        "P6-D-8 sentiment validation done: validated=%d accuracy_30d=%s degrading=%s errors=%d",
+        validated, accuracy_30d, degrading, len(errors),
+    )
+    return {
+        "validated":    validated,
+        "accuracy_30d": accuracy_30d,
+        "degrading":    degrading,
+        "errors":       errors,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI entry point
 # ─────────────────────────────────────────────────────────────────────────────
 

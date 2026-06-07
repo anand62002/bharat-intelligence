@@ -895,14 +895,23 @@ class TestSaveDiscovery:
         dr = _make_discovery()
         assert _save_discovery(dr) is None
 
+    def _mock_client_fresh(self):
+        """Return a mock Supabase client where the cooldown SELECT returns no rows (fresh insert)."""
+        mock_client = MagicMock()
+        # Cooldown check: .table().select().eq().eq().gte().order().limit().execute().data = []
+        select_chain = mock_client.table.return_value.select.return_value
+        select_chain.eq.return_value.eq.return_value.gte.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+        # INSERT: .table().insert().execute().data = [{"id": "abc-123"}]
+        mock_client.table.return_value.insert.return_value.execute.return_value.data = [
+            {"id": "abc-123"}
+        ]
+        return mock_client
+
     def test_saves_and_returns_id(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
 
-        mock_client = MagicMock()
-        mock_client.table.return_value.insert.return_value.execute.return_value.data = [
-            {"id": "abc-123"}
-        ]
+        mock_client = self._mock_client_fresh()
         with patch("supabase.create_client", return_value=mock_client):
             result = _save_discovery(_make_discovery())
 
@@ -913,7 +922,8 @@ class TestSaveDiscovery:
         monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
 
         inserted_rows = []
-        mock_client = MagicMock()
+        mock_client = self._mock_client_fresh()
+        original_side_effect = mock_client.table.return_value.insert.return_value
         def capture_insert(row):
             inserted_rows.append(row)
             m = MagicMock()

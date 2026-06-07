@@ -787,6 +787,18 @@ _GOOGLE_NEWS_RSS_TMPL = (
     "&hl=en-IN&gl=IN&ceid=IN:en"
 )
 
+# P6-D-6: Hindi RSS feeds — retail sentiment often breaks in Hindi media 2-4h earlier.
+# Templates for Google News Hindi and direct Hindi feeds (keyword-filtered).
+_HINDI_GOOGLE_NEWS_TMPL = (
+    "https://news.google.com/rss/search"
+    "?q={keyword}+%E0%A4%B6%E0%A5%87%E0%A4%AF%E0%A4%B0"   # "शेयर" (share/stock)
+    "&hl=hi-IN&gl=IN&ceid=IN:hi"
+)
+_HINDI_STATIC_FEEDS = [
+    ("NavBharat Times", "https://navbharattimes.indiatimes.com/business/rssfeeds/1310333099.cms"),
+    ("Zee Business Hi", "https://www.zeebiz.com/hindi/rss"),
+]
+
 
 def get_rss_headlines(symbol: str) -> list | None:
     """
@@ -853,6 +865,109 @@ def get_rss_headlines(symbol: str) -> list | None:
     if not any_feed_ok:
         return None
     return results
+
+
+def get_hindi_headlines(symbol: str) -> list[dict]:
+    """
+    P6-D-6: Fetch Hindi-language headlines for *symbol* from:
+      1. Google News Hindi RSS (keyword + "शेयर")
+      2. NavBharat Times / Zee Business Hindi static feeds (keyword-filtered)
+
+    Headlines are translated to English via deep-translator (free, no API key)
+    before being returned, so they feed directly into the existing FinBERT +
+    Haiku sentiment pipeline.
+
+    Returns:
+        List of {title, source, published, url, original_hindi} dicts.
+        Empty list (never None) if no Hindi content found or translation fails.
+    """
+    from urllib.parse import quote_plus
+
+    keyword = symbol.replace(".NS", "").replace(".BO", "").strip().upper()
+    results: list[dict] = []
+
+    # ── Fetch raw feeds ───────────────────────────────────────────────────────
+    feeds_to_try = list(_HINDI_STATIC_FEEDS) + [
+        ("Google News Hindi", _HINDI_GOOGLE_NEWS_TMPL.format(keyword=quote_plus(keyword))),
+    ]
+    for source_name, feed_url in feeds_to_try:
+        try:
+            feed = feedparser.parse(feed_url)
+            if feed.bozo and not feed.entries:
+                continue
+            for entry in feed.entries:
+                title = entry.get("title", "").strip()
+                if not title:
+                    continue
+                # For static feeds, keyword-filter on original Hindi text
+                is_google = "Google" in source_name
+                if not is_google and keyword.lower() not in title.lower():
+                    continue
+                published = entry.get("published", "")
+                try:
+                    if entry.get("published_parsed"):
+                        published = str(datetime(*entry.published_parsed[:6]).date())
+                except Exception:
+                    pass
+                results.append({
+                    "title_hindi": title,
+                    "source":      source_name,
+                    "published":   published,
+                    "url":         entry.get("link", ""),
+                })
+        except Exception as exc:
+            log.debug("Hindi RSS %s parse error: %s", source_name, exc)
+
+    if not results:
+        return []
+
+    # ── Translate Hindi → English (deep-translator, no API key) ──────────────
+    try:
+        from deep_translator import GoogleTranslator
+        translator = GoogleTranslator(source="hi", target="en")
+        translated: list[dict] = []
+        for item in results:
+            original = item["title_hindi"]
+            try:
+                eng = translator.translate(original)
+                translated.append({
+                    "title":         eng or original,
+                    "source":        f"{item['source']} [Hindi]",
+                    "published":     item["published"],
+                    "url":           item["url"],
+                    "original_hindi": original,
+                })
+            except Exception:
+                # Translation failed for this headline — keep original
+                translated.append({
+                    "title":         original,
+                    "source":        f"{item['source']} [Hindi, untranslated]",
+                    "published":     item["published"],
+                    "url":           item["url"],
+                    "original_hindi": original,
+                })
+        log.info("Hindi RSS: %d headlines fetched, %d translated for %s",
+                 len(results), len(translated), keyword)
+        return translated
+    except ImportError:
+        log.debug(
+            "deep-translator not installed — Hindi headlines returned untranslated. "
+            "Install with: pip install deep-translator"
+        )
+        # Return untranslated as-is (FinBERT handles some Hindi tokens, Haiku handles rest)
+        return [
+            {
+                "title":         item["title_hindi"],
+                "source":        f"{item['source']} [Hindi, untranslated]",
+                "published":     item["published"],
+                "url":           item["url"],
+                "original_hindi": item["title_hindi"],
+            }
+            for item in results
+        ]
+    except Exception as exc:
+        log.warning("Hindi headline translation failed for %s: %s", keyword, exc)
+        return []
 
 
 # ─── 4b. BSE CORPORATE ANNOUNCEMENTS (D-1 — P6-D data enrichment) ────────────

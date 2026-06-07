@@ -656,6 +656,107 @@ def _write_agent_performance(score: int, signal: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# P6-D-5: spaCy NER entity-centric headline filtering
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Entity alias map: subsidiary / brand name → parent NSE ticker (partial list).
+# Prevents Reliance Jio news being attributed to RELIANCE.NS without context.
+_ENTITY_ALIAS_MAP: dict[str, str] = {
+    "reliance jio": "RELIANCE", "jio platforms": "RELIANCE",
+    "tata motors":  "TATAMOTORS", "jaguar land rover": "TATAMOTORS",
+    "tata steel":   "TATASTEEL", "tata chemicals": "TATACHEM",
+    "hdfc bank":    "HDFCBANK", "hdfc life": "HDFCLIFE",
+    "infosys bpm":  "INFY", "wipro digital": "WIPRO",
+    "bajaj auto":   "BAJAJ-AUTO", "bajaj finance": "BAJFINANCE",
+    "bajaj finserv": "BAJAJFINSV",
+    "ongc videsh":  "ONGC",
+    "coal india":   "COALINDIA",
+    "ntpc green":   "NTPC", "ntpc renewable": "NTPC",
+    "adani green":  "ADANIGREEN", "adani ports": "ADANIPORTS",
+    "adani enterprises": "ADANIENT", "adani total gas": "ATGL",
+}
+
+_spacy_nlp = None
+_spacy_available: bool | None = None   # None = not yet checked
+
+
+def _get_spacy_nlp():
+    """Lazy-load spaCy small English model (en_core_web_sm). Returns None if unavailable."""
+    global _spacy_nlp, _spacy_available
+    if _spacy_available is False:
+        return None
+    if _spacy_nlp is not None:
+        return _spacy_nlp
+    try:
+        import spacy
+        _spacy_nlp = spacy.load("en_core_web_sm")
+        _spacy_available = True
+        log.info("spaCy NER loaded (en_core_web_sm)")
+        return _spacy_nlp
+    except ImportError:
+        log.debug("spaCy not installed — NER filtering disabled. Install: pip install spacy")
+        _spacy_available = False
+        return None
+    except OSError:
+        log.debug("spaCy model en_core_web_sm not found — run: python -m spacy download en_core_web_sm")
+        _spacy_available = False
+        return None
+
+
+def _ner_filter_headlines(headlines: list[dict], clean_symbol: str) -> list[dict]:
+    """
+    P6-D-5: Use spaCy NER to drop headlines that mention the symbol keyword but
+    actually refer to a *different* organisation.
+
+    Heuristic:
+      1. Extract ORG entities from headline text via en_core_web_sm.
+      2. If any extracted ORG matches a known alias for a *different* NSE ticker
+         (via _ENTITY_ALIAS_MAP), and the direct clean_symbol text is NOT also
+         present as a standalone mention, discard the headline.
+      3. If spaCy unavailable → pass-through (no filtering, no crash).
+
+    Returns the (possibly shorter) filtered list.
+    """
+    nlp = _get_spacy_nlp()
+    if nlp is None:
+        return headlines  # graceful no-op
+
+    filtered: list[dict] = []
+    sym_lower = clean_symbol.lower()
+
+    for h in headlines:
+        title = h.get("title", "")
+        title_lower = title.lower()
+        doc = nlp(title)
+
+        # Extract ORG entities
+        org_texts = {ent.text.lower() for ent in doc.ents if ent.label_ == "ORG"}
+        keep = True
+
+        for org_text in org_texts:
+            mapped_ticker = _ENTITY_ALIAS_MAP.get(org_text)
+            if mapped_ticker and mapped_ticker.upper() != sym_lower.upper():
+                # This headline mentions a subsidiary/brand that belongs to a
+                # different ticker.  Only discard if our symbol is not mentioned
+                # standalone (e.g. "Reliance reported..." alongside "Jio...")
+                if sym_lower not in title_lower:
+                    keep = False
+                    log.debug(
+                        "NER filter: dropped '%s' (org='%s' → %s, not %s)",
+                        title[:60], org_text, mapped_ticker, clean_symbol,
+                    )
+                    break
+
+        if keep:
+            filtered.append(h)
+
+    dropped = len(headlines) - len(filtered)
+    if dropped > 0:
+        log.debug("NER filter: %d/%d headlines dropped for %s", dropped, len(headlines), clean_symbol)
+    return filtered
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Public entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -704,6 +805,17 @@ def analyse(symbol: str) -> dict:
     except Exception as _bse_exc:
         log.debug("sentiment(%s): BSE fetch skipped: %s", symbol, _bse_exc)
 
+    # ── 1c. P6-D-6: Hindi RSS (retail sentiment 2-4h earlier than English press) ─
+    try:
+        from data.fetchers import get_hindi_headlines
+        hindi = get_hindi_headlines(symbol)
+        if hindi:
+            all_headlines.extend(hindi)
+            data_sources.append("hindi_rss")
+            log.debug("sentiment(%s): %d Hindi headlines added", symbol, len(hindi))
+    except Exception as _hi_exc:
+        log.debug("sentiment(%s): Hindi RSS skipped: %s", symbol, _hi_exc)
+
     # ── 2. NewsAPI ────────────────────────────────────────────────────────────
     newsapi_articles = _fetch_newsapi(symbol)
     if newsapi_articles:
@@ -728,6 +840,13 @@ def analyse(symbol: str) -> dict:
         if t and t not in seen_titles:
             seen_titles.add(t)
             unique_headlines.append(h)
+
+    # ── 2b. P6-D-5: spaCy NER entity-centric filtering ──────────────────────
+    # Removes headlines that mention the symbol text but refer to a *different*
+    # entity (e.g. "Reliance Jio tariff hike" ≠ RELIANCE.NS earnings news).
+    # Requires: pip install spacy && python -m spacy download en_core_web_sm
+    # Gracefully skipped if spaCy not installed — no functionality lost.
+    unique_headlines = _ner_filter_headlines(unique_headlines, clean_sym)
 
     # ── 3. Score headlines — batch Haiku classifier + FinBERT ensemble ────────
     # D-2: One batch Haiku call classifies all headlines (event_class + score).

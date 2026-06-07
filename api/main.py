@@ -645,6 +645,10 @@ def _transform_recommendation(row: dict) -> dict:
         # Discovery-tab extra fields (stored in metadata by the discovery screener)
         "discoveryScore":   meta.get("discovery_score")  or 0,
         "discoveryReason":  meta.get("discovery_reason") or "",
+        # Discovery streak — how many times this stock appeared within the cooldown window
+        "discoveryCount":   int(meta.get("discovery_count") or 1),
+        "discoveryDates":   meta.get("discovery_dates")   or [],
+        "lastConfirmedAt":  meta.get("last_confirmed_at") or str(row.get("created_at") or "")[:10],
         "screenTriggers":   meta.get("screen_triggers")  or [],
         "risks":            meta.get("risks")             or [],
         "catalysts":        meta.get("catalysts")         or [],
@@ -853,6 +857,24 @@ async def _get_market_pulse() -> list[dict]:
 
     prices           = await prices_fut
     pulse            = _build_pulse(prices, fii_row)
+
+    # ── P6-D-7: GIFT Nifty pre-market signal ─────────────────────────────────
+    try:
+        from data.gift_nifty_fetcher import get_gift_nifty_signal
+        gift = get_gift_nifty_signal()
+        if gift.get("signal") != "UNAVAILABLE" and gift.get("premium_pct") is not None:
+            arrow = "▲" if gift["signal"] == "POSITIVE_OPEN" else ("▼" if gift["signal"] == "NEGATIVE_OPEN" else "→")
+            strength_suffix = f" ({gift.get('signal_strength', '')})" if gift.get('signal_strength') != "WEAK" else ""
+            pulse.append({
+                "key":    "GIFT NIFTY",
+                "value":  f"{gift['premium_pct']:+.2f}% {arrow}{strength_suffix}",
+                "change": gift["signal"].lower(),
+                "up":     gift["signal"] == "POSITIVE_OPEN",
+                "note":   gift.get("market_note"),
+            })
+    except Exception as exc:
+        log.debug("GIFT Nifty pulse integration skipped: %s", exc)
+
     _market_cache    = pulse
     _market_cache_ts = time.time()
     return pulse

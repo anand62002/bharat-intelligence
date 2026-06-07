@@ -816,10 +816,21 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
                 📐 {stock.suggestedPositionPct}% alloc
               </span>
             )}
+            {/* Conviction streak badge — shown when system found same stock multiple times */}
+            {stock.discoveryCount>1&&(
+              <span title={`Found on: ${(stock.discoveryDates||[]).join(", ")}`}
+                style={{background:"#fbbf2422",color:"#fbbf24",border:"1px solid #fbbf2466",
+                  borderRadius:4,padding:"1px 6px",fontSize:9,fontWeight:800,cursor:"help",
+                  animation:stock.discoveryCount>=3?"criticalBadge 2s ease-in-out infinite":"none"}}>
+                🔁 Found {stock.discoveryCount}×
+              </span>
+            )}
           </div>
           <div style={{fontSize:11,color:C.textDim,marginBottom:2}}>{stock.name} · {stock.sector}</div>
           <div style={{fontSize:10,color:isCritical?C.green:C.cyan,lineHeight:1.5}}>💡 {stock.discoveryReason}</div>
-          <div style={{fontSize:9,color:C.muted,marginTop:2}}>conf {stock.confidence}% · valid till {stock.validTill} · {stock.horizon}{stock.impactCostPct!=null?` · impact ${stock.impactCostPct.toFixed(2)}%`:""}</div>
+          <div style={{fontSize:9,color:C.muted,marginTop:2}}>conf {stock.confidence}% · valid till {stock.validTill} · {stock.horizon}{stock.impactCostPct!=null?` · impact ${stock.impactCostPct.toFixed(2)}%`:""}
+            {stock.discoveryCount>1&&<span style={{color:"#fbbf24",marginLeft:4}}>· last confirmed {stock.lastConfirmedAt}</span>}
+          </div>
         </div>
         <RiskGauge score={stock.riskScore}/>
       </div>
@@ -889,10 +900,13 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRu
   const selected = _universe.find(s=>s.id===selectedId);
   const sectors = ["All",...new Set(_universe.map(s=>s.sector))];
   const criticalStocks = _universe.filter(isCriticalDiscovery);
-  // Sort: critical first, then by discoveryScore
+  // Sort: critical first, then by discoveryCount (conviction), then by discoveryScore
   const sorted = [..._universe].sort((a,b)=>{
     const ac=isCriticalDiscovery(a)?1:0, bc=isCriticalDiscovery(b)?1:0;
     if(ac!==bc) return bc-ac;
+    // Higher repeat count = higher conviction = show first
+    const countDiff=(b.discoveryCount||1)-(a.discoveryCount||1);
+    if(countDiff!==0) return countDiff;
     return b.discoveryScore-a.discoveryScore;
   });
   const filtered = filter==="All"?sorted:sorted.filter(s=>s.sector===filter);

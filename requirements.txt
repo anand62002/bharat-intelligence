@@ -20,6 +20,11 @@ openpyxl>=3.1.0        # DB-10: screener.in Excel export fallback for get_screen
 # Install manually: pip install breeze-connect pyotp
 breeze-connect>=1.0.59
 pyotp>=2.9.0
+# ── P6-D-6: Hindi RSS translation (no API key needed) ─────────────────────────
+deep-translator>=1.11.0
+# ── P6-D-5: spaCy NER entity resolution (optional — graceful fallback if absent)
+# spacy>=3.7.0  ← kept commented: Railway memory budget. Install manually if needed.
+# Run after install: python -m spacy download en_core_web_sm
 # ── CI / testing ───────────────────────────────────────────────────────────────
 pytest>=8.0.0
 pytest-json-report>=1.5.0
