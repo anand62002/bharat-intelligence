@@ -926,8 +926,19 @@ async def get_recommendations(
             .execute()
             .data or [])
 
+    # Deduplicate by symbol — keep only the row with the highest upside_pct
+    # (DB may have multiple rows per symbol from different run dates; the UI
+    # should show one card per stock, not one card per run).
+    seen: dict[str, dict] = {}
+    for row in rows:
+        sym = row["symbol"]
+        if sym not in seen or (row.get("upside_pct") or 0) > (seen[sym].get("upside_pct") or 0):
+            seen[sym] = row
+    rows = list(seen.values())
+
     recs = [_transform_recommendation(r) for r in rows]
-    recs.sort(key=lambda r: 0 if (r["upsidePct"] >= 100 and r["upsideConfidence"] >= 70) else 1)
+    recs.sort(key=lambda r: (0 if (r["upsidePct"] >= 100 and r["upsideConfidence"] >= 70) else 1,
+                              -r["upsidePct"]))
     return recs
 
 
@@ -991,8 +1002,29 @@ async def get_discovery(
         loop = asyncio.get_event_loop()
         rows = await loop.run_in_executor(None, _refresh_discovery_prices, rows)
 
+    # Deduplicate by symbol — keep only the most recent row per symbol.
+    # Multiple rows can exist from different daily screener runs or when the
+    # 10-day cooldown window straddles the lookback window.
+    seen_disc: dict[str, dict] = {}
+    for row in rows:
+        sym = row["symbol"]
+        if sym not in seen_disc:
+            seen_disc[sym] = row
+        else:
+            # Keep row with highest discovery_count (streak), then by created_at
+            existing_count = (seen_disc[sym].get("metadata") or {}).get("discovery_count", 1)
+            new_count      = (row.get("metadata") or {}).get("discovery_count", 1)
+            if new_count > existing_count:
+                seen_disc[sym] = row
+            elif new_count == existing_count:
+                # Same streak — prefer most recently created
+                if (row.get("created_at") or "") > (seen_disc[sym].get("created_at") or ""):
+                    seen_disc[sym] = row
+    rows = list(seen_disc.values())
+
     recs = [_transform_recommendation(r) for r in rows]
-    recs.sort(key=lambda r: 0 if (r["upsidePct"] >= 100 and r["upsideConfidence"] >= 70) else 1)
+    recs.sort(key=lambda r: (0 if (r["upsidePct"] >= 100 and r["upsideConfidence"] >= 70) else 1,
+                              -r["upsidePct"]))
     return recs
 
 

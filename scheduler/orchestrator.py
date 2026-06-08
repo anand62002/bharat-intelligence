@@ -471,8 +471,9 @@ def _log_suppressed_synthesis(
             "horizon_days": 0,
             "upside_pct":  0.0,
             "upside_confidence": 0.0,
-            "danger_drop_pct":   0.0,
-            "danger_confidence": 0.0,
+            # Note: danger_drop_pct / danger_confidence intentionally omitted —
+            # SUPPRESSED sentinel rows don't need danger metrics and omitting them
+            # avoids PGRST204 schema-cache errors on transient Supabase refreshes.
             "headline":    (
                 f"SUPPRESSED: {symbol} — validation gate blocked publication "
                 f"(aggregate κ={outcome.aggregate_kappa:.3f})"

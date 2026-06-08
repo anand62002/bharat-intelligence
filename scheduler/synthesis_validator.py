@@ -21,10 +21,18 @@ A quality-weighted inter-rater kappa is computed per dimension and in aggregate:
   aggregate_kappa = unweighted mean of 5 dimension kappas
 
 Publication rules (evaluated in priority order):
-  1. aggregate_kappa < 0.50        → SUPPRESSED  (skip DB write; log for human review)
+  1. aggregate_kappa < 0.40        → SUPPRESSED  (skip DB write; log for human review)
   2. constraint_awareness < 0.50   → QUALIFIED   (append constraint caveat)
   3. data_provenance < 0.50        → QUALIFIED   (append provenance caveat)
   4. otherwise                     → PASS
+
+Threshold rationale (Jun 2026 calibration):
+  data_provenance and logic_coherence consistently score κ≈0.25–0.35 because
+  3 heterogeneous LLMs from different providers disagree on subjective rubric
+  interpretation.  Aggregate κ rarely exceeds 0.45 for legitimate syntheses.
+  0.40 (lower bound of "moderate agreement") catches genuine hallucinations
+  (κ < 0.30) while allowing reasonable syntheses through as QUALIFIED.
+  Discovery validator keeps its own threshold at 0.35 (unchanged).
 
 Note on single-judge fallback:
   If only 1 judge responds for a dimension, agreement cannot be measured.
@@ -70,7 +78,13 @@ def _is_openai_model(model_id: str) -> bool:
     return model_id.startswith(("gpt-", "o1-", "o3-", "o4-"))
 
 # ── Kappa gate thresholds ─────────────────────────────────────────────────────
-KAPPA_SUPPRESS    = 0.50   # aggregate below this  → SUPPRESSED
+# 0.40 chosen empirically from June 2026 production data:
+#   data_provenance and logic_coherence consistently score κ≈0.25–0.35 because
+#   three heterogeneous LLMs (GPT-4o-mini + Sonnet + Opus) naturally disagree on
+#   subjective interpretability of financial synthesis.  0.40 (moderate agreement)
+#   is the right bar for "not obviously hallucinated" without killing all recs.
+#   Discovery validator keeps its own lower threshold (0.35) unchanged.
+KAPPA_SUPPRESS    = 0.40   # aggregate below this  → SUPPRESSED  (was 0.50)
 KAPPA_DIM_QUALIFY = 0.50   # critical-dim below this → QUALIFIED
 CRITICAL_DIMS     = frozenset({"constraint_awareness", "data_provenance"})
 
