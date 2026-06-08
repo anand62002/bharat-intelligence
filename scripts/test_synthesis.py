@@ -168,7 +168,7 @@ def run_agents(symbol: str, skip_warren: bool = False) -> dict:
         ("fundamental",    fund_analyse,  (symbol,)),
         ("sentiment",      sent_analyse,  (symbol,)),
         ("macro",          macro_analyse, ()),
-        ("institutional",  inst_analyse,  ()),
+        ("institutional",  inst_analyse,  (symbol,)),
         ("historical_rag", rag_analyse,   (symbol,)),
     ]:
         t0 = time.time()
