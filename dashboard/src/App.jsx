@@ -1925,7 +1925,7 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
     try{
       const history=messages.slice(-14).map(m=>({role:m.role,content:m.text}));
       const ariaCall=(msgs)=>fetch("/api/aria",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,system:SYSTEM,messages:msgs})});
+        body:JSON.stringify({model:"claude-haiku-4-5",max_tokens:1000,system:SYSTEM,messages:msgs})});
 
       // ── First pass ────────────────────────────────────────────────────────
       const res=await ariaCall([...history,{role:"user",content:txt}]);
