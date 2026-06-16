@@ -73,7 +73,7 @@ AGENT_NAMES: list[str] = [
     "institutional", "macro", "historical_rag", "commodities",
 ]
 DEFAULT_ACCURACY      = 70.0    # fallback accuracy when agent_performance has no row
-CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
+CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 CLAUDE_MAX_TOKENS     = 2048
 SYNTHESIS_PROMPT_PATH = _ROOT / "prompts" / "orchestrator_synthesis.txt"
 SEMANTIC_LAYER_PATH   = _ROOT / "docs"    / "semantic_layer.md"

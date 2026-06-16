@@ -66,8 +66,8 @@ log = logging.getLogger(__name__)
 # Judge 3: Claude Opus   — top-tier Anthropic
 JUDGE_MODELS: dict[str, str] = {
     "gpt":    os.getenv("JUDGE_MODEL_GPT",    "gpt-4o-mini"),
-    "sonnet": os.getenv("JUDGE_MODEL_SONNET", "claude-sonnet-4-5"),
-    "opus":   os.getenv("JUDGE_MODEL_OPUS",   "claude-opus-4-5"),
+    "sonnet": os.getenv("JUDGE_MODEL_SONNET", "claude-sonnet-4-6"),
+    "opus":   os.getenv("JUDGE_MODEL_OPUS",   "claude-opus-4-8"),
 }
 JUDGE_MAX_TOKENS = 150   # JSON score + one-sentence rationale
 JUDGE_TIMEOUT    = 45    # seconds per judge call

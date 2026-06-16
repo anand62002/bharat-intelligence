@@ -83,7 +83,15 @@
 | P6-C | Market tab: daily Morning Brief + Closing Digest — `agents/market_digest.py`; single Haiku call → `{market_mood, summary, key_events, top_themes, sectors_in_focus, nifty_signal}`; keyword fallback; `db/migrations/create_market_digests.sql`; worker 08:45 IST (MORNING) + 16:20 IST (CLOSING); `GET /api/market/digest`; `MarketDigestPanel` React component with mood colour coding + impact badges | Phase 6 | ✅ **DONE** | 2026-05-24 |
 | P6-D | Elite News Intelligence Engine — D-1: `get_bse_announcements()` BSE corporate filings feed; D-2: `_batch_classify_headlines()` Janus-Q batch event classifier (8 classes, 0.5–3.0× multipliers); D-3: `_temporal_weight()` temporal decay (event-specific half-lives 2–48h); D-4: `_call_finbert_hf()` FinBERT HF Inference API ensemble (0.6×FinBERT+0.4×Haiku on top-5); `HF_API_TOKEN` optional; all in `agents/sentiment.py` | Phase 6 | ✅ **DONE** (D-1/2/3/4) | 2026-05-24 |
 
-**Progress: 71 / 78 items complete (91%) — P6-C + P6-D (D-1/2/3/4) DONE 2026-05-24 — OPS-2 weekly audit recurring**
+| BF-18 | **Model ID deprecation** — `claude-sonnet-4-5` + `claude-opus-4-5` retired same wave as ARIA's `claude-sonnet-4-20250514` (June 15 2026). Caused silent synthesis fallback for ALL symbols daily — `_fallback_synthesis()` ran instead of Claude, making fundamental agent the sole driver of all entry/target/stoploss values. Fixed: `CLAUDE_MODEL` → `claude-sonnet-4-6` in orchestrator.py; `JUDGE_MODEL_SONNET` → `claude-sonnet-4-6`, `JUDGE_MODEL_OPUS` → `claude-opus-4-8` in synthesis_validator.py. Also note: SUPPRESSED entries in the errors list are **not errors** — they are the quality gate working; the `errors` list name is misleading. | Bug Fix | ✅ **DONE** | 2026-06-16 |
+| P7-A | **Fable 5 Synthesis Upgrade** — Replace `claude-sonnet-4-6` with `claude-fable-5` as synthesis model. Add `thinking={type:"adaptive"}` to synthesis API call (adaptive thinking self-allocates reasoning depth to hard financial cases). Expected gains: better contradiction detection across 7 agent signals, calibrated confidence (stops inflating to 70–75% when evidence is mixed), deeper causal reasoning ("PE at 42x with 5% growth — premium unjustified"). Remove `temperature` param (not supported on Fable 5 with adaptive thinking). Update `CLAUDE_MODEL` default in orchestrator.py. Cost: ~3–4× synthesis cost per run (offset by fewer false BUYs reaching paper portfolio). Await Fable 5 account availability. | Phase 7 | ⬜ TODO (await Fable 5 access) | — |
+| P7-B | **Fable 5 Lead Validation Judge** — Replace `claude-opus-4-8` judge with `claude-fable-5` + adaptive thinking as the "opus" judge in synthesis_validator.py. Current judges (GPT-4o-mini + Sonnet + Opus) reach κ≈0.25–0.40 because three heterogeneous LLMs disagree on subjective rubric interpretation. Fable 5's deeper reasoning produces more grounded scores for `data_provenance` and `logic_coherence`. Also update kappa threshold calibration — current 0.40 may need recalibration once Fable 5 changes the distribution. Add `"fable": "claude-fable-5"` to JUDGE_MODELS, remove `"opus"`. | Phase 7 | ⬜ TODO (await Fable 5 access) | — |
+| P7-C | **Data Density Firewall — No Silent Degradation** — Root cause: when screener.in returns 3yr history instead of 10yr, all fields are present (not None) so DataCompletenessValidator passes, but DCF/CAGR computed on 3 data points is hallucination-quality. Fix: (1) Add `data_years_available` field to fundamental result dict (count of non-null annual revenue rows). (2) If `data_years_available < 5` → emit INSUFFICIENT_DATA (not partial). (3) Do NOT compute intrinsic_value, eps_cagr, revenue_cagr on < 5yr data — set these fields to None and flag as `data_quality = "ESTIMATED"`. (4) Add `data_years` to synthesis prompt agent block so Claude/Fable 5 sees "fundamental: BUY score=72, data_years=3 ← low confidence". (5) `_format_agent_outputs()` renders `data_years < 5` as explicit data-gap warning same as INSUFFICIENT_DATA. (6) Screener HTML-parse fallback: if parsed revenue array has < 3 valid years AND Excel export fails → return NO_DATA, never fabricate. | Phase 7 | ⬜ TODO | — |
+| P7-D | **Signal Independence Architecture** — Structural fix for fundamental agent dominance. Currently: (a) fundamental is only agent with entry_low/entry_high/target/stoploss — all other agents contribute signal+score only; (b) synthesis fallback pulls 100% of price levels from fundamental; (c) no check that technical confirms fundamental's entry level. Fix: (1) Make technical agent produce binding entry/stoploss levels from ATR-based zones (already in detail.targets — promote to top-level rec fields). (2) Synthesis prompt: explicitly instruct "entry zone must reconcile fundamental fair value with technical support level — do not use fundamental entry if price is far above technical support". (3) `_build_recommendation()`: when synthesis unavailable, average fundamental + technical targets instead of fundamental-only. (4) Add `signal_diversity_score` to rec metadata: count of agents with BUY vs neutral vs AVOID — dashboard shows this so user can see if BUY was unanimous or fundamental-only. | Phase 7 | ⬜ TODO | — |
+| P7-E | **Fable 5 Structured Adversarial Debate** — Replace current single-pass synthesis (all agents → one Claude call → JSON) with a two-pass structure: **Pass 1 (Devil's Advocate)**: Fable 5 is instructed to find the strongest bear case FIRST, assuming it will recommend SELL. Forced to mine all bearish signals before seeing the synthesis output. **Pass 2 (Synthesis)**: Given Pass 1 bear case, Fable 5 now weighs bull vs bear objectively. This prevents the current "narrative lock-in" where Claude reaches a BUY conclusion in the first paragraph and then cherry-picks supporting evidence. Requires ~2× Claude calls per symbol. Expected: fewer unjustified BUY promotions, better-calibrated confidence on marginal cases, more honest bear cases in recommendations. | Phase 7 | ⬜ TODO (await Fable 5 access) | — |
+| P7-F | **Partial/Degraded Data Alerting** — Add a `data_quality_summary` to each daily run: (1) per-symbol flag for which data source was used (screener full / screener partial / trendlyne fallback / yfinance only / NO_DATA). (2) Alert via portfolio_alerts when > 30% of symbols in a run used degraded data. (3) Dashboard Governance tab: "Data Source Quality" panel showing per-run data source breakdown. (4) Synthesis prompt: inject explicit data quality preamble — "WARNING: 3 of 7 agents used partial data for this symbol. Treat specific numerical claims with appropriate uncertainty." This ensures Fable 5/Sonnet sees data quality context before reasoning. | Phase 7 | ⬜ TODO | — |
+
+**Progress: 72 / 85 items complete (85%) — BF-18 model ID fix DONE 2026-06-16 — Phase 7 (Fable 5 / Mythos) plan added**
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
@@ -1296,5 +1304,112 @@ CREATE TABLE gift_nifty_snapshots (
 | Useful for portfolio pre-open alerts (≥1% gap) | High precision | Large moves usually sustained at open |
 
 > **Implementation effort:** Small (S) — 1 new file (`data/gift_nifty_fetcher.py`), 4 minor integration edits (macro.py, portfolio_monitor.py, worker.py, api/main.py). All data is public — zero additional cost.
+
+---
+
+## Phase 7 — Fable 5 (Mythos) Intelligence Upgrade + Data Integrity Hardening
+
+> **Status:** Planned — awaiting Fable 5 account availability
+> **Estimated uplift:** Recommendation quality 7.2 to 8.5/10 | False BUY rate -40% | Data hallucination blocked
+
+### Context: Why Fable 5 changes everything
+
+The current synthesis architecture (Sonnet 4.6) uses a single-pass LLM call to reconcile 7 agent signals into one JSON recommendation. Sonnet pattern-matches well but does not deeply reason about WHY signals conflict or WHETHER specific numbers are credible given data density. Fable 5 adaptive thinking self-allocates deep reasoning to cases where evidence is ambiguous — exactly the scenario that produces false BUYs.
+
+### BF-18: Model ID Deprecation Fix (Done 2026-06-16)
+
+- `claude-sonnet-4-5` to `claude-sonnet-4-6` in orchestrator.py
+- `claude-opus-4-5` to `claude-opus-4-8` in synthesis_validator.py
+- Impact: synthesis was silently falling back to score-only mode for ALL symbols every day since June 15 2026 when models were retired.
+- Also clarified: SUPPRESSED entries in the errors list are NOT errors — they are the quality gate working. The `errors` list name is misleading; SUPPRESSED is a designed outcome.
+
+### P7-A: Fable 5 Synthesis Engine
+
+**Files:** `scheduler/orchestrator.py`
+
+**Changes:**
+- Set `CLAUDE_MODEL = "claude-fable-5"` as default (keep env var override)
+- Add `thinking={"type": "adaptive"}` to `ant_client.messages.create()` call
+- Remove any `temperature` param on synthesis call (not supported with adaptive thinking on Fable 5)
+- Increase `CLAUDE_MAX_TOKENS` from 2048 to 4096 (adaptive thinking uses hidden tokens; response itself is richer)
+
+**Expected improvement:** Fable 5 spends more reasoning on symbols where agents disagree (RSI bullish but institutional bearish) rather than defaulting to highest-score agent. Confidence calibration improves — currently clustered 65-75%, expect wider range 40-85% that better reflects actual signal quality.
+
+**Cost:** 3-4x synthesis cost per run (15 symbols x 3-4x = manageable). Offset by fewer false BUY recs reaching paper portfolio.
+
+### P7-B: Fable 5 Lead Validation Judge
+
+**Files:** `scheduler/synthesis_validator.py`
+
+**Changes:**
+- Replace `"opus": "claude-opus-4-8"` with `"fable": "claude-fable-5"` in JUDGE_MODELS
+- Add `thinking={"type": "adaptive"}` to Anthropic judge calls in `_call_anthropic_judge()`
+- Recalibrate `KAPPA_SUPPRESS` threshold after first 100 runs with Fable 5 (currently 0.40; expect to raise to 0.45-0.50 as Fable 5 produces higher kappa on genuine syntheses)
+- Add post-validation logging: which judge gave lowest score per dimension (diagnostic)
+
+**Why this matters:** Current judges reach kappa 0.25-0.40 on `data_provenance` due to subjective disagreements on rubric interpretation. Fable 5 with adaptive thinking produces more grounded, consistent data-traceability scores — the rubric "does this number appear in the agent data?" benefits most from explicit reasoning chains.
+
+### P7-C: Data Density Firewall (No Fable 5 needed — execute now)
+
+**Files:** `agents/fundamental.py`, `agents/base.py`, `scheduler/orchestrator.py`
+
+**Problem:** When screener.in returns 3yr history instead of 10yr (partial HTML parse, Excel fallback returning fewer rows), all fields are present (not None). DataCompletenessValidator passes. But DCF CAGR computed on 3 data points is statistically meaningless.
+
+**Changes:**
+1. Add `data_years_available: int` to fundamental result (count of non-null annual revenue rows)
+2. If `data_years_available < 5`: set `intrinsic_value = None`, `eps_cagr = None`, `revenue_cagr = None`, `data_quality = "ESTIMATED"` — never compute CAGRs on thin data
+3. If `data_years_available < 3`: return INSUFFICIENT_DATA signal (hard stop)
+4. Add `data_years` to `_format_agent_outputs()`: "fundamental: BUY score=72 [data_years=3 -- LOW -- CAGR excluded]"
+5. Synthesis prompt instruction: "If data_years < 5 for fundamental, do NOT cite specific CAGR figures — use directional language only. Do not invent numbers."
+6. Screener HTML fallback: if parsed revenue array has < 3 valid rows AND Excel export fails, return NO_DATA signal
+
+### P7-D: Signal Independence Architecture (No Fable 5 needed — execute now)
+
+**Files:** `scheduler/orchestrator.py`, `agents/technical.py`, `prompts/orchestrator_synthesis.txt`
+
+**Problem:** Fundamental is the only agent with price-level outputs (entry_low/entry_high/target/stoploss). When synthesis falls back or Claude follows fundamental price anchor, all price levels come from one source.
+
+**Changes:**
+1. Technical agent: promote `detail.targets` (ATR-based stoploss, EMA200 target) to top-level fields `tech_entry`, `tech_target`, `tech_stoploss`
+2. `_build_recommendation()` fallback: when synthesis unavailable, average fundamental + technical targets where both exist
+3. Synthesis prompt: "Entry zone must reconcile fundamental fair value with technical support. If price is >15% above fundamental entry_low, note this as execution risk. Stoploss must be at technical support, not just below fundamental entry."
+4. Add `signal_diversity_score = n_bull / (n_bull + n_bear + n_neutral)` to agent_signals metadata
+5. Dashboard rec card: 7 coloured signal dots (green=BUY, grey=NEUTRAL, red=AVOID) — visible at a glance
+
+### P7-E: Fable 5 Structured Adversarial Debate (requires P7-A first)
+
+**Files:** `scheduler/orchestrator.py`, `prompts/orchestrator_bear_advocate.txt` (new)
+
+**Problem:** Single-pass synthesis has "narrative lock-in" — Claude encounters the strongest signal early (fundamental BUY at 75/100) and assembles a narrative that confirms it. Bear case is an afterthought.
+
+**Two-pass architecture:**
+- Pass 1 (Devil Advocate): Call Fable 5 — "Find every reason NOT to buy this stock. Assume the thesis is wrong. Find data contradictions, valuation risks, data quality issues." Returns structured bear_case JSON.
+- Pass 2 (Synthesis): Call Fable 5 with agent data AND Pass 1 bear case — "Here is the strongest bear case. Now weigh bull vs bear objectively." Returns final recommendation.
+
+Mirrors serious hedge fund research process where a short analyst challenges every long thesis before publication. Cost: 2x Claude calls per symbol.
+
+### P7-F: Partial Data Alerting System (No Fable 5 needed — execute now)
+
+**Files:** `scheduler/orchestrator.py`, `api/main.py`, `dashboard/src/App.jsx`
+
+**Changes:**
+1. Add `data_quality_summary` to daily_runs JSONB: {symbol: {source, years_available, completeness_pct}} for every symbol
+2. When > 30% of symbols used degraded data, insert WARNING portfolio_alert: "Data quality degraded for today run — 8 of 15 symbols used partial data"
+3. Dashboard Governance tab: add "Data Source Quality" section showing per-run data source breakdown
+4. Synthesis prompt preamble: inject `FUNDAMENTAL DATA QUALITY: data_years=N, source=screener|trendlyne|yfinance, completeness=X%` before agent output block
+
+**Note:** Paper portfolio poor trending may be directly caused by recs built on thin data. This gives visibility to audit it.
+
+### Execution Order
+
+P7-C, P7-D, P7-F have no Fable 5 dependency — execute immediately.
+P7-A, P7-B, P7-E require Fable 5 account access.
+
+1. P7-C (Data density firewall) — immediate protection against thin-data hallucination
+2. P7-D (Signal independence) — reduces fundamental dominance, better entry/stoploss
+3. P7-F (Data quality alerting) — visibility into paper portfolio degradation root causes
+4. P7-A (Fable 5 synthesis) — needs Fable 5 access
+5. P7-B (Fable 5 judge) — needs Fable 5 access
+6. P7-E (Adversarial debate) — needs P7-A working first
 
 ---
