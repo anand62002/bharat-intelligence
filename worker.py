@@ -25,6 +25,7 @@ Schedule (all times IST / Asia/Kolkata)
   16:20  Market Digest CLOSING — end-of-day recap
   16:30  Forward poller       — live price snapshot for all open recs + t+30 resolve (P5-D)
   18:30  Outcome tracker      — resolve t+90/180/365 milestones + sentiment validation (P5-D/P6-D-8)
+  07:45 (Sunday)  Weekly health audit — kappa, alpha_live, Trendlyne, discovery, RAG freshness
 
 Usage
 -----
@@ -545,6 +546,29 @@ def job_rag_refresh() -> None:
         log.error("RAG corpus refresh job failed: %s", exc, exc_info=True)
 
 
+def job_weekly_audit() -> None:
+    """Sunday 07:45 IST — system health audit: kappa, suppression, alpha_live, Trendlyne, discovery."""
+    log.info("-" * 50)
+    log.info("  JOB START: Weekly Health Audit (Sunday 07:45 IST)")
+    log.info("-" * 50)
+    try:
+        from scripts.weekly_audit import run_audit
+        result = run_audit(days=7)
+        status = result.get("overall_status", "?")
+        log.info(
+            "Weekly audit done — status=%s  pass=%d  warn=%d  fail=%d",
+            status,
+            result.get("pass", 0),
+            result.get("warn", 0),
+            result.get("fail", 0),
+        )
+        if result.get("fail", 0) > 0:
+            fails = [k for k, v in result.get("checks", {}).items() if v.get("status") == "FAIL"]
+            log.error("AUDIT FAIL items: %s", fails)
+    except Exception as exc:
+        log.error("Weekly audit job failed: %s", exc, exc_info=True)
+
+
 def job_backtest() -> None:
     """1st of every month, 07:45 IST — walk-forward backtest on NIFTY 500 quality universe."""
     log.info("=" * 60)
@@ -815,6 +839,20 @@ def build_scheduler():
         misfire_grace_time=600,
     )
 
+    # ── Weekly health audit — every Sunday, 07:45 IST ───────────────────────
+    # Runs after performance tracker (07:00) and research agent (07:30).
+    # Checks: kappa suppression rate, alpha_live coverage, Trendlyne session,
+    # daily_run status, discovery runs, RAG corpus freshness, forward poller recency.
+    scheduler.add_job(
+        job_weekly_audit,
+        CronTrigger(day_of_week="sun", hour=7, minute=45, timezone=IST),
+        id="weekly_audit",
+        name="Weekly Health Audit (Sunday 07:45 IST)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=7200,
+    )
+
     # ── Monthly backtest — 1st of month, 07:45 IST ───────────────────────────
     # Runs after performance tracker (07:00) + research agent (07:30) so the
     # system is warm. Takes ~20–30 min for 80 symbols × 5yr OHLCV.
@@ -877,6 +915,7 @@ def main() -> None:
         job_market_digest_closing()
         job_discovery_screener()
         job_target_updater()
+        job_weekly_audit()
         log.info("--now run complete. Starting scheduler...")
 
     try:
