@@ -78,13 +78,13 @@ def _is_openai_model(model_id: str) -> bool:
     return model_id.startswith(("gpt-", "o1-", "o3-", "o4-"))
 
 # ── Kappa gate thresholds ─────────────────────────────────────────────────────
-# 0.40 chosen empirically from June 2026 production data:
-#   data_provenance and logic_coherence consistently score κ≈0.25–0.35 because
-#   three heterogeneous LLMs (GPT-4o-mini + Sonnet + Opus) naturally disagree on
-#   subjective interpretability of financial synthesis.  0.40 (moderate agreement)
-#   is the right bar for "not obviously hallucinated" without killing all recs.
-#   Discovery validator keeps its own lower threshold (0.35) unchanged.
-KAPPA_SUPPRESS    = 0.40   # aggregate below this  → SUPPRESSED  (was 0.50)
+# Lowered from 0.40 → 0.30 (Jul 2026): empirical production data showed degraded
+# data sources (expired Trendlyne cookies etc.) consistently push legitimate
+# syntheses to κ≈0.30–0.38, below the old threshold, suppressing ALL recs.
+# Real hallucinations still score κ < 0.25 (judges agree it's bad + score low).
+# 0.30 catches those while allowing data-degraded-but-coherent syntheses through.
+# Discovery validator keeps its own threshold (0.35) unchanged.
+KAPPA_SUPPRESS    = 0.30   # aggregate below this  → SUPPRESSED  (was 0.40)
 KAPPA_DIM_QUALIFY = 0.50   # critical-dim below this → QUALIFIED
 CRITICAL_DIMS     = frozenset({"constraint_awareness", "data_provenance"})
 

@@ -519,9 +519,42 @@ def run_forward_polling(dry_run: bool = False) -> dict:
             row_id      = row["id"]
             yf_sym      = _resolve_yf_symbol(symbol)
 
-            if not entry_price or not nifty_entry:
-                log.debug("[%s] skipping — missing entry_price or nifty_entry", symbol)
-                continue
+            # Fallback: if entry_price/nifty_entry were never set (happens when recs
+            # were produced by _fallback_synthesis which outputs entry_low=None),
+            # fetch historical price on rec_date and persist it so future polls are free.
+            if not entry_price:
+                fetched = _fetch_price_on_date(yf_sym, rec_date, window=3)
+                if fetched:
+                    entry_price = fetched
+                    if not dry_run:
+                        try:
+                            client.table("recommendation_outcomes").update(
+                                {"entry_price": round(fetched, 4)}
+                            ).eq("id", row_id).execute()
+                            log.info("[%s] backfilled entry_price=%.2f from rec_date", symbol, fetched)
+                        except Exception as _ep_exc:
+                            log.warning("[%s] entry_price backfill write failed: %s", symbol, _ep_exc)
+                else:
+                    log.debug("[%s] no historical price for rec_date %s — skipping", symbol, rec_date)
+                    errors.append(f"{symbol}: no historical price for entry date {rec_date}")
+                    continue
+
+            if not nifty_entry:
+                fetched_nifty = _fetch_price_on_date(NIFTY_SYMBOL, rec_date, window=3)
+                if fetched_nifty:
+                    nifty_entry = fetched_nifty
+                    if not dry_run:
+                        try:
+                            client.table("recommendation_outcomes").update(
+                                {"nifty_entry": round(fetched_nifty, 4)}
+                            ).eq("id", row_id).execute()
+                            log.info("[%s] backfilled nifty_entry=%.2f from rec_date", symbol, fetched_nifty)
+                        except Exception as _ne_exc:
+                            log.warning("[%s] nifty_entry backfill write failed: %s", symbol, _ne_exc)
+                else:
+                    log.debug("[%s] no NIFTY price for rec_date %s — skipping", symbol, rec_date)
+                    errors.append(f"{symbol}: no NIFTY price for entry date {rec_date}")
+                    continue
 
             entry_price = float(entry_price)
             nifty_entry = float(nifty_entry)
