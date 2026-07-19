@@ -774,12 +774,15 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
   const ac = stock.action==="BUY"?C.green:stock.action==="SELL"?C.red:C.accent;
   const dsColor = stock.discoveryScore>=80?C.green:stock.discoveryScore>=65?C.accent:C.muted;
   const isCritical = isCriticalDiscovery(stock);
+  const today = new Date().toISOString().slice(0,10);
+  const isStale = stock.validTill && stock.validTill < today;
   return(
     <div className={`research-card${isCritical?" critical-discovery":""}`} onClick={onClick} style={{
       background:selected?C.panel:C.surface,
       border:`1.5px solid ${selected?(isCritical?C.green+"99":C.accent+"66"):(isCritical?C.green+"66":C.border)}`,
       borderRadius:10,padding:13,cursor:"pointer",marginBottom:9,transition:"all .15s",
-      borderLeft:`3px solid ${isCritical?C.green:C.cyan}`,
+      borderLeft:`3px solid ${isStale?C.muted:(isCritical?C.green:C.cyan)}`,
+      opacity:isStale?0.72:1,
     }}>
       {/* Critical badge strip */}
       {isCritical&&(
@@ -809,6 +812,7 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
               <span style={{fontSize:9,color:dsColor,fontWeight:700}}>Score {stock.discoveryScore}</span>
             </span>
             {stock.govCheck.flags.length>0&&<Tag color={C.accent} small>⚠ flagged</Tag>}
+            {isStale&&<Tag color={C.muted} small>⏱ STALE</Tag>}
             {stock.liquidityTier==="ILLIQUID"&&<Tag color={C.red} small>🚫 ILLIQUID</Tag>}
             {stock.liquidityTier==="LOW"&&<Tag color="#f59e0b" small>⚡ LOW LIQ</Tag>}
             {stock.suggestedPositionPct!=null&&stock.suggestedPositionPct>0&&(
@@ -871,6 +875,38 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
           ))}
         </div>
       </div>
+      {/* Agent signal votes row */}
+      {stock.agents&&Object.keys(stock.agents).length>0&&(()=>{
+        const agentEntries=Object.entries(stock.agents).filter(([,v])=>v&&v.signal);
+        const bullish=agentEntries.filter(([,v])=>["BULLISH","BUY","POSITIVE"].includes(v.signal)).length;
+        const bearish=agentEntries.filter(([,v])=>["BEARISH","SELL","NEGATIVE","AVOID"].includes(v.signal)).length;
+        const neutral=agentEntries.length-bullish-bearish;
+        const sigColor=(sig)=>["BULLISH","BUY","POSITIVE"].includes(sig)?C.green:["BEARISH","SELL","NEGATIVE","AVOID"].includes(sig)?C.red:C.muted;
+        return(
+          <div style={{marginBottom:7}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+              <span style={{fontSize:9,color:C.muted}}>Agent votes:</span>
+              <span style={{fontSize:9,color:C.green,fontWeight:700}}>▲{bullish} bull</span>
+              <span style={{fontSize:9,color:C.red,fontWeight:700}}>▼{bearish} bear</span>
+              {neutral>0&&<span style={{fontSize:9,color:C.muted}}>— {neutral} neutral</span>}
+              {stock.warrenBot?.score!=null&&(
+                <span style={{marginLeft:"auto",background:"#92400e22",border:"1px solid #92400e66",borderRadius:4,padding:"1px 6px",fontSize:9,color:"#fbbf24",fontWeight:700}}>
+                  🏆 WB {stock.warrenBot.score}/100
+                </span>
+              )}
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
+              {agentEntries.map(([name,v])=>(
+                <span key={name} title={`${name}: ${v.signal} (score ${v.score??'—'})`}
+                  style={{background:sigColor(v.signal)+"18",border:`1px solid ${sigColor(v.signal)}44`,
+                    borderRadius:3,padding:"1px 5px",fontSize:8,color:sigColor(v.signal),cursor:"help"}}>
+                  {name.replace("_"," ")} {v.score!=null?v.score:""}
+                </span>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
       {/* Confidence bar */}
       <div style={{marginBottom:8}}>
         <Bar pct={stock.confidence} color={isCritical?C.green:ac}/>
@@ -1233,7 +1269,7 @@ function DiscoveryRunsPanel({runs,apiLoaded}){
 }
 
 // ─── GOVERNANCE RESEARCH AGENT TAB ───────────────────────────────────────────
-function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded}){
+function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded, liveAttribution}){
   const _feed   = Array.isArray(_rf) ? _rf : [];
   // Agent debate log entries live inside each research proposal's debate_log JSONB field.
   // We extract and flatten them from the live feed — no separate mock array needed.
@@ -1400,8 +1436,47 @@ function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded}){
 
       {/* AGENT HEALTH */}
       {sec==="health"&&(
-        <EmptyState icon="📊" title="Agent performance data not yet available"
-          sub={"Accuracy and hallucination metrics are logged to the agent_performance table after each daily scheduler run.\n\nData will appear here after the first complete scheduler cycle (runs at 06:00 IST).\n\nTo run manually: python -m scheduler.orchestrator"} />
+        <div>
+          {/* Live attribution if available */}
+          {liveAttribution?.agents?.length>0
+            ? <AgentAttributionPanel attribution={null} liveAttribution={liveAttribution}/>
+            : (
+              <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:12}}>
+                <div style={{fontSize:10,fontWeight:700,color:C.muted,marginBottom:6}}>Live Attribution</div>
+                <div style={{fontSize:9,color:C.textDim}}>
+                  Live alpha vs NIFTY 50 per agent will appear here after today's 16:30 IST Forward Poller run.
+                  Resolved 90-day accuracy arrives after recommendations mature (≈6 months).
+                </div>
+              </div>
+            )
+          }
+          {/* Agent registry — always visible */}
+          <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12}}>
+            <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:8}}>Active Agents (10)</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+              {[
+                ["technical","TA indicators, RSI, EMA, momentum"],
+                ["fundamental","Valuation, PE, ROCE, DCF, screener"],
+                ["sentiment","News NLP, BSE filings, FinBERT ensemble"],
+                ["institutional","FII/DII flows, promoter holdings"],
+                ["macro","RBI, inflation, currency, global macro"],
+                ["historical_rag","Semantic similarity on past market events"],
+                ["sector_valuation","Live sector PE vs 5-yr structural median"],
+                ["commodities","Gold, crude, silver MCX signals"],
+                ["warren_bot","Buffett+Jhunjhunwala quality score (0–100)"],
+                ["discovery_screener","Full NSE EQ universe daily screening"],
+              ].map(([name,desc])=>(
+                <div key={name} style={{background:C.bg,borderRadius:5,padding:"6px 9px",border:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"white",textTransform:"capitalize",marginBottom:2}}>
+                    {name.replace(/_/g," ")}
+                    <span style={{marginLeft:6,fontSize:7,background:C.green+"22",color:C.green,borderRadius:3,padding:"1px 4px"}}>ACTIVE</span>
+                  </div>
+                  <div style={{fontSize:8,color:C.muted}}>{desc}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -3709,7 +3784,7 @@ export default function App(){
               </div>
             )}
 
-            {tab==="governance_research"&&<GovernanceResearchTab onOpenARIA={openARIA} researchFeed={researchFeed} apiLoaded={apiLoaded}/>}
+            {tab==="governance_research"&&<GovernanceResearchTab onOpenARIA={openARIA} researchFeed={researchFeed} apiLoaded={apiLoaded} liveAttribution={liveAttribution}/>}
 
             {tab==="governance"&&(
               <div style={{animation:"fadeUp .3s ease"}}>

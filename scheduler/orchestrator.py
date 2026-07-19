@@ -996,17 +996,9 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 # showed +17–23 pp accuracy gains on financial reasoning tasks
                 # when domain semantics accompany the schema (analogous to
                 # schema-augmented LLM benchmarks for structured data).
-                if semantic_layer:
-                    prompt = (
-                        "## BUSINESS SEMANTICS CONTEXT\n"
-                        "The following reference document defines all financial metrics, "
-                        "Indian market conventions, disambiguation rules, and data-source "
-                        "quirks used in this analysis. Use it to correctly interpret every "
-                        "field value in the agent outputs below.\n\n"
-                        + semantic_layer
-                        + "\n\n---\n\n"
-                        + prompt
-                    )
+                # semantic_layer is injected via system parameter with cache_control
+                # so it is cached across all 24 per-symbol calls (not repeated each time).
+                # (handled below when building the API call)
 
                 # ── Regime context injection ──────────────────────────────────
                 # Prepend current market regime so Claude calibrates conviction
@@ -1040,10 +1032,29 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 _last_exc: Exception | None = None
                 for _attempt in range(3):
                     try:
+                        # Build system content: semantic_layer cached, then static preamble.
+                        # cache_control="ephemeral" tells Anthropic to cache this block
+                        # across calls within the same hour (TTL ~5 min minimum hit window).
+                        # Saves ~15KB re-tokenisation for 23 of 24 symbol calls.
+                        _system: list[dict] = []
+                        if semantic_layer:
+                            _system.append({
+                                "type": "text",
+                                "text": (
+                                    "## BUSINESS SEMANTICS CONTEXT\n"
+                                    "The following reference document defines all financial metrics, "
+                                    "Indian market conventions, disambiguation rules, and data-source "
+                                    "quirks. Use it to correctly interpret every field value in the "
+                                    "agent outputs below.\n\n"
+                                    + semantic_layer
+                                ),
+                                "cache_control": {"type": "ephemeral"},
+                            })
                         _resp = await asyncio.to_thread(
                             ant_client.messages.create,
                             model=CLAUDE_MODEL,
                             max_tokens=CLAUDE_MAX_TOKENS,
+                            system=_system if _system else anthropic.NOT_GIVEN,
                             messages=[{"role": "user", "content": prompt}],
                         )
                         _synthesis_raw = _resp.content[0].text
@@ -1120,6 +1131,38 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                     ]
             except Exception as _audit_exc:
                 log.debug("[%s] leakage audit error (non-critical): %s", symbol, _audit_exc)
+
+            # ── P7-C: Data density firewall ──────────────────────────────────────
+            # If fundamental agent only has <5 years of history, CAGR and DCF
+            # figures are computed on too few data points to be reliable.
+            # Warren bot also tracks years_available with a hard <5yr disqualifier.
+            # Action: cap confidence at 60 and inject a warning into synthesis so
+            # judges penalise the data_provenance rubric appropriately.
+            _fund_detail  = (agent_results.get("fundamental", {}).get("detail") or {})
+            _years_avail  = _fund_detail.get("years_available") or \
+                            (agent_results.get("warren_bot", {}) or {}).get("years_available")
+            _data_quality = _fund_detail.get("data_quality") or \
+                            (agent_results.get("fundamental", {}) or {}).get("data_quality")
+            if _years_avail is not None and _years_avail < 5:
+                _old_conf = synthesis_data.get("confidence", 50)
+                synthesis_data["confidence"] = min(float(_old_conf), 60.0)
+                _ddw = (
+                    f"\n⚠ DATA DENSITY WARNING: Only {_years_avail} years of fundamental "
+                    f"history available (minimum 5 required for reliable CAGR/DCF). "
+                    f"All multi-year growth rates and intrinsic value estimates are "
+                    f"statistically unreliable. Confidence capped at 60. "
+                    f"Do NOT cite revenue/EPS CAGR figures as reliable signals.\n"
+                )
+                synthesis_data["synthesis"] = _ddw + (synthesis_data.get("synthesis") or "")
+                log.warning("[%s] P7-C data density: only %d years available — confidence capped at 60",
+                            symbol, _years_avail)
+            elif _data_quality == "ESTIMATED":
+                _old_conf = synthesis_data.get("confidence", 50)
+                synthesis_data["confidence"] = min(float(_old_conf), 65.0)
+                _eq = ("\n⚠ ESTIMATED DATA: Fundamental figures sourced from yfinance fallback "
+                       "(screener.in unavailable). Treat specific ratio values with reduced confidence.\n")
+                synthesis_data["synthesis"] = _eq + (synthesis_data.get("synthesis") or "")
+                log.info("[%s] P7-C: ESTIMATED data quality — confidence capped at 65", symbol)
 
             # ── Consensus gate — prevent single-agent BUY promotions ────────────
             # Applied before earnings guard and validation so adjusted confidence
