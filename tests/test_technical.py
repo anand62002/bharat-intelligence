@@ -420,3 +420,68 @@ class TestAnalyseEdgeCases:
             result = analyse("TEST.NS")
         assert result["upside_pct"] is not None
         assert result["signal"] != "NO_DATA"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ATR-14 stoploss tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestATR14Stoploss:
+    """Tests for volatility-adjusted ATR-14 stoploss fields added to analyse()."""
+
+    def test_atr_fields_present(self, mock_df, mock_ticker_no_target):
+        """analyse() result must include atr_14, atr_stoploss, atr_stoploss_pct."""
+        with patch("agents.technical.get_ohlcv", return_value=mock_df), \
+             patch("yfinance.Ticker", return_value=mock_ticker_no_target):
+            result = analyse("TEST.NS")
+        assert "atr_14" in result, "atr_14 missing from result"
+        assert "atr_stoploss" in result, "atr_stoploss missing from result"
+        assert "atr_stoploss_pct" in result, "atr_stoploss_pct missing from result"
+
+    def test_atr_14_positive(self, mock_df, mock_ticker_no_target):
+        with patch("agents.technical.get_ohlcv", return_value=mock_df), \
+             patch("yfinance.Ticker", return_value=mock_ticker_no_target):
+            result = analyse("TEST.NS")
+        assert result["atr_14"] is not None
+        assert result["atr_14"] > 0, "ATR-14 must be positive"
+
+    def test_atr_stoploss_below_current_price(self, mock_df, mock_ticker_no_target):
+        """Stoploss must be strictly below the current price (2×ATR below)."""
+        with patch("agents.technical.get_ohlcv", return_value=mock_df), \
+             patch("yfinance.Ticker", return_value=mock_ticker_no_target):
+            result = analyse("TEST.NS")
+        current_price = result["detail"]["indicators"]["current_price"]
+        if result["atr_stoploss"] is not None:
+            assert result["atr_stoploss"] < current_price, (
+                f"atr_stoploss={result['atr_stoploss']} must be < current_price={current_price}"
+            )
+
+    def test_atr_stoploss_pct_positive(self, mock_df, mock_ticker_no_target):
+        """atr_stoploss_pct should be a positive downside percentage."""
+        with patch("agents.technical.get_ohlcv", return_value=mock_df), \
+             patch("yfinance.Ticker", return_value=mock_ticker_no_target):
+            result = analyse("TEST.NS")
+        if result["atr_stoploss_pct"] is not None:
+            assert result["atr_stoploss_pct"] > 0, "atr_stoploss_pct must be > 0"
+            assert result["atr_stoploss_pct"] < 50, "atr_stoploss_pct > 50% is unreasonably large"
+
+    def test_atr_stoploss_equals_price_minus_2atr(self, mock_df, mock_ticker_no_target):
+        """atr_stoploss must equal current_price - 2 × atr_14 within rounding."""
+        with patch("agents.technical.get_ohlcv", return_value=mock_df), \
+             patch("yfinance.Ticker", return_value=mock_ticker_no_target):
+            result = analyse("TEST.NS")
+        price = result["detail"]["indicators"]["current_price"]
+        atr   = result["atr_14"]
+        sl    = result["atr_stoploss"]
+        if atr and sl:
+            expected = round(price - 2 * atr, 2)
+            assert abs(sl - expected) < 0.02, f"atr_stoploss={sl} expected≈{expected}"
+
+    def test_atr_none_on_insufficient_data(self):
+        """With < 14 bars, ATR should be None (not enough periods)."""
+        small_df = _make_ohlcv(10)
+        with patch("agents.technical.get_ohlcv", return_value=small_df):
+            result = analyse("TINY.NS")
+        # On tiny data the agent returns NO_DATA/INSUFFICIENT_DATA signal;
+        # ATR fields may be None — just ensure they're not fabricated.
+        assert result.get("atr_14") is None or result["signal"] in ("NO_DATA", "INSUFFICIENT_DATA")

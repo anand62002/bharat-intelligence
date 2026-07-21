@@ -25,6 +25,12 @@ Stock analysis/
 │   ├── technical.py            # TA indicators via yfinance
 │   │                           # Result includes ohlcv_last_date: ISO date of last OHLCV bar
 │   │                           #   used by audit_data_leakage() for temporal integrity checks
+│   │                           # ATR-14 stoploss fields (added 2026-07-22):
+│   │                           #   atr_14: float — 14-day EWM Average True Range (₹)
+│   │                           #   atr_stoploss: float — current_price - 2×ATR14 (floor for synthesis)
+│   │                           #   atr_stoploss_pct: float — atr_stoploss as % of price
+│   │                           # Synthesis prompt constraint: stoploss MUST be ≤ atr_stoploss
+│   │                           #   (injected via {atr_stoploss} placeholder in orchestrator_synthesis.txt)
 │   ├── fundamental.py          # Valuation, ratios, screeners
 │   │                           # Result includes data_as_of: date.today().isoformat() — snapshot
 │   │                           #   fetch time; used by audit_data_leakage() for leakage detection
@@ -125,6 +131,7 @@ Stock analysis/
 │   #    09:15, 11:30, 13:30, 15:15 — portfolio monitor
 │   #    15:45 — options snapshot (uses Breeze if configured)
 │   #    16:20 — market digest CLOSING (P6-C)
+│   #    07:45 (Sunday) — weekly health audit (scripts/weekly_audit.py) ← NEW
 │   #    07:45 (1st of month) — historical backtest (agents/backtester.py)
 │   #    08:15 (1st of month) — RAG corpus auto-refresh (db/auto_seed_rag.py)
 │
@@ -278,6 +285,7 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/api/performance/live` | P5-D/E: live snapshot of all open (PENDING) recs — avg return/alpha, by-action tiles, per-rec table sorted by alpha_live |
 | GET | `/api/attribution/live` | P5-E: per-agent live alpha attribution (before 90d data exists) — avg_bull_alpha_live, positive_rate_live |
 | GET | `/api/market/digest` | P6-C: today's market digests — `?digest_type=MORNING\|CLOSING&digest_date=YYYY-MM-DD` — returns `{digests, date, count}` with camelCase keys |
+| POST | `/api/analyse` | On-demand full 10-agent analysis for any symbol. Body: `{"symbol": "RELIANCE"}`. Runs full pipeline (dry_run=True — does NOT save to DB). Returns `{symbol, yf_symbol, status, analysis: {action/confidence/synthesis/...}, agents: {...}}`. Server-side 180s timeout. Status = "OK" (rec produced) or "NO_RECOMMENDATION" (suppressed). Powers ARIA /analyse command. |
 | WS | `/ws/alerts` | WebSocket — broadcasts DANGER/CRITICAL alerts every 30s |
 
 **Auth:** `x-api-key: <DASHBOARD_API_KEY>` header on all HTTP. `?api_key=<key>` on WebSocket.
@@ -574,6 +582,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (2026-07-22 session) | **ATR-14 stoploss**: `agents/technical.py` now computes `atr_14`, `atr_stoploss` (entry−2×ATR), `atr_stoploss_pct`; synthesis prompt (`prompts/orchestrator_synthesis.txt`) enforces stoploss ≥ ATR floor via `{atr_stoploss}` placeholder; orchestrator injects it from technical agent result. **ARIA /analyse command**: `POST /api/analyse` endpoint — runs full 10-agent pipeline (dry_run=True, no DB write), 180s timeout, returns analysis+agents dict; ARIA detects "analyse SYMBOL" intent → confirm → `<run_analyse>` tag → dashboard calls endpoint and shows result. **Weekly health audit**: `scripts/weekly_audit.py` — 9-check PASS/WARN/FAIL report (kappa, daily_runs, alpha_live, trendlyne, discovery, RAG, agent_performance, forward_poller, outcome_seeder); Sunday 07:45 IST worker job. **Architecture white paper**: `docs/ARCHITECTURE.md` rewritten for business/finance audience — 500-word executive summary + ~200-word elevator pitch per agent. **Fable 5 architect guide**: `docs/FABLE5_REDESIGN_PROMPT.md` updated with Part A structured pain-points prompt. 30 new tests (6 ATR + 14 weekly_audit + 10 on_demand_analyse). LOG_LEVEL=INFO set on Railway worker — kappa now visible at INFO level in Railway logs. |
 | (fix macro test) | `tests/test_macro.py`: added `_fetch_india_macro_news` mock to `_mock_analyse_deps` helper — without it, live Google News RSS calls during tests produced a non-zero `news_adj`, breaking `test_score_components_sum` (95 ≠ 100). |
 | (data-leakage-audit) | `governance/performance_tracker.py`: `LeakageViolation` + `DataLeakageReport` dataclasses; `_check_technical_temporal_integrity()` (BLOCKING: ohlcv_last_date > signal_ts+1d; WARNING: stale >7d), `_check_fundamental_temporal_integrity()` (WARNING: data_as_of > signal_ts), `_check_rag_temporal_integrity()` (BLOCKING: matched_event.event_date > signal_ts); `audit_data_leakage()` orchestrates all checks. `agents/technical.py`: added `ohlcv_last_date` field. `agents/fundamental.py`: added `data_as_of` field. `scheduler/orchestrator.py`: leakage audit called in `synthesise_node()` pre-consensus-gate, violations stored in `synthesis_data["metadata"]["leakage_violations"]`. 43 tests added. |
 | (P6-C/D) | P6-C: `agents/market_digest.py` — Morning/Closing digest via single Haiku call; `db/migrations/create_market_digests.sql`; `GET /api/market/digest`; `MarketDigestPanel` React component (mood colour coding, impact badges, themes, sectors, nifty signal); worker jobs 08:45 IST (MORNING) + 16:20 IST (CLOSING). P6-D: `agents/sentiment.py` upgraded with D-1 BSE announcements (`get_bse_announcements()`), D-2 batch event classifier (Janus-Q: 8 event classes, `_batch_classify_headlines()`), D-3 temporal decay (`_temporal_weight()`, event-specific half-lives 2–48h), D-4 FinBERT ensemble (`_call_finbert_hf()`, 0.6×FinBERT+0.4×Haiku on top-5 headlines). `data/fetchers.py`: `get_bse_announcements()` added. 70 new tests (29 market_digest + 41 sentiment_elite); 4 pre-existing sentiment tests fixed (batch classifier mock + `haiku_calls` count fix). |
@@ -740,5 +749,7 @@ Full investment-grade improvement plan: see **`EXECUTION_PLAN.md`** in project r
 - **Phase 5 (P5)** ✅ ALL DONE: P5-A (outcome tracker + attribution) ✅; P5-B (paper portfolio) ✅; P5-C (outcome seeder) ✅; P5-D (forward poller — batch live prices 16:30 IST, alpha_live/return_live/days_live, t+30 milestone) ✅; P5-E (live attribution dashboard — LivePerformancePanel + upgraded AgentAttributionPanel) ✅. Migration `db/migrations/p5d_live_performance_columns.sql` ✅ applied in Supabase.
 - **Phase 6 (P6)**: P6-A ✅ (confidence calibration + top/worst calls in PerformanceTab); P6-B ✅ (backtest panel — TRAIN/TEST/FULL split selector, monthly runs table); P6-C ✅ (morning/closing digest — `agents/market_digest.py`, worker 08:45/16:20 IST, `GET /api/market/digest`, `MarketDigestPanel` component, `market_digests` table); P6-D ✅ D-1/D-2/D-3/D-4 (BSE feeds, batch event classifier, temporal decay, FinBERT ensemble in `agents/sentiment.py`)
 - **OPS-2** 🔄 Recurring: Weekly interface + DB audit every Sunday — routes vs dashboard, column names vs code, worker imports, yfinance/Supabase API patterns
+- **Session 2026-07-22** ✅: ATR-14 stoploss (technical.py + synthesis prompt constraint); ARIA /analyse on-demand command (POST /api/analyse); weekly health audit (scripts/weekly_audit.py + Sunday 07:45 IST worker job); ARCHITECTURE.md white paper rewrite; FABLE5 architect guide; 30 new tests. LOG_LEVEL=INFO set on Railway worker. KAPPA_SUPPRESS lowered to 0.30 (prior session). Alpha_live backfill for forward poller entry_price fix (prior session).
+- **Phase 7 (P7)** ⬜ PENDING (awaits Fable 5 API access): P7-A (Fable 5 synthesis); P7-B (Fable 5 lead judge); P7-C (Data Density Firewall); P7-D (Signal Independence — ATR stoploss done, promote technical entry levels); P7-E (Adversarial debate); P7-F (Partial data alerting). See `EXECUTION_PLAN.md` for full spec.
 
 **Estimated additional monthly cost at full build:** ₹1,039–3,498/month (Quantsapp options feed + Trendlyne fundamentals backup + OpenAI GPT-4o-mini judges)

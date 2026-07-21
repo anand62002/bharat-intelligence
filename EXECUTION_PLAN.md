@@ -91,7 +91,14 @@
 | P7-E | **Fable 5 Structured Adversarial Debate** — Replace current single-pass synthesis (all agents → one Claude call → JSON) with a two-pass structure: **Pass 1 (Devil's Advocate)**: Fable 5 is instructed to find the strongest bear case FIRST, assuming it will recommend SELL. Forced to mine all bearish signals before seeing the synthesis output. **Pass 2 (Synthesis)**: Given Pass 1 bear case, Fable 5 now weighs bull vs bear objectively. This prevents the current "narrative lock-in" where Claude reaches a BUY conclusion in the first paragraph and then cherry-picks supporting evidence. Requires ~2× Claude calls per symbol. Expected: fewer unjustified BUY promotions, better-calibrated confidence on marginal cases, more honest bear cases in recommendations. | Phase 7 | ⬜ TODO (await Fable 5 access) | — |
 | P7-F | **Partial/Degraded Data Alerting** — Add a `data_quality_summary` to each daily run: (1) per-symbol flag for which data source was used (screener full / screener partial / trendlyne fallback / yfinance only / NO_DATA). (2) Alert via portfolio_alerts when > 30% of symbols in a run used degraded data. (3) Dashboard Governance tab: "Data Source Quality" panel showing per-run data source breakdown. (4) Synthesis prompt: inject explicit data quality preamble — "WARNING: 3 of 7 agents used partial data for this symbol. Treat specific numerical claims with appropriate uncertainty." This ensures Fable 5/Sonnet sees data quality context before reasoning. | Phase 7 | ⬜ TODO | — |
 
-**Progress: 72 / 85 items complete (85%) — BF-18 model ID fix DONE 2026-06-16 — Phase 7 (Fable 5 / Mythos) plan added**
+**Progress: 75 / 88 items complete (85%) — Session 2026-07-22: ATR stoploss ✅, /api/analyse ✅, weekly audit ✅ added (+3 items)**
+
+### Session 2026-07-22 additions
+| ID | Item | Status | Date |
+|---|---|---|---|
+| P8-A | **ATR-14 Volatility Stoploss** — `agents/technical.py` computes `atr_14/atr_stoploss/atr_stoploss_pct`; synthesis prompt enforces 2×ATR floor via `{atr_stoploss}` placeholder; orchestrator injects from technical result. Replaces arbitrary 15% flat stoploss. 6 tests added. | ✅ DONE | 2026-07-22 |
+| P8-B | **ARIA On-Demand Analyse Command** — `POST /api/analyse` endpoint runs full 10-agent pipeline (dry_run=True, 180s timeout) for any symbol on demand. ARIA detects "analyse SYMBOL" intent → confirmation flow → `<run_analyse>` tag → dashboard calls endpoint + shows result inline. 10 tests added. | ✅ DONE | 2026-07-22 |
+| OPS-3 | **Weekly Health Audit** — `scripts/weekly_audit.py` with 9 checks (kappa, daily_runs, alpha_live, trendlyne, discovery, RAG, agent_performance, forward_poller, outcome_seeder). Sunday 07:45 IST worker job (`job_weekly_audit()`). 14 tests added. Exit code 1 on FAIL. | ✅ DONE | 2026-07-22 |
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
