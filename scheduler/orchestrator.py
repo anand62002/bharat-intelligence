@@ -981,12 +981,18 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 # literal { } braces in the JSON example block inside the prompt
                 # template are NOT misinterpreted as Python format placeholders,
                 # which would raise KeyError on keys like '\n  "bull_case"'.
+                # ATR-based stoploss floor from technical agent
+                _tech_res      = agent_results.get("technical") or {}
+                _atr_stoploss  = _tech_res.get("atr_stoploss")
+                _atr_stoploss_str = f"₹{_atr_stoploss:.2f}" if _atr_stoploss else "N/A (no ATR data)"
+
                 prompt = (
                     prompt_template
                     .replace("{symbol}",          str(symbol))
                     .replace("{agent_outputs}",   agent_text)
                     .replace("{composite_score}", f"{composite:.1f}")
                     .replace("{current_price}",   str(current_price))
+                    .replace("{atr_stoploss}",    _atr_stoploss_str)
                 )
 
                 # ── Semantic layer injection ──────────────────────────────────

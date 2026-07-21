@@ -632,6 +632,13 @@ def analyse(symbol: str) -> dict:
     ema200   = _ema(close, 200)
     adx, _di_plus, _di_minus = _adx(high, low, close)
     st_vals, st_dir = _supertrend(high, low, close, period=10, multiplier=3.0)
+
+    # ATR-14 for volatility-adjusted stoploss (2× ATR below current price)
+    _prev_close = close.shift(1)
+    _tr = pd.concat([high - low, (high - _prev_close).abs(), (low - _prev_close).abs()], axis=1).max(axis=1)
+    _atr14_series = _tr.ewm(span=14, min_periods=14).mean()
+    _atr14_clean  = _atr14_series.dropna()
+    atr14_v = float(_atr14_clean.iloc[-1]) if len(_atr14_clean) else None
     obv      = _obv(close, volume)
     vwap     = _vwap(high, low, close, volume)
     vol_prof = _volume_profile(high, low, close, volume)
@@ -807,16 +814,26 @@ def analyse(symbol: str) -> dict:
     except Exception:
         _ohlcv_last_date = None
 
+    # Volatility-adjusted stoploss: 2× ATR-14 below current price.
+    # Synthesis prompt uses this as a hard floor — Claude may widen the stop
+    # (place it lower) but not tighten it above this level.
+    _atr_stoploss     = round(current_price - 2 * atr14_v, 2) if atr14_v else None
+    _atr_stoploss_pct = round(2 * atr14_v / current_price * 100, 1) if atr14_v else None
+
     result = {
-        "signal":          signal,
-        "score":           total_score,
-        "detail":          detail,
-        "upside_pct":      round(upside_pct, 2) if upside_pct is not None else None,
-        "data_sources":    data_sources,
-        "confidence":      confidence,
-        "agent_name":      AGENT_NAME,
+        "signal":           signal,
+        "score":            total_score,
+        "detail":           detail,
+        "upside_pct":       round(upside_pct, 2) if upside_pct is not None else None,
+        "data_sources":     data_sources,
+        "confidence":       confidence,
+        "agent_name":       AGENT_NAME,
+        # Volatility-adjusted stoploss for synthesis constraint
+        "atr_14":           round(atr14_v, 2) if atr14_v else None,
+        "atr_stoploss":     _atr_stoploss,
+        "atr_stoploss_pct": _atr_stoploss_pct,
         # Temporal metadata for leakage audit
-        "ohlcv_last_date": _ohlcv_last_date,
+        "ohlcv_last_date":  _ohlcv_last_date,
     }
 
     # ── 9. Persist agent run ─────────────────────────────────────────────────

@@ -2817,6 +2817,87 @@ async def get_warren_bot(
     }
 
 
+# ── On-demand full analysis (ARIA command) ────────────────────────────────────
+
+@app.post("/api/analyse", tags=["analysis"])
+async def on_demand_analyse(
+    request: Request,
+    _: None = Depends(require_api_key),
+):
+    """
+    Run a full 10-agent analysis + synthesis for any NSE/BSE symbol on demand.
+    Triggered by the ARIA /analyse command on the dashboard.
+
+    Does NOT write to recommendations table (dry_run=True) — result is returned
+    directly to the caller. The full pipeline takes ~45–90 seconds for one symbol.
+
+    Request body: {"symbol": "RELIANCE"}
+    Response: {symbol, yf_symbol, analysis: {action, confidence, synthesis, ...}, agents: {...}}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON body required: {\"symbol\": \"RELIANCE\"}")
+
+    raw = (body.get("symbol") or "").strip().upper()
+    if not raw:
+        raise HTTPException(status_code=400, detail="symbol field required")
+
+    yf_symbol = _resolve_yf_symbol(raw)
+    log.info("On-demand analysis triggered: %s -> %s", raw, yf_symbol)
+
+    try:
+        from scheduler.orchestrator import run_pipeline
+        state = await asyncio.wait_for(
+            run_pipeline(dry_run=True, symbols_override=[yf_symbol]),
+            timeout=180,  # 3-minute timeout
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=f"Analysis timed out after 180s for {raw}")
+    except Exception as exc:
+        log.error("On-demand analysis failed for %s: %s", raw, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
+
+    recs = state.get("recommendations") or []
+    agent_results = (state.get("agent_results") or {}).get(yf_symbol, {})
+
+    if not recs:
+        # No recommendation produced — return agent signals at minimum
+        return {
+            "symbol":    raw,
+            "yf_symbol": yf_symbol,
+            "status":    "NO_RECOMMENDATION",
+            "detail":    "Synthesis was suppressed or no actionable signal produced",
+            "agents":    {k: {"signal": v.get("signal"), "score": v.get("score")} for k, v in agent_results.items()},
+        }
+
+    rec = recs[0]
+    return {
+        "symbol":    raw,
+        "yf_symbol": yf_symbol,
+        "status":    "OK",
+        "analysis":  {
+            "action":       rec.get("action"),
+            "confidence":   rec.get("confidence"),
+            "risk_score":   rec.get("risk_score"),
+            "headline":     rec.get("headline"),
+            "bull_case":    rec.get("bull_case") or [],
+            "bear_case":    rec.get("bear_case") or [],
+            "synthesis":    rec.get("synthesis") or rec.get("summary"),
+            "entry_low":    rec.get("entry_low"),
+            "entry_high":   rec.get("entry_high"),
+            "target":       rec.get("target"),
+            "stoploss":     rec.get("stoploss"),
+            "upside_pct":   rec.get("upside_pct"),
+            "horizon_days": rec.get("horizon_days"),
+        },
+        "agents": {
+            k: {"signal": v.get("signal"), "score": v.get("score")}
+            for k, v in agent_results.items()
+        },
+    }
+
+
 # ── 10. Options market sentiment ──────────────────────────────────────────────
 
 @app.get("/api/options/{symbol}", tags=["analysis"])

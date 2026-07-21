@@ -32,7 +32,7 @@ Conduct a rigorous bull-bear debate covering all material risks and opportunitie
 - risk_score: 0–100 (higher = riskier; consider volatility, debt, promoter pledging, macro headwinds)
 - entry_low, entry_high: suggested buy zone in ₹ (null if SELL/AVOID or current price is fair entry)
 - target: 12-month price target in ₹ (null if SELL/AVOID)
-- stoploss: recommended stoploss in ₹ (for risk management)
+- stoploss: recommended stoploss in ₹. MUST be ≤ {atr_stoploss} (the ATR-14 volatility floor — 2× average daily range below entry). You may widen the stop further if a lower technical support level justifies it, but you must never set the stop tighter than this value or it will be triggered by normal daily noise.
 - horizon_days: recommended holding period in days (90/180/270/365)
 - upside_pct: expected percentage upside from current price to target
 - upside_confidence: 0–100 confidence in the upside_pct estimate

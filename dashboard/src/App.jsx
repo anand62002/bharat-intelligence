@@ -1873,6 +1873,7 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
   const [messages,setMessages]=useState([{role:"assistant",text:"Hello — I'm **ARIA**, your Adaptive Research Intelligence Assistant.\n\nI'm the bridge between you and every module of Bharat Intelligence:\n\n• **Explain** any recommendation or discovery idea\n• **Update your portfolio** — just tell me what you traded\n• **Vote or decide** on Governance research proposals\n• **Deep dive** on any stock, sector, or macro theme\n• **Fact-check** any claim in real time\n\nWhat would you like to explore?"}]);
   const [input,setInput]=useState("");
   const [loading,setLoading]=useState(false);
+  const [analyseConfirmSymbol,setAnalyseConfirmSymbol]=useState(null); // symbol awaiting user yes/no
   const bottomRef=useRef(null);
   const prevCtxRef=useRef(null);
 
@@ -1974,6 +1975,14 @@ IMPORTANT: Output ONLY ONE <portfolio_action> tag per response, at the very end.
 — The jhunjhunwala_cyclical_flag means the business is in a cyclical sector trading near its historical trough valuation — high risk but Jhunjhunwala made his biggest returns here
 — When comparing a high WarrenBot score stock to a low one, always ask the user: what is your time horizon? If 6–12 months, WarrenBot matters less. If 3–5 years, it matters a lot.
 
+ON-DEMAND FULL ANALYSIS:
+When the user types "/analyse SYMBOL" or "run analysis on SYMBOL" or "full analysis of SYMBOL" or "analyse SYMBOL now" or similar intent to trigger a full agent analysis:
+1. First ask for confirmation: "I'll run a full 10-agent analysis on **SYMBOL** — this takes ~60 seconds and queries all agents (technical, fundamental, sentiment, institutional, macro, historical patterns, sector valuation, commodities, warren bot). Confirm? (yes/no)"
+2. Output <confirm_analyse>SYMBOL</confirm_analyse> at the end of your confirmation message
+3. If the user says yes/confirm/proceed, output <run_analyse>SYMBOL</run_analyse> on its own line
+4. The system will run the analysis and show the result automatically
+5. If the user says no/cancel, acknowledge and move on
+
 WARREN BOT ON-DEMAND ANALYSIS:
 When the user asks to "analyse [stock] like Buffett", "what would Jhunjhunwala think of [stock]", "Buffett analysis of [stock]", or similar:
 1. Output <fetch_warren_bot>SYMBOL</fetch_warren_bot> on its own line (use plain NSE code, no .NS suffix, e.g. DIXON not DIXON.NS)
@@ -2048,11 +2057,52 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
         raw=data2.content?.[0]?.text||raw;
       }
 
+      // ── Confirm-analyse tag: ARIA asked for confirmation, store symbol ────
+      const confirmMatch=raw.match(/<confirm_analyse>([^<]+)<\/confirm_analyse>/i);
+      if(confirmMatch) setAnalyseConfirmSymbol(confirmMatch[1].trim().toUpperCase());
+
+      // ── Run-analyse tag: user confirmed, trigger full on-demand analysis ──
+      const runAnalyseMatch=raw.match(/<run_analyse>([^<]+)<\/run_analyse>/i);
+      if(runAnalyseMatch&&API_URL){
+        const analyseSymbol=runAnalyseMatch[1].trim().toUpperCase();
+        setAnalyseConfirmSymbol(null);
+        setMessages(p=>[...p,{role:"assistant",text:`⏳ Running full 10-agent analysis on **${analyseSymbol}**… this takes ~60 seconds.`}]);
+        try{
+          const aRes=await apiFetch("/api/analyse",{method:"POST",body:JSON.stringify({symbol:analyseSymbol})});
+          if(aRes?.status==="OK"&&aRes?.analysis){
+            const a=aRes.analysis;
+            const agentLines=Object.entries(aRes.agents||{}).map(([k,v])=>`• ${k}: **${v.signal||"—"}** (${v.score??'?'}/100)`).join("\n");
+            const analysisText=`## Full Analysis — ${analyseSymbol}
+
+**${a.action}** | Confidence: **${a.confidence}%** | Risk: ${a.risk_score}/100
+Entry: ₹${a.entry_low??'—'}–₹${a.entry_high??'—'} | Target: ₹${a.target??'—'} | Stoploss: ₹${a.stoploss??'—'}
+Upside: **${a.upside_pct??'—'}%** | Horizon: ${a.horizon_days??180} days
+
+**Bull case:**
+${(a.bull_case||[]).map(b=>`• ${b}`).join("\n")||"—"}
+
+**Bear case:**
+${(a.bear_case||[]).map(b=>`• ${b}`).join("\n")||"—"}
+
+**Synthesis:** ${a.synthesis||"—"}
+
+**Agent signals:**
+${agentLines||"—"}`;
+            setMessages(p=>[...p,{role:"assistant",text:analysisText}]);
+          }else{
+            setMessages(p=>[...p,{role:"assistant",text:`Analysis for **${analyseSymbol}** returned no recommendation — ${aRes?.detail||"data may be insufficient or synthesis was suppressed."}`}]);
+          }
+        }catch(e){setMessages(p=>[...p,{role:"assistant",text:`Analysis request failed: ${e.message}`}]);}
+        setLoading(false);return;
+      }
+
       // ── Portfolio action tag ──────────────────────────────────────────────
       const actionMatch=raw.match(/<portfolio_action>([\s\S]*?)<\/portfolio_action>/);
       const displayText=raw
         .replace(/<portfolio_action>[\s\S]*?<\/portfolio_action>/g,"")
         .replace(/<fetch_warren_bot>[^<]+<\/fetch_warren_bot>/gi,"")
+        .replace(/<confirm_analyse>[^<]+<\/confirm_analyse>/gi,"")
+        .replace(/<run_analyse>[^<]+<\/run_analyse>/gi,"")
         .trim();
       if(actionMatch){try{onPortfolioUpdate(JSON.parse(actionMatch[1].trim()));}catch(e){console.error("portfolio_action parse failed:",e,actionMatch[1]);}}
       setMessages(p=>[...p,{role:"assistant",text:displayText,hasAction:!!actionMatch}]);
