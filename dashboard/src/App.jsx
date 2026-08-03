@@ -1968,6 +1968,7 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
   const [input,setInput]=useState("");
   const [loading,setLoading]=useState(false);
   const [analyseConfirmSymbol,setAnalyseConfirmSymbol]=useState(null); // symbol awaiting user yes/no
+  const [analyseResolvedInfo,setAnalyseResolvedInfo]=useState(null); // {raw,yf,price,name} from /api/symbol/resolve
   const bottomRef=useRef(null);
   const prevCtxRef=useRef(null);
 
@@ -2151,22 +2152,55 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
         raw=data2.content?.[0]?.text||raw;
       }
 
-      // ── Confirm-analyse tag: ARIA asked for confirmation, store symbol ────
+      // ── Confirm-analyse tag: resolve symbol in background, store for run step ─
       const confirmMatch=raw.match(/<confirm_analyse>([^<]+)<\/confirm_analyse>/i);
-      if(confirmMatch) setAnalyseConfirmSymbol(confirmMatch[1].trim().toUpperCase());
+      if(confirmMatch){
+        const rawSym=confirmMatch[1].trim().toUpperCase();
+        setAnalyseConfirmSymbol(rawSym);
+        if(API_URL){
+          apiFetch(`/api/symbol/resolve?q=${encodeURIComponent(rawSym)}`)
+            .then(r=>{if(r?.yf_symbol)setAnalyseResolvedInfo({raw:rawSym,yf:r.yf_symbol,price:r.price,name:r.name||""});})
+            .catch(()=>{});
+        }
+      }
 
-      // ── Run-analyse tag: user confirmed, trigger full on-demand analysis ──
+      // ── Run-analyse tag: use pre-resolved symbol, fall back to live resolve ──
       const runAnalyseMatch=raw.match(/<run_analyse>([^<]+)<\/run_analyse>/i);
       if(runAnalyseMatch&&API_URL){
-        const analyseSymbol=runAnalyseMatch[1].trim().toUpperCase();
+        const rawSymbol=runAnalyseMatch[1].trim().toUpperCase();
         setAnalyseConfirmSymbol(null);
-        setMessages(p=>[...p,{role:"assistant",text:`⏳ Running full 10-agent analysis on **${analyseSymbol}**… this takes ~60 seconds.`}]);
+
+        // Resolve symbol — use stored info from confirm step if available
+        let yfSym=rawSymbol;
+        let dispLabel=rawSymbol;
+        const stored=analyseResolvedInfo?.raw===rawSymbol?analyseResolvedInfo:null;
+        if(stored){
+          yfSym=stored.yf;
+          const namePart=stored.name&&stored.name!==rawSymbol?` (${stored.name})`:"";
+          const pricePart=stored.price?` · ₹${Number(stored.price).toLocaleString("en-IN",{maximumFractionDigits:1})}`:"";
+          dispLabel=yfSym!==rawSymbol?`${rawSymbol} → **${yfSym}**${namePart}${pricePart}`:`${rawSymbol}${namePart}${pricePart}`;
+        }else{
+          // Live resolve as fallback
+          try{
+            const r=await apiFetch(`/api/symbol/resolve?q=${encodeURIComponent(rawSymbol)}`);
+            if(r?.yf_symbol){
+              yfSym=r.yf_symbol;
+              const namePart=r.name&&r.name!==rawSymbol?` (${r.name})`:"";
+              const pricePart=r.price?` · ₹${Number(r.price).toLocaleString("en-IN",{maximumFractionDigits:1})}`:"";
+              dispLabel=yfSym!==rawSymbol?`${rawSymbol} → **${yfSym}**${namePart}${pricePart}`:`${rawSymbol}${namePart}${pricePart}`;
+            }
+          }catch(e){/* use raw symbol as-is */}
+        }
+        setAnalyseResolvedInfo(null);
+
+        setMessages(p=>[...p,{role:"assistant",text:`⏳ Running full 10-agent analysis on **${dispLabel}**… this takes ~60 seconds.`}]);
         try{
-          const aRes=await apiFetch("/api/analyse",{method:"POST",body:JSON.stringify({symbol:analyseSymbol})});
+          const aRes=await apiFetch("/api/analyse",{method:"POST",body:JSON.stringify({symbol:yfSym})});
           if(aRes?.status==="OK"&&aRes?.analysis){
             const a=aRes.analysis;
+            const displaySym=aRes.yf_symbol||yfSym;
             const agentLines=Object.entries(aRes.agents||{}).map(([k,v])=>`• ${k}: **${v.signal||"—"}** (${v.score??'?'}/100)`).join("\n");
-            const analysisText=`## Full Analysis — ${analyseSymbol}
+            const analysisText=`## Full Analysis — ${rawSymbol}${displaySym!==rawSymbol?` (${displaySym})`:""}
 
 **${a.action}** | Confidence: **${a.confidence}%** | Risk: ${a.risk_score}/100
 Entry: ₹${a.entry_low??'—'}–₹${a.entry_high??'—'} | Target: ₹${a.target??'—'} | Stoploss: ₹${a.stoploss??'—'}
@@ -2184,14 +2218,10 @@ ${(a.bear_case||[]).map(b=>`• ${b}`).join("\n")||"—"}
 ${agentLines||"—"}`;
             setMessages(p=>[...p,{role:"assistant",text:analysisText}]);
           }else{
-            setMessages(p=>[...p,{role:"assistant",text:`Analysis for **${analyseSymbol}** returned no recommendation — ${aRes?.detail||"data may be insufficient or synthesis was suppressed."}`}]);
+            setMessages(p=>[...p,{role:"assistant",text:`Analysis for **${rawSymbol}** returned no recommendation — ${aRes?.detail||"data may be insufficient or synthesis was suppressed."}`}]);
           }
         }catch(e){
-          const is4xx=e.message.includes("422")||e.message.includes("400")||e.message.includes("404");
-          const hint=is4xx
-            ? `\n\n**Tip:** Try the exact NSE ticker — e.g. \`TATASTEEL\`, \`HDFCBANK\`, \`RELIANCE\`. If the stock is BSE-only, suffix with \`.BO\`. You can also browse the Discovery tab for today's screened ideas.`
-            : "";
-          setMessages(p=>[...p,{role:"assistant",text:`⚠ Analysis failed for **${analyseSymbol}** — ${e.message}.${hint}`}]);
+          setMessages(p=>[...p,{role:"assistant",text:`⚠ Analysis failed for **${rawSymbol}** (resolved: ${yfSym}) — ${e.message}.\n\nIf the ticker looks wrong, try telling ARIA the exact NSE symbol, e.g. *"analyse TATASTEEL"*.`}]);
         }
         setLoading(false);return;
       }
