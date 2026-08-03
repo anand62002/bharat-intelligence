@@ -2311,6 +2311,44 @@ ${agentLines||"—"}`;
 }
 
 // ─── SYSTEM HEALTH PANEL ─────────────────────────────────────────────────────
+function DataSourceQualityPanel({data}){
+  if(!data?.days?.length) return null;
+  const days = [...data.days].reverse(); // oldest first for left-to-right chart
+  const maxTotal = Math.max(...days.map(d=>d.full+d.fallback+d.estimated+d.unknown), 1);
+  return(
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:12}}>
+      <div style={{fontSize:11,fontWeight:700,color:"white",marginBottom:10}}>Data Source Quality — Last {data.days.length} Runs</div>
+      <div style={{display:"flex",gap:3,alignItems:"flex-end",height:60,marginBottom:6}}>
+        {days.map((d,i)=>{
+          const total=d.full+d.fallback+d.estimated+d.unknown||1;
+          const pctDeg=d.pctDegraded||0;
+          const barColor=pctDeg>50?C.red:pctDeg>30?C.accent:C.green;
+          return(
+            <div key={i} title={`${d.date}: Full=${d.full} Fallback=${d.fallback} Est=${d.estimated} Unknown=${d.unknown} (${pctDeg}% degraded)`}
+              style={{flex:1,display:"flex",flexDirection:"column",gap:1,alignItems:"stretch",height:"100%",justifyContent:"flex-end"}}>
+              <div style={{background:C.green,height:`${d.full/maxTotal*100}%`,borderRadius:"2px 2px 0 0",opacity:.85}}/>
+              <div style={{background:C.accent,height:`${d.fallback/maxTotal*100}%`}}/>
+              <div style={{background:C.red,height:`${(d.estimated+d.unknown)/maxTotal*100}%`}}/>
+              {pctDeg>30&&<div style={{width:"100%",height:2,background:barColor,borderRadius:1}}/>}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{display:"flex",gap:10,fontSize:8,color:C.muted,marginBottom:6}}>
+        <span style={{color:C.green}}>■ Full</span>
+        <span style={{color:C.accent}}>■ Fallback</span>
+        <span style={{color:C.red}}>■ Est/Unknown</span>
+        <span style={{marginLeft:"auto"}}>Red bar = &gt;30% degraded</span>
+      </div>
+      {data.days[0]?.pctDegraded>30&&(
+        <div style={{background:C.red+"15",border:`1px solid ${C.red}44`,borderRadius:5,padding:"5px 8px",fontSize:9,color:C.red}}>
+          ⚠ Latest run: {data.days[0].pctDegraded}% of symbols used fallback/estimated data — check screener.in cookies or proxy health
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SystemHealthPanel({health}){
   if(!health) return null;
   const {checks=[], errors=0, warnings=0, checked_at} = health;
@@ -3373,6 +3411,7 @@ export default function App(){
   const [optionsSignal,     setOptionsSignal]     = useState(null);
   const [valuationCache,    setValuationCache]    = useState({});   // keyed by symbol
   const [systemHealth,      setSystemHealth]      = useState(null); // /api/system/health
+  const [dataQualityHistory,setDataQualityHistory]= useState(null); // /api/governance/data-quality
   const [marketNews,        setMarketNews]        = useState([]);   // DB-7: India market news
   const [newsSymbol,        setNewsSymbol]        = useState("NIFTY"); // DB-7: which symbol's news to show
   // P5-B: Paper portfolio simulation
@@ -3475,6 +3514,9 @@ export default function App(){
         .catch(()=>{}),
       apiFetch("/api/market/digest")  // P6-C: Morning Brief + Closing Digest
         .then(d=>{ if(d) setMarketDigest(d); })
+        .catch(()=>{}),
+      apiFetch("/api/governance/data-quality?days=14")  // P7-F: data quality history
+        .then(d=>{ if(d?.days) setDataQualityHistory(d); })
         .catch(()=>{}),
     ]).then(()=>setApiLoaded(true));
 
@@ -3978,6 +4020,7 @@ export default function App(){
                 </div>
 
                 {/* Data source health — shown first so issues requiring manual action are obvious */}
+                <DataSourceQualityPanel data={dataQualityHistory}/>
                 <SystemHealthPanel health={systemHealth}/>
 
                 {govAlerts.length>0 ? (

@@ -2253,6 +2253,45 @@ async def get_research_proposals(
     return {"proposals": proposals, "count": len(proposals)}
 
 
+@app.get("/api/governance/data-quality", tags=["governance"])
+async def get_data_quality_history(
+    days: int  = Query(14, ge=1, le=60),
+    _:    None = Depends(require_api_key),
+):
+    """
+    Returns per-day data quality breakdown from daily_runs.agents_run JSONB.
+    Used by the DataSourceQualityPanel in the Governance tab.
+    Rows without data_quality info are omitted.
+    """
+    db = _db()
+    try:
+        rows = (db.table("daily_runs")
+                  .select("run_date, agents_run")
+                  .order("run_date", desc=True)
+                  .limit(days)
+                  .execute()
+                  .data or [])
+    except Exception:
+        rows = []
+
+    result = []
+    for row in rows:
+        agents_run = row.get("agents_run") or {}
+        dq = agents_run.get("data_quality") if isinstance(agents_run, dict) else None
+        if not dq:
+            continue
+        result.append({
+            "date":         str(row.get("run_date", "")),
+            "full":         dq.get("full", 0),
+            "fallback":     dq.get("fallback", 0),
+            "estimated":    dq.get("estimated", 0),
+            "unknown":      dq.get("unknown", 0),
+            "pctDegraded":  dq.get("pct_degraded", 0),
+        })
+
+    return {"days": result, "count": len(result)}
+
+
 # ── 8. Market pulse ────────────────────────────────────────────────────────────
 
 @app.get("/api/market/pulse", tags=["market"])

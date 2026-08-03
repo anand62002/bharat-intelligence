@@ -16,6 +16,18 @@ You have received outputs from 7 specialised AI analysis agents for the stock **
 
 ---
 
+## DATA QUALITY CONTEXT
+
+**Fundamental data years available:** {data_years}
+**Data source quality:** {data_quality_label}
+**ATR-14 technical entry floor:** {atr_entry_zone} (current price − 1× daily ATR; price must stay above this for a valid entry)
+
+> If `data_years` < 5: treat all multi-year CAGR and DCF figures as **statistically unreliable**. Do NOT cite specific revenue or EPS CAGR values as primary evidence. Acknowledge data limitations explicitly in `synthesis`.
+> If `data_quality_label` is FALLBACK or ESTIMATED: apply heightened scepticism to specific ratio values (PE, ROCE, debt/equity). Note the data limitation.
+> Entry zone reconciliation: `entry_low` must be ≥ {atr_entry_zone}. If fundamental fair value implies a lower entry, note the divergence in `synthesis` — this means technical support and fundamental value are misaligned.
+
+---
+
 ## YOUR TASK
 
 Conduct a rigorous bull-bear debate covering all material risks and opportunities. Then produce a final investment recommendation.

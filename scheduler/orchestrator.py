@@ -89,10 +89,11 @@ class OrchestratorState(TypedDict):
     current_regime:    Optional[dict]          # today's regime from market_regime table
     symbol_results:    dict[str, dict]         # symbol → {agent_name → result dict}
     recommendations:   list[dict]              # final recommendation dicts
-    saved_ids:         list[str]               # Supabase rec IDs saved this run
-    errors:            list[str]               # non-fatal error messages
-    start_time:        float                   # unix timestamp of pipeline start
-    symbols_processed: int
+    saved_ids:            list[str]              # Supabase rec IDs saved this run
+    errors:               list[str]             # non-fatal error messages
+    start_time:           float                 # unix timestamp of pipeline start
+    symbols_processed:    int
+    data_quality_summary: dict                  # P7-F: {FULL,FALLBACK,ESTIMATED,UNKNOWN} counts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -981,18 +982,44 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 # literal { } braces in the JSON example block inside the prompt
                 # template are NOT misinterpreted as Python format placeholders,
                 # which would raise KeyError on keys like '\n  "bull_case"'.
-                # ATR-based stoploss floor from technical agent
-                _tech_res      = agent_results.get("technical") or {}
-                _atr_stoploss  = _tech_res.get("atr_stoploss")
+                # ATR-based stoploss floor + entry zone from technical agent
+                _tech_res         = agent_results.get("technical") or {}
+                _atr_stoploss     = _tech_res.get("atr_stoploss")
+                _atr_14           = _tech_res.get("atr_14")
                 _atr_stoploss_str = f"₹{_atr_stoploss:.2f}" if _atr_stoploss else "N/A (no ATR data)"
+                # ATR entry zone = price − 1×ATR (1σ intraday support floor for entry_low)
+                try:
+                    _price_num = float(current_price) if current_price != "N/A" else None
+                except (TypeError, ValueError):
+                    _price_num = None
+                _atr_entry_zone = (
+                    f"₹{(_price_num - _atr_14):.2f}" if (_price_num and _atr_14) else "N/A"
+                )
+
+                # P7-C: data years + quality for prompt injection
+                _fund_detail_pre = (agent_results.get("fundamental", {}).get("detail") or {})
+                _years_pre = (
+                    _fund_detail_pre.get("years_available")
+                    or (agent_results.get("warren_bot", {}) or {}).get("years_available")
+                )
+                _dq_pre = (
+                    _fund_detail_pre.get("data_quality")
+                    or (agent_results.get("fundamental", {}) or {}).get("data_quality")
+                    or "FULL"
+                )
+                _data_years_str   = str(_years_pre) if _years_pre is not None else "unknown"
+                _data_quality_str = _dq_pre
 
                 prompt = (
                     prompt_template
-                    .replace("{symbol}",          str(symbol))
-                    .replace("{agent_outputs}",   agent_text)
-                    .replace("{composite_score}", f"{composite:.1f}")
-                    .replace("{current_price}",   str(current_price))
-                    .replace("{atr_stoploss}",    _atr_stoploss_str)
+                    .replace("{symbol}",            str(symbol))
+                    .replace("{agent_outputs}",     agent_text)
+                    .replace("{composite_score}",   f"{composite:.1f}")
+                    .replace("{current_price}",     str(current_price))
+                    .replace("{atr_stoploss}",      _atr_stoploss_str)
+                    .replace("{atr_entry_zone}",    _atr_entry_zone)   # P7-D
+                    .replace("{data_years}",        _data_years_str)   # P7-C
+                    .replace("{data_quality_label}",_data_quality_str) # P7-C
                 )
 
                 # ── Semantic layer injection ──────────────────────────────────
@@ -1339,7 +1366,27 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             log.error("[%s] synthesis failed: %s", symbol, exc)
             errors.append(f"{symbol} synthesis: {exc}")
 
-    return {"recommendations": recommendations, "errors": errors}
+    # P7-F: aggregate data quality across all synthesised symbols
+    _dq_counts: dict[str, int] = {"FULL": 0, "FALLBACK": 0, "ESTIMATED": 0, "UNKNOWN": 0}
+    for rec in recommendations:
+        ag = rec.get("agent_signals") or {}
+        fd = (ag.get("fundamental") or {}).get("detail") or {}
+        dq = (
+            fd.get("data_quality")
+            or (ag.get("fundamental") or {}).get("data_quality")
+            or "UNKNOWN"
+        )
+        _dq_counts[dq if dq in _dq_counts else "UNKNOWN"] += 1
+    # Also count symbols that errored/suppressed as UNKNOWN (not in recommendations)
+    _total_attempted = len(symbol_results)
+    _total_recs      = len(recommendations)
+    _dq_counts["UNKNOWN"] += max(0, _total_attempted - _total_recs)
+
+    return {
+        "recommendations": recommendations,
+        "errors":          errors,
+        "data_quality_summary": _dq_counts,  # P7-F: forwarded to log_run_node
+    }
 
 
 async def fact_check_node(state: OrchestratorState) -> dict:
@@ -1493,6 +1540,31 @@ async def save_recs_node(state: OrchestratorState) -> dict:
                 row.setdefault("metadata", {})
                 if isinstance(row["metadata"], dict):
                     row["metadata"]["market_constraints"] = mc
+
+            # P7-C: store data_years_available + data_quality in metadata
+            # P7-D: store ATR fields in metadata for dashboard + audit trail
+            row.setdefault("metadata", {})
+            if isinstance(row["metadata"], dict):
+                ag_sigs = rec.get("agent_signals") or {}
+                tech_sig = ag_sigs.get("technical") or {}
+                fund_sig = ag_sigs.get("fundamental") or {}
+                fund_detail = fund_sig.get("detail") or {}
+                _yrs = (
+                    fund_detail.get("years_available")
+                    or (ag_sigs.get("warren_bot") or {}).get("years_available")
+                )
+                _dq  = (
+                    fund_detail.get("data_quality")
+                    or fund_sig.get("data_quality")
+                    or "FULL"
+                )
+                if _yrs is not None:
+                    row["metadata"]["data_years_available"] = int(_yrs)
+                row["metadata"]["data_quality"]  = _dq
+                if tech_sig.get("atr_14") is not None:
+                    row["metadata"]["atr_14"]           = tech_sig["atr_14"]
+                    row["metadata"]["atr_stoploss"]     = tech_sig.get("atr_stoploss")
+                    row["metadata"]["atr_stoploss_pct"] = tech_sig.get("atr_stoploss_pct")
             # Nest warren_bot output inside agent_signals JSONB before saving.
             # warren_bot is not a top-level DB column — it lives under agent_signals["warren_bot"].
             if "agent_signals" in row and isinstance(row["agent_signals"], dict):
@@ -1635,14 +1707,56 @@ async def log_run_node(state: OrchestratorState) -> dict:
     else:
         run_status = "WARNING"
 
+    # P7-F: data quality summary from synthesise_node
+    dq_summary = state.get("data_quality_summary") or {}
+    n_full      = dq_summary.get("FULL", 0)
+    n_fallback  = dq_summary.get("FALLBACK", 0)
+    n_estimated = dq_summary.get("ESTIMATED", 0)
+    n_unknown   = dq_summary.get("UNKNOWN", 0)
+    n_degraded  = n_fallback + n_estimated + n_unknown
+    pct_degraded = round(n_degraded / max(n_syms, 1) * 100, 1)
+
+    if pct_degraded > 30:
+        log.warning(
+            "P7-F DATA QUALITY ALERT: %.1f%% of symbols used degraded data "
+            "(FALLBACK=%d ESTIMATED=%d UNKNOWN=%d out of %d symbols). "
+            "Likely cause: screener.in blocked and/or Trendlyne session expired.",
+            pct_degraded, n_fallback, n_estimated, n_unknown, n_syms,
+        )
+        try:
+            client.table("portfolio_alerts").insert({
+                "severity":   "WARNING",
+                "alert_type": "DATA_QUALITY_DEGRADED",
+                "title":      f"Data quality degraded: {pct_degraded:.0f}% of symbols used fallback/estimated data",
+                "detail":     (
+                    f"Today's pipeline run: {n_degraded}/{n_syms} symbols used degraded data sources "
+                    f"(FALLBACK={n_fallback}, ESTIMATED={n_estimated}, UNKNOWN={n_unknown}). "
+                    f"Fundamental signal reliability is reduced. "
+                    f"Action: refresh TRENDLYNE_SESSION/CSRF cookies on Railway."
+                ),
+                "resolved":   False,
+                "portfolio_id": None,
+            }).execute()
+        except Exception as _aq_exc:
+            log.warning("Could not write data quality alert: %s", _aq_exc)
+
     try:
         client.table("daily_runs").insert({
             "symbols_processed": n_syms,
             "errors":            n_err,
             "duration_seconds":  duration,
             "status":            run_status,
+            "agents_run":        {
+                "data_quality": {
+                    "full":        n_full,
+                    "fallback":    n_fallback,
+                    "estimated":   n_estimated,
+                    "unknown":     n_unknown,
+                    "pct_degraded": pct_degraded,
+                },
+            },
         }).execute()
-        log.info("daily_runs row logged (status=%s)", run_status)
+        log.info("daily_runs row logged (status=%s, pct_degraded=%.1f%%)", run_status, pct_degraded)
     except Exception as exc:
         log.warning("daily_runs log failed: %s", exc)
 
@@ -1846,6 +1960,7 @@ async def run_pipeline(
         "errors":            [],
         "start_time":        time.time(),
         "symbols_processed": 0,
+        "data_quality_summary": {},
     }
 
     return await graph.ainvoke(initial_state)

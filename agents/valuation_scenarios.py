@@ -328,6 +328,7 @@ def _extract_base_params(symbol: str) -> dict:
         "base_terminal":     0.07,
         "shares_cr":         None,
         "current_price":     None,
+        "years_available":   0,
     }
 
     try:
@@ -361,6 +362,7 @@ def _extract_base_params(symbol: str) -> dict:
 
         # Base growth from revenue/EPS CAGR (inline to avoid warren_bot dependency)
         rev_hist = [float(v) for v in (hist.get("revenue") or []) if v is not None]
+        base["years_available"] = len(rev_hist)
         eps_hist = [float(v) for v in (hist.get("eps") or []) if v is not None]
         eps_cagr_raw = float(raw.get("eps_cagr_5y") or 0)
         eps_cagr = eps_cagr_raw / 100
@@ -481,6 +483,14 @@ def run_scenarios(symbol: str) -> dict:
         bt    = params["base_terminal"]
         sh    = params["shares_cr"]
         price = params["current_price"]
+        years_available = params.get("years_available", 0)
+
+        # P7-C: data density firewall — block DCF when history is too short for
+        # multi-year CAGR and DCF to be statistically meaningful.
+        if years_available < 5:
+            log.info("valuation_scenarios(%s): only %d years of revenue history — INSUFFICIENT_DATA", sym, years_available)
+            return {**empty, "data_quality": "INSUFFICIENT_DATA", "years_available": years_available,
+                    "recommendation": "INSUFFICIENT_DATA"}
 
         # Data quality assessment
         data_ok = (oe is not None and oe > 0 and sh is not None and sh > 0 and price is not None)
