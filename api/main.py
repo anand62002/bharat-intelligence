@@ -1071,6 +1071,21 @@ async def get_discovery(
                     meta = dict(row.get("metadata") or {})
                     meta["price"] = round(price, 2)
                     row = {**row, "metadata": meta}
+
+                    # Back-fill entry/target/stoploss for older rows that were
+                    # saved before the Aug-03 fix computed these at write time.
+                    upside = row.get("upside_pct") or 20.0
+                    if not row.get("entry_low"):
+                        row = {**row,
+                               "entry_low":  round(price * 0.98, 2),
+                               "entry_high": round(price * 1.01, 2)}
+                    if not row.get("target"):
+                        row = {**row, "target": round(price * (1 + upside / 100), 2)}
+                    if not row.get("stoploss"):
+                        atr_sl = (row.get("metadata") or {}).get("atr_stoploss")
+                        sl = round(float(atr_sl), 2) if atr_sl else round(price * 0.85, 2)
+                        row = {**row, "stoploss": sl}
+
                 updated.append(row)
             return updated
 
