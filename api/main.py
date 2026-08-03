@@ -684,6 +684,11 @@ def _transform_recommendation(row: dict) -> dict:
         # P3-A: Position sizing (top-level DB columns, None for legacy recs)
         "suggestedPositionPct": row.get("suggested_position_pct"),
         "positionLabel":        row.get("position_label") or "",
+        # Discovery tier (CRITICAL / STANDARD) — stored in headline prefix
+        "opportunityTier": (
+            "CRITICAL" if "CRITICAL" in (row.get("headline") or "")
+            else "STANDARD" if row.get("is_discovery") else None
+        ),
     }
 
 

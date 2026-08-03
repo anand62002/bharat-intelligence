@@ -1219,6 +1219,17 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
         cooldown = (date.today() - timedelta(days=_DISCOVERY_COOLDOWN_DAYS)).isoformat()
         catalysts, risks = _derive_catalysts_and_risks(result)
 
+        # ── Compute entry / target / stoploss from price + upside ─────────────
+        cp = result.current_price or 0.0
+        _entry_low  = round(cp * 0.98, 2) if cp else None
+        _entry_high = round(cp * 1.01, 2) if cp else None
+        _target     = round(cp * (1 + result.upside_pct / 100), 2) if cp and result.upside_pct else None
+        _tech       = (result.agent_signals.get("technical") or {})
+        _atr_sl     = _tech.get("atr_stoploss")
+        _stoploss   = (round(float(_atr_sl), 2)
+                       if _atr_sl and isinstance(_atr_sl, (int, float)) and _atr_sl > 0
+                       else (round(cp * 0.85, 2) if cp else None))
+
         # ── Check 10-day cooldown window ──────────────────────────────────────
         existing = (
             client.table("recommendations")
@@ -1262,7 +1273,11 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                     f"{'⚡ CRITICAL' if tier == 'CRITICAL' else '✅ STANDARD'} DISCOVERY"
                     f" ×{discovery_count}: {result.symbol} — {result.upside_pct:.0f}% upside"
                 ),
-                "summary": result.upside_basis,
+                "summary":     result.upside_basis,
+                "entry_low":   _entry_low,
+                "entry_high":  _entry_high,
+                "target":      _target,
+                "stoploss":    _stoploss,
             }).eq("id", rec_id).execute()
             log.info(
                 "_save_discovery(%s): UPDATED existing rec %s (count=%d) tier=%s upside=%.1f%%",
@@ -1278,10 +1293,10 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             "upside_pct":             result.upside_pct,
             "upside_confidence":      result.upside_confidence,
             "risk_score":             None,
-            "entry_low":              None,
-            "entry_high":             None,
-            "target":                 None,
-            "stoploss":               None,
+            "entry_low":              _entry_low,
+            "entry_high":             _entry_high,
+            "target":                 _target,
+            "stoploss":               _stoploss,
             "horizon_days":           _horizon_to_days(result.upside_horizon),
             "headline": (
                 f"{'⚡ CRITICAL' if tier == 'CRITICAL' else '✅ STANDARD'} DISCOVERY: "

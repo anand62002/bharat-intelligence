@@ -769,6 +769,31 @@ function RiskGauge({score}){
   );
 }
 
+// Confidence gauge — high conf = green (opposite polarity to risk gauge)
+function ConfidenceGauge({pct}){
+  const v=Math.round(pct||0);
+  const color=v>=75?C.green:v>=60?C.accent:C.muted;
+  const rad=((v/100)*180-90)*Math.PI/180;
+  return(
+    <div style={{textAlign:"center",flexShrink:0}}>
+      <svg width="66" height="40" viewBox="0 0 66 40">
+        <defs><linearGradient id={`cg${v}`} x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor={C.muted}/><stop offset="50%" stopColor={C.accent}/><stop offset="100%" stopColor={C.green}/>
+        </linearGradient></defs>
+        <path d="M4 34 A29 29 0 0 1 62 34" fill="none" stroke={`url(#cg${v})`} strokeWidth="6" strokeLinecap="round"/>
+        <line x1="33" y1="34" x2={33+19*Math.cos(rad)} y2={34+19*Math.sin(rad)} stroke="white" strokeWidth="1.5" strokeLinecap="round"/>
+        <circle cx="33" cy="34" r="3" fill="white"/>
+      </svg>
+      <div style={{fontSize:13,fontWeight:800,color,marginTop:-3,fontFamily:"JetBrains Mono"}}>{v}%</div>
+      <div style={{fontSize:8,color:C.muted}}>conf</div>
+    </div>
+  );
+}
+
+// Shared signal-category sets (used in cards + deep dive)
+const BULL_SIGNALS=new Set(["BULLISH","BUY","POSITIVE","STRONG_BUY","BULLISH_ANALOGUE"]);
+const BEAR_SIGNALS=new Set(["BEARISH","SELL","NEGATIVE","AVOID","BEARISH_ANALOGUE","STRONG_SELL"]);
+
 // ─── DISCOVERY CARD ───────────────────────────────────────────────────────────
 function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
   const ac = stock.action==="BUY"?C.green:stock.action==="SELL"?C.red:C.accent;
@@ -836,7 +861,7 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
             {stock.discoveryCount>1&&<span style={{color:"#fbbf24",marginLeft:4}}>· last confirmed {stock.lastConfirmedAt}</span>}
           </div>
         </div>
-        <RiskGauge score={stock.riskScore}/>
+        <ConfidenceGauge pct={stock.confidence}/>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:5,marginBottom:8}}>
         {[["Price",`₹${stock.price.toLocaleString()}`,"white"],["Entry",stock.entry,C.accent],["Target",stock.target,C.green],["Stop",stock.stoploss,C.red]].map(([l,v,col])=>(
@@ -878,10 +903,10 @@ function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
       {/* Agent signal votes row */}
       {stock.agents&&Object.keys(stock.agents).length>0&&(()=>{
         const agentEntries=Object.entries(stock.agents).filter(([,v])=>v&&v.signal);
-        const bullish=agentEntries.filter(([,v])=>["BULLISH","BUY","POSITIVE"].includes(v.signal)).length;
-        const bearish=agentEntries.filter(([,v])=>["BEARISH","SELL","NEGATIVE","AVOID"].includes(v.signal)).length;
+        const bullish=agentEntries.filter(([,v])=>BULL_SIGNALS.has(v.signal)).length;
+        const bearish=agentEntries.filter(([,v])=>BEAR_SIGNALS.has(v.signal)).length;
         const neutral=agentEntries.length-bullish-bearish;
-        const sigColor=(sig)=>["BULLISH","BUY","POSITIVE"].includes(sig)?C.green:["BEARISH","SELL","NEGATIVE","AVOID"].includes(sig)?C.red:C.muted;
+        const sigColor=(sig)=>BULL_SIGNALS.has(sig)?C.green:BEAR_SIGNALS.has(sig)?C.red:C.muted;
         return(
           <div style={{marginBottom:7}}>
             <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
@@ -947,7 +972,7 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRu
   });
   const filtered = filter==="All"?sorted:sorted.filter(s=>s.sector===filter);
   const icons={technical:"📊",fundamental:"🏭",sentiment:"📰",institutional:"🏛",macro:"🌍",historical:"📜"};
-  const sc=s=>({BUY:C.green,SELL:C.red,NEUTRAL:C.muted,POSITIVE:C.green,"VERY POSITIVE":C.green,HOLD:C.accent}[s]||C.muted);
+  const sc=s=>BULL_SIGNALS.has(s)?C.green:BEAR_SIGNALS.has(s)?C.red:(s==="HOLD"||s==="NEUTRAL"?C.accent:C.muted);
 
   return(
     <div style={{animation:"fadeUp .3s ease"}}>
@@ -1065,8 +1090,8 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRu
               </div>
             </div>
 
-            {/* 6-agent breakdown */}
-            <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:7,textTransform:"uppercase",letterSpacing:1}}>6-Agent Analysis</div>
+            {/* Agent breakdown */}
+            <div style={{fontSize:10,fontWeight:700,color:C.accent,marginBottom:7,textTransform:"uppercase",letterSpacing:1}}>{Object.keys(selected.agents).length}-Agent Analysis</div>
             <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
               {Object.entries(selected.agents).map(([k,a])=>(
                 <div key={k} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:9}}>
@@ -1129,8 +1154,77 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRu
         )}
       </div>}{/* closes _universe.length>0 wrapper */}
 
+      {/* ── Consolidated All-Time Discovery Recs Table ─────────────────────── */}
+      {_universe.length>0&&<DiscoveryRecsTable universe={_universe}/>}
+
       {/* ── Daily Screened Stocks panel ─────────────────────────────────────── */}
       <DiscoveryRunsPanel runs={_runs} apiLoaded={apiLoaded}/>
+    </div>
+  );
+}
+
+/* Consolidated table of all current discovery recommendations, sorted by date desc.
+   Shows entry / target / stoploss so users can see the actionable levels at a glance. */
+function DiscoveryRecsTable({universe}){
+  const PAGE=30;
+  const [page,setPage]=React.useState(0);
+  const [collapsed,setCollapsed]=React.useState(false);
+  const sorted=[...universe].sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  const total=sorted.length;
+  const pages=Math.ceil(total/PAGE);
+  const rows=sorted.slice(page*PAGE,(page+1)*PAGE);
+  const today=new Date().toISOString().slice(0,10);
+  const ac=s=>BULL_SIGNALS.has(s)?C.green:BEAR_SIGNALS.has(s)?C.red:C.accent;
+  return(
+    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,marginTop:14,marginBottom:14}}>
+      <div onClick={()=>setCollapsed(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",cursor:"pointer"}}>
+        <span style={{fontSize:11,fontWeight:700,color:C.cyan}}>📋 All Discovery Recs</span>
+        <span style={{fontSize:9,color:C.muted,marginLeft:2}}>{total} unique ideas · sorted by date</span>
+        <span style={{marginLeft:"auto",fontSize:11,color:C.muted}}>{collapsed?"▶":"▼"}</span>
+      </div>
+      {!collapsed&&(
+        <div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:9}}>
+            <thead>
+              <tr style={{borderBottom:`1px solid ${C.border}`}}>
+                {["Symbol","Action","Tier","Conf%","Upside%","Entry","Target","Stop","Sector","Date","Valid Till"].map(h=>(
+                  <th key={h} style={{padding:"5px 8px",textAlign:"left",color:C.muted,fontWeight:600,whiteSpace:"nowrap"}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(s=>{
+                const isStale=s.validTill&&s.validTill<today;
+                const isCrit=isCriticalDiscovery(s);
+                return(
+                  <tr key={s.id} style={{borderBottom:`1px solid ${C.border}22`,opacity:isStale?0.55:1,background:isCrit?C.green+"08":"transparent"}}>
+                    <td style={{padding:"5px 8px",fontFamily:"JetBrains Mono",color:"white",fontWeight:700,whiteSpace:"nowrap"}}>
+                      {isCrit&&<span style={{color:C.green,marginRight:3}}>🚀</span>}{s.symbol}
+                    </td>
+                    <td style={{padding:"5px 8px"}}><span style={{color:ac(s.action),fontWeight:700}}>{s.action}</span></td>
+                    <td style={{padding:"5px 8px"}}><span style={{color:isCrit?C.green:C.cyan,fontSize:8}}>{s.opportunityTier||"STANDARD"}</span></td>
+                    <td style={{padding:"5px 8px",fontFamily:"JetBrains Mono",color:s.confidence>=75?C.green:s.confidence>=60?C.accent:C.muted}}>{s.confidence?.toFixed(0)}%</td>
+                    <td style={{padding:"5px 8px",fontFamily:"JetBrains Mono",color:C.green,fontWeight:700}}>+{s.upsidePct?.toFixed(0)}%</td>
+                    <td style={{padding:"5px 8px",fontFamily:"JetBrains Mono",color:C.accent}}>{s.entry||"—"}</td>
+                    <td style={{padding:"5px 8px",fontFamily:"JetBrains Mono",color:C.green}}>{s.target||"—"}</td>
+                    <td style={{padding:"5px 8px",fontFamily:"JetBrains Mono",color:C.red}}>{s.stoploss||"—"}</td>
+                    <td style={{padding:"5px 8px",color:C.textDim,maxWidth:100,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.sector||"—"}</td>
+                    <td style={{padding:"5px 8px",color:C.muted,whiteSpace:"nowrap"}}>{(s.createdAt||"").slice(0,10)}</td>
+                    <td style={{padding:"5px 8px",color:isStale?C.red:C.muted,whiteSpace:"nowrap"}}>{s.validTill||"—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {pages>1&&(
+            <div style={{display:"flex",alignItems:"center",gap:6,padding:"8px 14px",borderTop:`1px solid ${C.border}`}}>
+              <button disabled={page===0} onClick={()=>setPage(p=>p-1)} style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:4,padding:"3px 9px",color:C.muted,cursor:page===0?"not-allowed":"pointer",fontSize:10}}>← Prev</button>
+              <span style={{fontSize:9,color:C.muted}}>Page {page+1} / {pages}</span>
+              <button disabled={page>=pages-1} onClick={()=>setPage(p=>p+1)} style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:4,padding:"3px 9px",color:C.muted,cursor:page>=pages-1?"not-allowed":"pointer",fontSize:10}}>Next →</button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2092,7 +2186,13 @@ ${agentLines||"—"}`;
           }else{
             setMessages(p=>[...p,{role:"assistant",text:`Analysis for **${analyseSymbol}** returned no recommendation — ${aRes?.detail||"data may be insufficient or synthesis was suppressed."}`}]);
           }
-        }catch(e){setMessages(p=>[...p,{role:"assistant",text:`Analysis request failed: ${e.message}`}]);}
+        }catch(e){
+          const is4xx=e.message.includes("422")||e.message.includes("400")||e.message.includes("404");
+          const hint=is4xx
+            ? `\n\n**Tip:** Try the exact NSE ticker — e.g. \`TATASTEEL\`, \`HDFCBANK\`, \`RELIANCE\`. If the stock is BSE-only, suffix with \`.BO\`. You can also browse the Discovery tab for today's screened ideas.`
+            : "";
+          setMessages(p=>[...p,{role:"assistant",text:`⚠ Analysis failed for **${analyseSymbol}** — ${e.message}.${hint}`}]);
+        }
         setLoading(false);return;
       }
 
