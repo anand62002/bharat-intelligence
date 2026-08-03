@@ -942,15 +942,21 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P6-A** | System performance dashboard tab — calibration chart + top/worst calls + calibration API | Code | None | M | ✅ Done |
 | **P6-B** | Backtest results dashboard panel — TRAIN/TEST/FULL splits, monthly runs table | Code | None | S | ✅ Done |
 | **P6-C** | Market tab daily news digest (Morning Brief + Closing Digest, single Haiku call) | Code | None (existing Anthropic key) | L | ✅ Done |
-| **P7-A** | Live trading agent — signal + Telegram alert engine | Code | None (Telegram free) | L | ⬜ TODO |
-| **P7-B** | Paper-to-live promotion gate — 60d paper validation before live signals | Code | None | M | ⬜ TODO |
-| **P7-C** | T+1 India settlement awareness + order timing logic | Code | None | S | ⬜ TODO |
-| **P7-D** | Kite Connect / Zerodha demat API integration (optional, Phase 7 final step) | Code + Service | ₹0 Kite (free with demat) | XL | ⬜ TODO |
-| **P8-A** | Architecture audit — map all agents + tools to MCP servers | Design | None | M | ⬜ TODO |
-| **P8-B** | Supervisor agent (Claude Agent SDK) — replaces LangGraph orchestrator | Code | None | XL | ⬜ TODO |
-| **P8-C** | MCP server suite — Supabase, Kite, Telegram, Firecrawl, yfinance | Code | None | XL | ⬜ TODO |
-| **P8-D** | Specialist sub-agents — 10 analysis agents rewritten as Agent SDK tools | Code | None | XL | ⬜ TODO |
-| **P8-E** | Migration + parallel-run validation — v1 vs v2 signal comparison | Code | None | L | ⬜ TODO |
+| **P7-A** | Fable 5 synthesis — replace claude-sonnet-4-6 with claude-fable-5 + adaptive thinking; better contradiction detection, calibrated confidence, causal reasoning | Code | None (existing key) | M | ⬜ TODO |
+| **P7-B** | Fable 5 lead validation judge — replace claude-opus-4-8 judge; kappa threshold recalibration post-Fable-5 distribution shift | Code | None | S | ⬜ TODO |
+| **P7-C** | Data density firewall — data_years_available field; block DCF/CAGR on <5yr data; emit INSUFFICIENT_DATA; inject data_years into synthesis prompt | Code | None | M | ⬜ TODO |
+| **P7-D** | Signal independence — promote ATR entry zones to top-level rec fields; synthesis must reconcile technical support with fundamental fair value | Code | None | S | ⬜ TODO |
+| **P7-E** | Adversarial 2-pass debate — Pass 1 devil's advocate (forced bear case), Pass 2 synthesis; prevents narrative lock-in. Requires Fable 5 | Code | None | L | ⬜ TODO |
+| **P7-F** | Partial/degraded data alerting — per-symbol data source flag; alert when >30% of run used degraded data; Governance tab "Data Source Quality" panel | Code | None | S | ⬜ TODO |
+| **P7-G** | Trendlyne MCP connector — replace HTML scraping with MCP API for fundamentals, DVM, shareholding, insider trades, quarterly results; frugal caching (Supabase 24h TTL) to stay within 2,000–5,000 calls/month limit. Requires TRENDLYNE_MCP_KEY. Individual plan only — confirm with Trendlyne if automated server-side use is permitted | Code + Service | ₹2,990–₹4,990/yr (Pro or Max annual MCP plan) | M | ⬜ TODO |
+| **P8-A** | Live trading agent — signal + Telegram alert engine | Code | None (Telegram free) | L | ⬜ TODO |
+| **P8-B** | Paper-to-live promotion gate — 60d paper validation before live signals | Code | None | M | ⬜ TODO |
+| **P8-C** | Kite Connect / Zerodha demat API integration (optional) | Code + Service | ₹0 Kite (free with demat) | XL | ⬜ TODO |
+| **P9-A** | Architecture audit — map all agents + tools to MCP servers | Design | None | M | ⬜ TODO |
+| **P9-B** | Supervisor agent (Claude Agent SDK) — replaces LangGraph orchestrator | Code | None | XL | ⬜ TODO |
+| **P9-C** | MCP server suite — Supabase, Kite, Telegram, Firecrawl, yfinance | Code | None | XL | ⬜ TODO |
+| **P9-D** | Specialist sub-agents — 10 analysis agents rewritten as Agent SDK tools | Code | None | XL | ⬜ TODO |
+| **P9-E** | Migration + parallel-run validation — v1 vs v2 signal comparison | Code | None | L | ⬜ TODO |
 | **OPS-2** | Weekly interface + DB audit — run checklist every Sunday 09:00 IST (routes vs dashboard, column names vs code writes, worker imports vs exports, yfinance/Supabase API patterns) | Ops | None | XS | 🔄 Recurring |
 | **Always** | CLAUDE.md + EXECUTION_PLAN.md update | Doc | None | XS | 🔄 Recurring |
 
@@ -1342,7 +1348,7 @@ CREATE TABLE gift_nifty_snapshots (
 | **BF-21** | Position sizing always 2.5% (QUARTER) on discovery | `agents/position_sizer.py`, `agents/discovery_screener.py` | FULL tier requires warren_bot DCF MOS — warren_bot never runs during discovery pipeline. Options: (a) run warren_bot in discovery for high-confidence stocks, or (b) allow HALF tier without DCF MOS for discovery | M |
 | **BF-22** | "0 ideas today" despite promoted stock | `api/main.py` | `GET /api/discovery` `valid_till` filter may be excluding recs that still have valid data. Investigate `.gte("valid_till", today)` — check if `valid_till` is being set correctly by `_save_discovery()` in discovery_screener.py | S |
 | **BF-23** | Stale news articles in Market tab | `api/main.py` | Google News RSS feed may be cached too aggressively — check `GET /api/news/{symbol}` cache TTL and whether RSS feed itself is stale | S |
-| **BF-24** | Trendlyne AI Connector integration | `data/trendlyne_api_fetcher.py` (new) | Trendlyne has launched a structured REST API. If `TRENDLYNE_API_KEY` is available, replace HTML scraping with structured API calls for fundamentals, DVM, analyst targets. **Manual step required:** obtain API key from Trendlyne portal and set `TRENDLYNE_API_KEY` env var on Railway | L |
+| **BF-24** | Trendlyne MCP connector (replaces HTML scraping) | `data/trendlyne_mcp_fetcher.py` (new) | Trendlyne AI Connector is an MCP server (not REST API) — adds a connector URL to Claude/Railway. Provides structured fundamentals, DVM, shareholding, insider trades, quarterly results. **Manual steps:** (1) subscribe at trendlyne.com/subscription/mcp/plans — Pro ₹2,990/yr or Max ₹4,990/yr; (2) confirm automated server-side use is permitted (plans say "individual use only"); (3) set `TRENDLYNE_MCP_KEY` on Railway. See P7-G for full implementation plan | L |
 
 ---
 
