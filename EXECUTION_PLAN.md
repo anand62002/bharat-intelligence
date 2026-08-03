@@ -1314,6 +1314,38 @@ CREATE TABLE gift_nifty_snapshots (
 
 ---
 
+## Dashboard & UX Fixes — Session 2026-08-03/04
+
+> Items identified from 14-screenshot dashboard audit. Fixed items applied same session; pending items tracked below.
+
+### ✅ Fixed (2026-08-03/04 session)
+
+| Fix | File(s) | Detail |
+|---|---|---|
+| `daily_runs.status` column missing → health panel error | `api/main.py` | Removed `status` from SELECT — column doesn't exist in prod schema; infer from `errors` count |
+| Market pulse all-dashes after weekends / holidays | `api/main.py` | Changed batch yfinance download `period="2d"` → `period="5d"` |
+| Discovery deep-dive title "INFY.NS — INFY.NS" | `api/main.py`, `App.jsx` | `_transform_recommendation()` strips .NS/.BO from name fallback; JSX strips suffix in title too |
+| CRITICAL banner showing phantom 763% recs (SPARC.NS) | `App.jsx` | Threshold updated: uses backend `opportunityTier=CRITICAL` flag OR `upsidePct≥40 && upsideConf≥75 && dataQuality≠ESTIMATED` |
+| Duplicate cards in CRITICAL banner + main list | `App.jsx` | Dedup by symbol added to both `criticalStocks` and main `sorted` list |
+| LOW LIQ shown for liquid large-caps (INFY, etc.) | `data/impact_cost.py` | When 5-min OHLCV empty, fall back to daily bars for volume-based tier; large-caps correctly show HIGH/MEDIUM |
+| "UNKNOWN" company name on discovery cards | `api/main.py` | `_transform_recommendation()` `name` field now strips .NS/.BO suffix from fallback |
+| `dataQuality` not surfaced to frontend | `api/main.py` | Added `dataQuality` field to `_transform_recommendation()` (reads from agent_signals → metadata → "FULL") |
+| Build failure: `React.useState` in `DiscoveryRecsTable` | `App.jsx` | Replaced `React.useState` with `useState` (file uses destructured hooks) |
+| Trendlyne fallback for fundamental agent | `data/fetchers.py` | Already wired (screener.in → Trendlyne → yfinance chain). Operational: refresh TRENDLYNE_SESSION/CSRF on Railway |
+
+### ⬜ Pending
+
+| ID | Issue | File(s) | Detail | Effort |
+|---|---|---|---|---|
+| **BF-19** | Duplicate STOPLOSS_HIT governance alerts | `scheduler/portfolio_monitor.py` | Same symbol fires multiple alerts per day — likely multiple OPEN holdings rows for same symbol. Add portfolio-level dedup by symbol+date (not just holding_id+type) | S |
+| **BF-20** | ARIA "What ran today?" showing 0/0/0 | `App.jsx` | Daily run context handler reads `discoverySymbols`/`passedSymbols` from run data but display shows zeros — check field name mapping between API response and JS handler (around line 2002) | S |
+| **BF-21** | Position sizing always 2.5% (QUARTER) on discovery | `agents/position_sizer.py`, `agents/discovery_screener.py` | FULL tier requires warren_bot DCF MOS — warren_bot never runs during discovery pipeline. Options: (a) run warren_bot in discovery for high-confidence stocks, or (b) allow HALF tier without DCF MOS for discovery | M |
+| **BF-22** | "0 ideas today" despite promoted stock | `api/main.py` | `GET /api/discovery` `valid_till` filter may be excluding recs that still have valid data. Investigate `.gte("valid_till", today)` — check if `valid_till` is being set correctly by `_save_discovery()` in discovery_screener.py | S |
+| **BF-23** | Stale news articles in Market tab | `api/main.py` | Google News RSS feed may be cached too aggressively — check `GET /api/news/{symbol}` cache TTL and whether RSS feed itself is stale | S |
+| **BF-24** | Trendlyne AI Connector integration | `data/trendlyne_api_fetcher.py` (new) | Trendlyne has launched a structured REST API. If `TRENDLYNE_API_KEY` is available, replace HTML scraping with structured API calls for fundamentals, DVM, analyst targets. **Manual step required:** obtain API key from Trendlyne portal and set `TRENDLYNE_API_KEY` env var on Railway | L |
+
+---
+
 ## Phase 7 — Fable 5 (Mythos) Intelligence Upgrade + Data Integrity Hardening
 
 > **Status:** Planned — awaiting Fable 5 account availability

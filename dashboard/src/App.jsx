@@ -64,7 +64,7 @@ const apiFetch = (path, opts = {}) =>
 // ─── CRITICAL THRESHOLDS ─────────────────────────────────────────────────────
 // Discovery: flag if upsidePct >= 100 AND upsideConfidence >= 70
 // Portfolio danger: flag if dangerDropPct >= 70 AND dangerConfidence >= 65 within 2-3 months
-const isCriticalDiscovery = (s) => s.upsidePct >= 100 && s.upsideConfidence >= 70;
+const isCriticalDiscovery = (s) => (s.opportunityTier === "CRITICAL") || (s.upsidePct >= 40 && s.upsideConfidence >= 75 && s.dataQuality !== "ESTIMATED");
 const isCriticalDanger    = (h) => h.dangerDropPct >= 70 && h.dangerConfidence >= 65;
 
 // LIVE_PRICES removed — optimistic portfolio adds now use avgBuy as the temporary
@@ -960,9 +960,10 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRu
   const [filter, setFilter] = useState("All");
   const selected = _universe.find(s=>s.id===selectedId);
   const sectors = ["All",...new Set(_universe.map(s=>s.sector))];
-  const criticalStocks = _universe.filter(isCriticalDiscovery);
-  // Sort: critical first, then by discoveryCount (conviction), then by discoveryScore
-  const sorted = [..._universe].sort((a,b)=>{
+  const criticalStocks = _universe.filter(isCriticalDiscovery).filter((s,i,arr)=>arr.findIndex(x=>x.symbol===s.symbol)===i);
+  // Sort: critical first, then by discoveryCount (conviction), then by discoveryScore; dedup by symbol (keep highest score)
+  const _deduped = [..._universe].sort((a,b)=>b.discoveryScore-a.discoveryScore).filter((s,i,arr)=>arr.findIndex(x=>x.symbol===s.symbol)===i);
+  const sorted = [..._deduped].sort((a,b)=>{
     const ac=isCriticalDiscovery(a)?1:0, bc=isCriticalDiscovery(b)?1:0;
     if(ac!==bc) return bc-ac;
     // Higher repeat count = higher conviction = show first
@@ -991,7 +992,7 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRu
             <span style={{fontSize:14,fontWeight:700,color:"white"}}>Research Discovery Engine</span>
             <Tag color={C.cyan} small>PROACTIVE SCREENING</Tag>
           </div>
-          <div style={{fontSize:10,color:C.muted}}>Stocks NOT in your portfolio — surfaced daily by the agent network scanning NSE/BSE universe · {_universe.length} ideas today</div>
+          <div style={{fontSize:10,color:C.muted}}>Stocks NOT in your portfolio — surfaced daily by the agent network scanning NSE/BSE universe · {_deduped.length} ideas today</div>
         </div>
         <div style={{display:"flex",gap:6}}>
           {onOpenRunSummary&&<button onClick={onOpenRunSummary} style={{background:C.orange+"22",border:`1px solid ${C.orange}44`,borderRadius:7,padding:"6px 12px",color:C.orange,fontSize:11,fontWeight:700,cursor:"pointer"}}>📊 What ran today?</button>}
@@ -1080,7 +1081,7 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRu
           <div style={{animation:"fadeUp .2s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
               <div>
-                <div style={{fontSize:14,fontWeight:700,color:"white",marginBottom:1}}>{selected.symbol} — {selected.name}</div>
+                <div style={{fontSize:14,fontWeight:700,color:"white",marginBottom:1}}>{selected.symbol.replace(/\.(NS|BO)$/,"")} — {selected.name&&selected.name!==selected.symbol?selected.name:selected.symbol.replace(/\.(NS|BO)$/,"")}</div>
                 <div style={{fontSize:10,color:C.textDim,lineHeight:1.5,maxWidth:420}}>{selected.discoveryReason}</div>
               </div>
               <div style={{display:"flex",gap:6}}>
@@ -1167,8 +1168,8 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRu
    Shows entry / target / stoploss so users can see the actionable levels at a glance. */
 function DiscoveryRecsTable({universe}){
   const PAGE=30;
-  const [page,setPage]=React.useState(0);
-  const [collapsed,setCollapsed]=React.useState(false);
+  const [page,setPage]=useState(0);
+  const [collapsed,setCollapsed]=useState(false);
   const sorted=[...universe].sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
   const total=sorted.length;
   const pages=Math.ceil(total/PAGE);

@@ -98,6 +98,30 @@ def estimate_impact_cost(symbol: str, trade_value_inr: float = 5_00_000) -> dict
         df = ticker.history(period="5d", interval="5m", auto_adjust=True)
 
         if df is None or df.empty:
+            # 5-min bars often unavailable after hours or for large-caps on certain days.
+            # Attempt daily-bar fallback to at least classify liquidity tier.
+            try:
+                daily_df = yf.Ticker(_to_yf(plain)).history(period="5d", interval="1d")
+                if daily_df is not None and not daily_df.empty:
+                    daily_df = daily_df[daily_df["Volume"] > 0]
+                    if not daily_df.empty:
+                        avg_vol_inr = float((daily_df["Close"] * daily_df["Volume"]).median())
+                        if avg_vol_inr >= HIGH_VOL_INR:
+                            tier = "HIGH"
+                        elif avg_vol_inr >= MEDIUM_VOL_INR:
+                            tier = "MEDIUM"
+                        else:
+                            tier = "LOW"
+                        return {
+                            "symbol": plain, "impact_cost_pct": None,
+                            "liquidity_tier": tier,
+                            "avg_daily_volume_inr": round(avg_vol_inr, 0),
+                            "avg_spread_pct": None, "participation_rate": None,
+                            "data_days": len(daily_df), "source": "yfinance_1d_fallback",
+                            "error": "no 5m data — tier from daily volume",
+                        }
+            except Exception:
+                pass
             return _err("no intraday data")
 
         # ── compute per-bar spread proxy ───────────────────────────────────────

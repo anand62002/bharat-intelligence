@@ -725,7 +725,7 @@ def _transform_recommendation(row: dict) -> dict:
         "catalysts":        meta.get("catalysts")         or [],
         "upsideBasis":      meta.get("upside_basis")      or "",
         "upsideHorizon":    meta.get("upside_horizon")    or "",
-        "name":             meta.get("name")              or row["symbol"],
+        "name":             meta.get("name")              or row["symbol"].replace(".NS","").replace(".BO",""),
         "sector":           meta.get("sector")            or "",
         "price":            meta.get("price")             or 0,
         "change":           meta.get("change")            or 0,
@@ -746,6 +746,12 @@ def _transform_recommendation(row: dict) -> dict:
         "opportunityTier": (
             "CRITICAL" if "CRITICAL" in (row.get("headline") or "")
             else "STANDARD" if row.get("is_discovery") else None
+        ),
+        # Data quality flag (FULL / FALLBACK / ESTIMATED) from agent_signals or metadata
+        "dataQuality": (
+            (agent_signals.get("fundamental") or {}).get("data_quality")
+            or meta.get("data_quality")
+            or "FULL"
         ),
     }
 
@@ -827,7 +833,7 @@ def _fetch_prices_sync() -> dict[str, tuple[float, float]]:
     try:
         df = yf.download(
             syms,
-            period      = "2d",
+            period      = "5d",
             interval    = "1d",
             auto_adjust = True,
             # progress / group_by removed — deprecated/removed in yfinance 1.2.x
@@ -1720,7 +1726,7 @@ async def get_system_health(
     # duration_seconds, status (OK | WARNING | DATA_DEGRADATION), created_at.
     try:
         run_rows = (db.table("daily_runs")
-                      .select("run_date, symbols_processed, errors, duration_seconds, status")
+                      .select("run_date, symbols_processed, errors, duration_seconds")
                       .order("run_date", desc=True)
                       .limit(1)
                       .execute()
@@ -1730,7 +1736,7 @@ async def get_system_health(
             run_date_str   = str(run.get("run_date", "?"))
             n_syms         = run.get("symbols_processed") or 0
             n_errors       = run.get("errors") or 0
-            run_status_col = run.get("status") or ("OK" if n_errors == 0 else "WARNING")
+            run_status_col = "OK" if n_errors == 0 else "WARNING"
             duration       = run.get("duration_seconds")
             dur_str        = f" ({duration:.0f}s)" if duration else ""
             days_ago       = (date.today() - date.fromisoformat(run_date_str)).days \
