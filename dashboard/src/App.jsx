@@ -1042,12 +1042,6 @@ function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRu
       {/* Stale recs notice — when ideas are from previous days */}
       {IS_LIVE && _universe.length>0 && (()=>{
         const today = new Date().toISOString().slice(0,10);
-        const newest = _universe.reduce((best,s)=>{
-          const d = s.validTill || "";
-          return d > best ? d : best;
-        }, "");
-        // If newest validTill is more than 3 days out from today, assume it's from today's run
-        // Otherwise show a stale warning
         const latestCreated = _universe.find(s=>s.validTill)?.validTill;
         if(latestCreated && latestCreated < today){
           return(
@@ -1968,7 +1962,6 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
   const [messages,setMessages]=useState([{role:"assistant",text:"Hello — I'm **ARIA**, your Adaptive Research Intelligence Assistant.\n\nI'm the bridge between you and every module of Bharat Intelligence:\n\n• **Explain** any recommendation or discovery idea\n• **Update your portfolio** — just tell me what you traded\n• **Vote or decide** on Governance research proposals\n• **Deep dive** on any stock, sector, or macro theme\n• **Fact-check** any claim in real time\n\nWhat would you like to explore?"}]);
   const [input,setInput]=useState("");
   const [loading,setLoading]=useState(false);
-  const [analyseConfirmSymbol,setAnalyseConfirmSymbol]=useState(null); // symbol awaiting user yes/no
   const [analyseResolvedInfo,setAnalyseResolvedInfo]=useState(null); // {raw,yf,price,name} from /api/symbol/resolve
   const bottomRef=useRef(null);
   const prevCtxRef=useRef(null);
@@ -2169,7 +2162,6 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
       const confirmMatch=raw.match(/<confirm_analyse>([^<]+)<\/confirm_analyse>/i);
       if(confirmMatch){
         const rawSym=confirmMatch[1].trim().toUpperCase();
-        setAnalyseConfirmSymbol(rawSym);
         if(API_URL){
           apiFetch(`/api/symbol/resolve?q=${encodeURIComponent(rawSym)}`)
             .then(r=>{if(r?.yf_symbol)setAnalyseResolvedInfo({raw:rawSym,yf:r.yf_symbol,price:r.price,name:r.name||""});})
@@ -2181,7 +2173,6 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
       const runAnalyseMatch=raw.match(/<run_analyse>([^<]+)<\/run_analyse>/i);
       if(runAnalyseMatch&&API_URL){
         const rawSymbol=runAnalyseMatch[1].trim().toUpperCase();
-        setAnalyseConfirmSymbol(null);
 
         // Resolve symbol — use stored info from confirm step if available
         let yfSym=rawSymbol;
