@@ -59,6 +59,8 @@ Stock analysis/
 │   ├── historical_rag.py       # pgvector semantic similarity on past events
 │   ├── discovery_screener.py   # Proactive stock discovery — full NSE EQ universe
 │   │                           # daily slice rotation (200/day → 9-day full cycle)
+│   │                           # Runs standalone at 10:30 IST via worker.py (no longer in the
+│   │                           #   orchestrator LangGraph pipeline — see P6 schedule redesign)
 │   │                           # Filter 2 (PE): sector-relative three-tier filter
 │   │                           #   Tier A: PE ≤ sector_median → undervalued vs peers (strong)
 │   │                           #   Tier B: PE ≤ sector×1.2 AND PE≤80 → fair value vs peers
@@ -68,6 +70,27 @@ Stock analysis/
 │   │                           #     1. compute_rolling_longrun_pe() — live 365-day DB median (≥90 pts)
 │   │                           #     2. SECTOR_LONGRUN_PE in sector_valuation.py (5-yr structural median)
 │   │                           #     3. DEFAULT_SECTOR_PE 22x fallback
+│   │                           # CRITICAL tier: upside≥40%/conf≥75%/data_quality!=ESTIMATED/≥2 bull agents
+│   │                           # _derive_catalysts_and_risks() (added this session) — builds
+│   │                           #   metadata.catalysts (= screen_triggers) and metadata.risks
+│   │                           #   (bearish agents + illiquidity flag) for the dashboard's
+│   │                           #   Discovery-tab Risks/Catalysts panel, refreshed on every
+│   │                           #   re-confirmation within the 10-day cooldown window
+│   ├── governance_screener.py  # 7 corporate-governance red flags → risk_score adjustment
+│   ├── mgmt_quality.py         # Management quality scoring (5 dims, non-blocking, runs alongside warren_bot)
+│   ├── valuation_scenarios.py  # Bull/base/bear DCF scenarios + sensitivity tornado
+│   ├── regime_detector.py      # Market regime classification (5 indicators) → market_regime table
+│   │                           # Runs 06:30 IST, before orchestrator; feeds regime-specific weight multipliers
+│   ├── earnings_guard.py       # Pre-earnings risk guard — blocks new entries near binary earnings events
+│   ├── options_sentiment.py    # PCR/max-pain/IV-skew/VIX → directional options sentiment signal
+│   ├── portfolio_risk.py       # Portfolio-level correlation matrix, sector concentration, VaR (95%/99%)
+│   ├── target_updater.py       # P7-A: dynamic stoploss ratchet + target extension + laggard review
+│   │                           # Runs 17:00 IST; writes original_target/target_updated_at/
+│   │                           #   target_update_count/protect_gains_flag/stoploss_ratchet_level/
+│   │                           #   last_review_at columns on portfolio_holdings
+│   ├── rec_outcome_seeder.py   # P5-C: seeds PENDING recommendation_outcomes rows for new recs (06:55 IST)
+│   ├── backtester.py           # Walk-forward backtest on NIFTY 500 quality universe (monthly)
+│   ├── base.py                 # DataCompletenessValidator — pre-signal data-quality gate shared by agents
 │   ├── market_digest.py        # P6-C: Morning Brief + Closing Digest agent
 │   │                           # Entry: generate_digest(digest_type) → dict; save_digest(digest, client, dry_run)
 │   │                           # digest_type: MORNING | CLOSING
@@ -115,25 +138,39 @@ Stock analysis/
 │   ├── orchestrator.py         # Master LangGraph pipeline — all agents + governance
 │   │                           # Pipeline: sector_pe_snapshot → load_symbols → load_weights
 │   │                           # → run_agents → synthesise → fact_check → save_recs
-│   │                           # → monitor → log_run → run_discovery → END
+│   │                           # → monitor → log_run → END
+│   │                           # (discovery is NOT in this graph — see discovery_screener.py note)
 │   ├── portfolio_monitor.py    # Monitors open holdings, fires portfolio_alerts
 │   ├── sector_pe_tracker.py    # Daily sector_pe_snapshots writes
+│   ├── synthesis_validator.py  # P1-C: 3-judge (GPT-4o-mini + Claude Sonnet + Claude Opus) agreement gate
+│   │                           # before a synthesised recommendation is published
 │   └── performance_tracker.py  # Writes agent_performance rows daily
 │
 ├── worker.py                   # Unified background worker (runs on Railway worker dyno)
-│   #  Schedule (IST):
-│   #    06:00 — orchestrator (all agents + discovery)
+│   #  Schedule (IST) — as of 2026-08-03:
+│   #    05:30 — market digest MORNING (P6-C, moved before orchestrator so mood/nifty_signal
+│   #            can be injected into every synthesis prompt)
+│   #    06:00 — orchestrator (7 core agents + synthesis + governance; discovery NOT included)
+│   #    06:30 — regime detector (market_regime table, before orchestrator)
+│   #    06:55 — rec outcome seeder (P5-C, seeds PENDING recommendation_outcomes rows)
 │   #    07:00 — performance tracker
+│   #    07:05 — paper portfolio open (P5-B, opens positions for today's new BUY recs)
 │   #    07:30 — research agent
 │   #    08:00 — earnings calendar refresh
-│   #    08:30 — Breeze token refresh (P1-B)
-│   #    08:45 — market digest MORNING (P6-C)
-│   #    09:15, 11:30, 13:30, 15:15 — portfolio monitor
-│   #    15:45 — options snapshot (uses Breeze if configured)
-│   #    16:20 — market digest CLOSING (P6-C)
-│   #    07:45 (Sunday) — weekly health audit (scripts/weekly_audit.py) ← NEW
-│   #    07:45 (1st of month) — historical backtest (agents/backtester.py)
 │   #    08:15 (1st of month) — RAG corpus auto-refresh (db/auto_seed_rag.py)
+│   #    08:30 — GIFT Nifty pre-market signal (P6-D-7)
+│   #    08:35 — Breeze token refresh (P1-B, DEPRECATED)
+│   #    09:15, 11:30, 13:30, 15:15 — portfolio monitor
+│   #    10:30 — discovery screener (moved out of orchestrator pipeline — live intraday prices)
+│   #    15:45 — options market snapshot
+│   #    16:00 — portfolio risk (correlation/VaR/HHI)
+│   #    16:15 — paper portfolio update (P5-B, exit checks + daily snapshot)
+│   #    16:20 — market digest CLOSING (P6-C)
+│   #    16:30 — forward outcome poller (P5-D, live alpha_live + t+30 milestone)
+│   #    17:00 — target updater (P7-A, stoploss ratchet + target extension + laggard review)
+│   #    18:30 — outcome tracker (t+90/180/365 resolution + sentiment validation)
+│   #    07:45 (Sunday) — weekly health audit (scripts/weekly_audit.py)
+│   #    07:45 (1st of month) — historical backtest (agents/backtester.py)
 │
 ├── data/
 │   ├── fetchers.py             # India market data fetchers (NSE, BSE, RBI, SEBI)
@@ -171,6 +208,10 @@ Stock analysis/
 │   │                           # Data: screener_history (trend) → screener_snapshot → trendlyne_snapshot
 │   │                           # Used by: sentiment.py (+5/-10 pts) + institutional.py (+8 pts ACCUMULATING)
 │   ├── forward_estimates.py    # yfinance forward EPS/PE estimates (24h Supabase cache)
+│   ├── gift_nifty_fetcher.py   # P6-D-7: GIFT Nifty pre-market futures premium signal
+│   │                           # get_gift_nifty_signal() — 06:30–09:15 IST pre-market window
+│   ├── impact_cost.py          # Market impact-cost (slippage) estimator from intraday OHLCV
+│   │                           # estimate_impact_cost(symbol, trade_value_inr) → liquidity_tier + impact_cost_pct
 │   ├── proxy_session.py        # BF-15/15b: Outbound proxy abstraction for Railway IP blocks
 │   │                           # apply_proxy_to_session(session) — routes via SCRAPERAPI_KEY
 │   │                           # (rotating residential, $29/mo) or FIXIE_URL (static, $25/mo)
@@ -186,7 +227,7 @@ Stock analysis/
 │
 ├── api/
 │   ├── __init__.py
-│   └── main.py                 # FastAPI backend (11 endpoints + WebSocket)
+│   └── main.py                 # FastAPI backend (37 endpoints + WebSocket)
 │   #                             _NSE_OVERRIDES: brand-name → yfinance ticker aliases
 │   #                             _symbol_cache: process-lifetime resolution cache
 │
@@ -235,8 +276,8 @@ Stock analysis/
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `recommendations` | Agent-generated buy/sell recs | `symbol, action, confidence, risk_score, entry_low, entry_high, target, stoploss, upside_pct, upside_confidence, is_discovery, agent_signals (jsonb), gov_check (jsonb), metadata (jsonb)` |
-| `portfolio_holdings` | User's open positions | `symbol, yf_symbol, name, sector, qty, avg_buy, current_price, target_price, stoploss_price, status (OPEN/CLOSED/PARTIAL), danger_drop_pct, danger_confidence, danger_trigger, linked_rec_id` |
+| `recommendations` | Agent-generated buy/sell recs | `symbol, action, confidence, risk_score, entry_low, entry_high, target, stoploss, upside_pct, upside_confidence, is_discovery, agent_signals (jsonb), gov_check (jsonb), suggested_position_pct, position_label, metadata (jsonb)`. For `is_discovery=True` rows, `metadata` additionally carries `risks`/`catalysts` (added this session — see `agents/discovery_screener.py::_derive_catalysts_and_risks()`), `screen_triggers`, `discovery_score/count/dates`, `liquidity_tier`, `impact_cost_pct`, `forward_pe`, `peg_ratio_fwd`, `eps_growth_pct`. Note: `bull_case`/`bear_case` computed by synthesis are NOT persisted here (filtered out by `save_recs_node`'s `_DB_COLUMNS` allow-list) — they only reach the dashboard via the on-demand `/api/analyse` response. |
+| `portfolio_holdings` | User's open positions | `symbol, yf_symbol, name, sector, qty, avg_buy, current_price, target_price, stoploss_price, status (OPEN/CLOSED/PARTIAL), danger_drop_pct, danger_confidence, danger_trigger, linked_rec_id`. P7-A dynamic target tracking: `original_target, target_updated_at, target_update_count, protect_gains_flag, stoploss_ratchet_level, last_review_at` (written by `agents/target_updater.py`, 17:00 IST) |
 | `portfolio_alerts` | Risk/danger alerts | `severity (INFO/WARNING/DANGER/CRITICAL), alert_type, title, detail, resolved, portfolio_id` |
 | `agent_performance` | Daily agent accuracy log | `agent_name, accuracy_90d, hallucination_rate, trend (IMPROVING/STABLE/DEGRADING), audit_date` |
 | `historical_events` | RAG knowledge base | `event_type, description, embedding (vector), outcome, relevance_score` |
@@ -271,21 +312,37 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/api/discovery/runs` | Last N days of screener run logs (slice/passed/discovery symbols + coverage stats). Powers dashboard "Daily Screened Stocks" panel. |
 | GET | `/api/portfolio` | Open holdings, refreshes current_price from yfinance |
 | POST | `/api/portfolio` | Add/update holding — auto-resolves yfinance symbol, fetches live price |
+| GET | `/api/portfolio/broken` | Holdings whose live price fetch is failing (symbol resolution issues) |
 | GET | `/api/portfolio/alerts` | Unresolved portfolio alerts |
+| GET | `/api/portfolio/risk` | Correlation matrix, sector concentration, VaR 95/99% from `agents/portfolio_risk.py` |
 | GET | `/api/symbol/resolve?q=RELIANCE` | Resolves any input to yfinance ticker + live price |
+| GET | `/api/symbol/liquidity` | Impact-cost / liquidity tier lookup (`data/impact_cost.py`) |
+| POST | `/api/symbol/override` | Manually pin a symbol's yfinance resolution (persists to `_symbol_cache`) |
 | GET | `/api/governance/alerts` | Aggregated from portfolio_alerts + degrading agent_performance |
 | GET | `/api/governance/research` | Research proposals with debate status computed |
+| GET | `/api/system/health` | Governance/system health rollup (used by dashboard health widget) |
+| GET | `/api/debug/screener` | Diagnostic — raw screener.in fetch status for a symbol |
+| GET | `/api/debug/scraper-health` | Diagnostic — proxy/direct connectivity status (BF-15) |
 | GET | `/api/market/pulse` | Live yfinance prices (NIFTY, SENSEX, GOLD, CRUDE, VIX, FII) — 60s cache |
-| GET | `/api/warren_bot/{symbol}` | On-demand Buffett/Jhunjhunwala quality score — 24h Supabase cache |
-| GET | `/api/backtest/summary` | Walk-forward backtest summary from `backtest_results` — `?split=TEST\|TRAIN\|FULL&limit=5` — powers P6-B BacktestPanel |
+| GET | `/api/market/digest` | P6-C: today's market digests — `?digest_type=MORNING\|CLOSING&digest_date=YYYY-MM-DD` — returns `{digests, date, count}` with camelCase keys |
+| GET | `/api/market/regime` | Latest `market_regime` row(s) — `?days=N` |
+| GET | `/api/earnings/upcoming` | Upcoming earnings dates for portfolio + recently-screened symbols |
+| GET | `/api/news/{symbol}` | Google News RSS headlines for a symbol/topic (DB-7 live news panel) |
+| GET | `/api/performance/outcomes` | Resolved `recommendation_outcomes` rows — `?days=180` |
+| GET | `/api/performance/accuracy` | Aggregate agent accuracy from `agent_performance` |
 | GET | `/api/performance/calibration` | P6-A: confidence calibration — buckets composite_score into 5 tiers (50–60, 60–70, 70–80, 80–90, 90+), returns expected vs actual hit rate per tier |
+| GET | `/api/performance/alpha_chart` | Weekly avg alpha time series — `?weeks=26` |
+| GET | `/api/estimates/{symbol}` | Forward EPS/PE/PEG estimates (`data/forward_estimates.py`) |
+| GET | `/api/backtest/summary` | Walk-forward backtest summary from `backtest_results` — `?split=TEST\|TRAIN\|FULL&limit=5` — powers P6-B BacktestPanel |
+| GET | `/api/warren_bot/{symbol}` | On-demand Buffett/Jhunjhunwala quality score — 24h Supabase cache |
+| POST | `/api/analyse` | On-demand full 10-agent analysis for any symbol. Body: `{"symbol": "RELIANCE"}`. Runs full pipeline (dry_run=True — does NOT save to DB). Returns `{symbol, yf_symbol, status, analysis: {action/confidence/synthesis/...}, agents: {...}}`. Server-side 180s timeout. Status = "OK" (rec produced) or "NO_RECOMMENDATION" (suppressed). Powers ARIA /analyse command. |
+| GET | `/api/options/{symbol}` | Option-chain metrics (PCR, max pain, ATM IV) |
+| GET | `/api/valuation/{symbol}` | Bull/base/bear DCF scenarios (`agents/valuation_scenarios.py`) |
 | GET | `/api/paper/portfolio` | P5-B: paper portfolio — open positions, recent closed, summary stats, win rate, avg alpha |
 | GET | `/api/paper/history` | P5-B: daily `paper_portfolio_snapshots` for P&L vs Nifty chart — `?days=180` |
 | GET | `/api/attribution/agents` | P5-A: per-agent hit rate + avg alpha derived from resolved recommendation_outcomes |
 | GET | `/api/performance/live` | P5-D/E: live snapshot of all open (PENDING) recs — avg return/alpha, by-action tiles, per-rec table sorted by alpha_live |
 | GET | `/api/attribution/live` | P5-E: per-agent live alpha attribution (before 90d data exists) — avg_bull_alpha_live, positive_rate_live |
-| GET | `/api/market/digest` | P6-C: today's market digests — `?digest_type=MORNING\|CLOSING&digest_date=YYYY-MM-DD` — returns `{digests, date, count}` with camelCase keys |
-| POST | `/api/analyse` | On-demand full 10-agent analysis for any symbol. Body: `{"symbol": "RELIANCE"}`. Runs full pipeline (dry_run=True — does NOT save to DB). Returns `{symbol, yf_symbol, status, analysis: {action/confidence/synthesis/...}, agents: {...}}`. Server-side 180s timeout. Status = "OK" (rec produced) or "NO_RECOMMENDATION" (suppressed). Powers ARIA /analyse command. |
 | WS | `/ws/alerts` | WebSocket — broadcasts DANGER/CRITICAL alerts every 30s |
 
 **Auth:** `x-api-key: <DASHBOARD_API_KEY>` header on all HTTP. `?api_key=<key>` on WebSocket.
@@ -329,9 +386,10 @@ Results cached in `_symbol_cache` dict for process lifetime.
 1. Load full NSE EQ universe → exclude portfolio holdings → take today's 200-symbol slice
 2. Pre-screen **all 200** (no early break) — fast filters: RSI 40–65, PE<50 or revGrowth>30%, FII buying, revGrowth>15%, price>EMA200
 3. Run full 7-agent analysis on up to 25 symbols that passed pre-screen
-4. Classify CRITICAL (upside≥100%, conf≥70%) or STANDARD (upside≥20%, conf≥65%)
-5. Save to `recommendations` (is_discovery=True) with metadata.price snapshot
-6. Upsert to `discovery_runs` with full symbol lists for dashboard audit trail
+4. Classify CRITICAL (upside≥40%, conf≥75%, data_quality != ESTIMATED, ≥2 bullish agents — P0-E/BF-16 consensus gate) or STANDARD (upside≥20%, conf≥65%). CRITICAL candidates failing the data-quality or consensus gate are demoted to STANDARD rather than discarded.
+5. Derive `metadata.catalysts` (= `screen_triggers`) and `metadata.risks` (any agent voting SELL/AVOID + illiquidity flag) from data already computed in step 3 — no extra calls (`_derive_catalysts_and_risks()`, added this session; powers the Discovery tab's Risks/Catalysts deep-dive panel)
+6. Save to `recommendations` (is_discovery=True) with metadata.price snapshot
+7. Upsert to `discovery_runs` with full symbol lists for dashboard audit trail
 
 ### CLI
 ```powershell
@@ -343,7 +401,7 @@ python -m agents.discovery_screener --coverage-only          # print stats and e
 ```
 
 ### Orchestrator integration
-`run_discovery_node` is the **final step** in the LangGraph pipeline (after `log_run`). Fires automatically at 06:00 IST daily via `worker.py`.
+Discovery is **no longer part of the LangGraph pipeline** (moved out in the P6 schedule redesign). It now runs as a standalone `worker.py` job at **10:30 IST** (`job_discovery_screener` → `run_discovery`), ~75 min after NSE open, so it screens on live intraday prices/RSI/EMA instead of yesterday's close. `run_discovery_node` still exists in `scheduler/orchestrator.py` as dead code (excluded from `build_graph()`'s edges — see the `# NOTE: run_discovery_node removed from pipeline (P6 schedule redesign)` comment) and can be deleted in a future cleanup.
 
 ---
 
@@ -582,6 +640,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (2026-08-03 session) | **OPS-2 weekly audit**: full interface/DB audit run — API routes, yfinance patterns, Supabase `.in_()` NULL handling, worker imports, migration-gated column fallbacks all clean; found 2 `_transform_*()` coverage gaps. **Risks/Catalysts wiring**: root cause was that the Discovery-tab deep-dive panel (`dashboard/src/App.jsx` "⚠ Risks"/"🚀 Catalysts") reads `metadata.risks`/`metadata.catalysts` on discovery-sourced recs, but `agents/discovery_screener.py` never wrote those keys — panel was permanently empty for every discovery stock. Fixed with new `_derive_catalysts_and_risks(result: DiscoveryResult)` in `discovery_screener.py`: `catalysts` = `screen_triggers` (already computed); `risks` = one line per agent voting SELL/AVOID (from `result.agent_signals`, no extra calls) + an illiquidity line when `liquidity_tier` is LOW/ILLIQUID. Wired into both the INSERT and UPDATE (re-confirmation) paths of `_save_discovery()`. 7 new tests in `tests/test_discovery_screener.py` (108 total, all passing). Note: `bull_case`/`bear_case` from the synthesis LLM are a separate, already-correct feature (surfaced only through the on-demand `/api/analyse` response, not through saved recs) — left untouched. **CLAUDE.md refresh**: repo layout tree updated with 11 previously-undocumented agent/data modules (`governance_screener.py`, `mgmt_quality.py`, `valuation_scenarios.py`, `regime_detector.py`, `earnings_guard.py`, `options_sentiment.py`, `portfolio_risk.py`, `target_updater.py`, `rec_outcome_seeder.py`, `backtester.py`, `base.py`, `gift_nifty_fetcher.py`, `impact_cost.py`, `scheduler/synthesis_validator.py`); `worker.py` schedule block rewritten to match the actual ~19-job schedule (was still showing the pre-P6/P7 6-job version); discovery screener documented as a standalone 10:30 IST job (not the orchestrator's final pipeline step, which changed with the P6 schedule redesign — `run_discovery_node` is now dead code in `orchestrator.py`); discovery CRITICAL threshold corrected to 40%/75% (was documented as 100%/70%); API endpoint table expanded from 15 to 37 routes; `recommendations`/`portfolio_holdings` schema rows updated with `metadata.risks/catalysts` and P7-A target-tracking columns. |
 | (2026-07-22 session) | **ATR-14 stoploss**: `agents/technical.py` now computes `atr_14`, `atr_stoploss` (entry−2×ATR), `atr_stoploss_pct`; synthesis prompt (`prompts/orchestrator_synthesis.txt`) enforces stoploss ≥ ATR floor via `{atr_stoploss}` placeholder; orchestrator injects it from technical agent result. **ARIA /analyse command**: `POST /api/analyse` endpoint — runs full 10-agent pipeline (dry_run=True, no DB write), 180s timeout, returns analysis+agents dict; ARIA detects "analyse SYMBOL" intent → confirm → `<run_analyse>` tag → dashboard calls endpoint and shows result. **Weekly health audit**: `scripts/weekly_audit.py` — 9-check PASS/WARN/FAIL report (kappa, daily_runs, alpha_live, trendlyne, discovery, RAG, agent_performance, forward_poller, outcome_seeder); Sunday 07:45 IST worker job. **Architecture white paper**: `docs/ARCHITECTURE.md` rewritten for business/finance audience — 500-word executive summary + ~200-word elevator pitch per agent. **Fable 5 architect guide**: `docs/FABLE5_REDESIGN_PROMPT.md` updated with Part A structured pain-points prompt. 30 new tests (6 ATR + 14 weekly_audit + 10 on_demand_analyse). LOG_LEVEL=INFO set on Railway worker — kappa now visible at INFO level in Railway logs. |
 | (fix macro test) | `tests/test_macro.py`: added `_fetch_india_macro_news` mock to `_mock_analyse_deps` helper — without it, live Google News RSS calls during tests produced a non-zero `news_adj`, breaking `test_score_components_sum` (95 ≠ 100). |
 | (data-leakage-audit) | `governance/performance_tracker.py`: `LeakageViolation` + `DataLeakageReport` dataclasses; `_check_technical_temporal_integrity()` (BLOCKING: ohlcv_last_date > signal_ts+1d; WARNING: stale >7d), `_check_fundamental_temporal_integrity()` (WARNING: data_as_of > signal_ts), `_check_rag_temporal_integrity()` (BLOCKING: matched_event.event_date > signal_ts); `audit_data_leakage()` orchestrates all checks. `agents/technical.py`: added `ohlcv_last_date` field. `agents/fundamental.py`: added `data_as_of` field. `scheduler/orchestrator.py`: leakage audit called in `synthesise_node()` pre-consensus-gate, violations stored in `synthesis_data["metadata"]["leakage_violations"]`. 43 tests added. |
@@ -661,7 +720,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 ## Interface & DB Audit Checklist (OPS-2 — run weekly)
 
-> **Recurring maintenance task.** Run every Sunday before market open (or after any major build session). Catches mismatches before they cause silent failures in production. Last full audit: 2026-05-20 (found 3 bugs — see P5-D/E audit fix in git history).
+> **Recurring maintenance task.** Run every Sunday before market open (or after any major build session). Catches mismatches before they cause silent failures in production. Last full audit: 2026-08-03 (all 6 checks clean — API routes, yfinance patterns, Supabase NULL handling, worker imports, migration fallbacks; found 2 `_transform_*()` coverage gaps, 1 fixed same session — see 2026-08-03 session in git history). Previous audit: 2026-05-20 (found 3 bugs — see P5-D/E audit fix in git history).
 
 ### What to check
 

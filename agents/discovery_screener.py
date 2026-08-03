@@ -1138,6 +1138,43 @@ def _normalise_symbol(sym: str) -> str:
 
 _DISCOVERY_COOLDOWN_DAYS = 10   # same symbol won't create a new row within this window
 
+_RISK_AGENT_LABELS = {
+    "technical":      "Technical",
+    "fundamental":    "Fundamental",
+    "sentiment":      "Sentiment",
+    "institutional":  "Institutional",
+    "macro":          "Macro",
+    "historical_rag": "Historical pattern",
+}
+
+
+def _derive_catalysts_and_risks(result: DiscoveryResult) -> tuple[list[str], list[str]]:
+    """
+    Build the Discovery tab's Risks/Catalysts panel content from data already
+    computed during the scan (no extra agent calls). Catalysts reuse the
+    pre-screen triggers; risks surface any agent that voted bearish plus a
+    liquidity flag when the stock is thinly traded.
+    """
+    catalysts = list(result.screen_triggers)
+
+    risks: list[str] = []
+    for name, label in _RISK_AGENT_LABELS.items():
+        sig_data = result.agent_signals.get(name) or {}
+        signal   = str(sig_data.get("signal") or "").upper()
+        if signal in ("SELL", "AVOID"):
+            score = sig_data.get("score")
+            score_str = f" (score {score:.0f}/100)" if isinstance(score, (int, float)) else ""
+            risks.append(f"{label} agent flags {signal}{score_str}")
+
+    if result.liquidity_tier in ("LOW", "ILLIQUID"):
+        cost_str = f" ({result.impact_cost_pct:.1f}% impact cost)" if result.impact_cost_pct is not None else ""
+        if result.liquidity_tier == "ILLIQUID":
+            risks.append(f"Illiquid stock{cost_str} — may be hard to exit at size")
+        else:
+            risks.append(f"Low liquidity{cost_str} — expect meaningful slippage on exit")
+
+    return catalysts, risks
+
 
 def _save_discovery(result: DiscoveryResult) -> Optional[str]:
     """
@@ -1180,6 +1217,7 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
         client   = create_client(url, key)
         today    = date.today().isoformat()
         cooldown = (date.today() - timedelta(days=_DISCOVERY_COOLDOWN_DAYS)).isoformat()
+        catalysts, risks = _derive_catalysts_and_risks(result)
 
         # ── Check 10-day cooldown window ──────────────────────────────────────
         existing = (
@@ -1211,6 +1249,8 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 "discovery_count":  discovery_count,
                 "discovery_dates":  discovery_dates,
                 "last_confirmed_at": today,
+                "risks":            risks,       # refresh — bearish agents may have changed
+                "catalysts":        catalysts,
             }
             client.table("recommendations").update({
                 "metadata":          updated_meta,
@@ -1262,6 +1302,8 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 "sector":            result.sector,
                 "discovery_score":   result.composite_score,
                 "screen_triggers":   result.screen_triggers,
+                "risks":             risks,
+                "catalysts":         catalysts,
                 "upside_basis":      result.upside_basis,
                 "upside_horizon":    result.upside_horizon,
                 "liquidity_tier":    result.liquidity_tier,

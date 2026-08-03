@@ -56,6 +56,7 @@ from agents.discovery_screener import (
     _normalise_symbol,
     _load_portfolio_symbols,
     _save_discovery,
+    _derive_catalysts_and_risks,
     _log_daily_run,
     run_discovery,
     DiscoveryResult,
@@ -852,6 +853,54 @@ class TestDiscoveryResult:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# _derive_catalysts_and_risks
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestDeriveCatalystsAndRisks:
+    def test_catalysts_reuse_screen_triggers(self):
+        dr = _make_discovery()
+        catalysts, _ = _derive_catalysts_and_risks(dr)
+        assert catalysts == ["RSI 52 in range", "Revenue growth 22%"]
+
+    def test_no_risks_when_all_agents_bullish(self):
+        dr = _make_discovery()
+        _, risks = _derive_catalysts_and_risks(dr)
+        assert risks == []
+
+    def test_bearish_agent_produces_risk_line(self):
+        dr = _make_discovery()
+        dr.agent_signals = {
+            "technical":   {"signal": "BUY",   "score": 72},
+            "sentiment":   {"signal": "AVOID", "score": 30},
+            "fundamental": {"signal": "SELL",  "score": 41},
+        }
+        _, risks = _derive_catalysts_and_risks(dr)
+        assert any("Sentiment agent flags AVOID" in r and "30/100" in r for r in risks)
+        assert any("Fundamental agent flags SELL" in r and "41/100" in r for r in risks)
+        assert not any("Technical" in r for r in risks)
+
+    def test_illiquid_tier_adds_risk_line(self):
+        dr = _make_discovery()
+        dr.liquidity_tier = "ILLIQUID"
+        dr.impact_cost_pct = 4.2
+        _, risks = _derive_catalysts_and_risks(dr)
+        assert any("Illiquid" in r and "4.2%" in r for r in risks)
+
+    def test_low_liquidity_tier_adds_risk_line(self):
+        dr = _make_discovery()
+        dr.liquidity_tier = "LOW"
+        dr.impact_cost_pct = 1.5
+        _, risks = _derive_catalysts_and_risks(dr)
+        assert any("Low liquidity" in r for r in risks)
+
+    def test_high_liquidity_tier_adds_no_risk_line(self):
+        dr = _make_discovery()
+        dr.liquidity_tier = "HIGH"
+        _, risks = _derive_catalysts_and_risks(dr)
+        assert risks == []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # _load_portfolio_symbols
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -936,6 +985,31 @@ class TestSaveDiscovery:
 
         assert len(inserted_rows) == 1
         assert inserted_rows[0]["is_discovery"] is True
+
+    def test_insert_row_metadata_has_catalysts_and_risks(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
+
+        inserted_rows = []
+        mock_client = self._mock_client_fresh()
+        def capture_insert(row):
+            inserted_rows.append(row)
+            m = MagicMock()
+            m.execute.return_value.data = [{"id": "xyz"}]
+            return m
+        mock_client.table.return_value.insert.side_effect = capture_insert
+
+        dr = _make_discovery()
+        dr.agent_signals = {
+            "technical": {"signal": "BUY", "score": 72},
+            "sentiment": {"signal": "AVOID", "score": 30},
+        }
+        with patch("supabase.create_client", return_value=mock_client):
+            _save_discovery(dr)
+
+        meta = inserted_rows[0]["metadata"]
+        assert meta["catalysts"] == ["RSI 52 in range", "Revenue growth 22%"]
+        assert any("Sentiment agent flags AVOID" in r for r in meta["risks"])
 
     def test_exception_returns_none(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
