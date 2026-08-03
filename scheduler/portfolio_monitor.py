@@ -425,7 +425,6 @@ def _compute_correlation_pairs(
             yf_syms,
             period=f"{_CORR_LOOKBACK_DAYS}d",
             auto_adjust=True,
-            progress=False,
         )
         if raw.empty:
             return []
@@ -611,15 +610,19 @@ def _alert_exists(
     holding_id: str,
     alert_type: str,
     window_hours: int = _DEDUP_WINDOW_HOURS,
+    symbol: str = "",
 ) -> bool:
     """
     Return True if an unresolved alert of this (holding_id, alert_type)
     was already created in the last `window_hours` hours.
+    Also checks by symbol + alert_type as a belt-and-suspenders guard so that
+    schema mismatches on holding_id never cause duplicate alerts.
     """
     try:
         since = (
             datetime.now(timezone.utc) - timedelta(hours=window_hours)
         ).isoformat()
+        # Primary check: holding_id + alert_type
         resp = (
             client.table("portfolio_alerts")
             .select("id")
@@ -630,7 +633,23 @@ def _alert_exists(
             .limit(1)
             .execute()
         )
-        return bool(resp.data)
+        if bool(resp.data):
+            return True
+        # Secondary check: symbol + alert_type (catches duplicates from older rows
+        # where holding_id was not reliably stored)
+        if symbol:
+            resp2 = (
+                client.table("portfolio_alerts")
+                .select("id")
+                .eq("symbol", symbol)
+                .eq("alert_type", alert_type)
+                .eq("resolved", False)
+                .gte("created_at", since)
+                .limit(1)
+                .execute()
+            )
+            return bool(resp2.data)
+        return False
     except Exception as exc:
         log.debug("Alert dedup check failed: %s", exc)
         return False  # fail open: let the alert through if we can't check
@@ -879,7 +898,7 @@ def _analyse_holding(
     if stoploss and stoploss > 0 and price > 0:
         pct_above_sl = (price - stoploss) / stoploss * 100
         if 0 <= pct_above_sl < _STOPLOSS_PROXIMITY_PCT:
-            if not _alert_exists(client, holding_id, "STOPLOSS_PROXIMITY"):
+            if not _alert_exists(client, holding_id, "STOPLOSS_PROXIMITY", symbol=symbol):
                 alert_id = _create_alert(
                     client, holding_id, symbol,
                     severity   = "DANGER",
@@ -899,7 +918,7 @@ def _analyse_holding(
                     alerts_created.append("STOPLOSS_PROXIMITY")
         elif price <= stoploss:
             # Price has actually hit or breached stoploss
-            if not _alert_exists(client, holding_id, "STOPLOSS_HIT"):
+            if not _alert_exists(client, holding_id, "STOPLOSS_HIT", symbol=symbol):
                 alert_id = _create_alert(
                     client, holding_id, symbol,
                     severity   = "CRITICAL",

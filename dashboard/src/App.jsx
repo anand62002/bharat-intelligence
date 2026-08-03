@@ -1990,9 +1990,9 @@ function ARIAPanel({selectedRec,ariaContext,onClearContext,portfolio,onPortfolio
       const run=ariaContext.run;
       if(run){
         const dateStr=(run.runDate||run.run_date||"today").slice(0,10);
-        const screened=run.totalScreened??run.total_screened??0;
-        const passed=run.totalPassed??run.total_passed??0;
-        const discovered=run.totalDiscoveries??run.total_discoveries??0;
+        const screened=run.totalScreened||(run.sliceSymbols||run.slice_symbols||[]).length||run.total_screened||0;
+        const passed=run.totalPassed||(run.passedSymbols||run.passed_symbols||[]).length||run.total_passed||0;
+        const discovered=run.totalDiscoveries||(run.discoverySymbols||run.discovery_symbols||[]).length||run.total_discoveries||0;
         const topDisc=(run.discoverySymbols||run.discovery_symbols||[]).slice(0,5).join(", ")||"none";
         const cov=run.coverageStats||run.coverage_stats||{};
         intro=`Here's what the discovery engine ran on **${dateStr}**:\n\n• **${screened}** stocks screened from NSE universe\n• **${passed}** passed fundamental pre-screening filters\n• **${discovered}** promoted to discovery recommendations\n${topDisc!=="none"?`\nTop new finds: **${topDisc}**\n`:""}\nCoverage: ${cov.cycle_pct_complete||"?"}% of full NSE universe this cycle · ${cov.monthly_passes||"?"}× monthly passes\n\nWould you like me to explain the screening methodology, deep-dive on any of the new discoveries, or compare them to your portfolio?`;

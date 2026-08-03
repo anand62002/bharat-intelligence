@@ -1030,17 +1030,23 @@ async def get_discovery(
     db    = _db()
     today = date.today().isoformat()
 
+    # Primary query: all currently-valid discovery recs (valid_till >= today).
+    # This catches BOTH new insertions AND re-confirmed stocks within the 10-day
+    # cooldown window — re-confirmations UPDATE the row and refresh valid_till,
+    # but leave created_at unchanged, so a created_at>=today filter misses them.
     rows = (db.table("recommendations")
               .select("*")
               .eq("is_discovery", True)
-              .gte("created_at", today)
+              .gte("valid_till", today)
               .order("upside_pct", desc=True)
+              .limit(50)
               .execute()
               .data or [])
 
     if not rows:
-        # 14-day fallback — no valid_till filter so expired ideas still visible.
-        # The UI shows a subtle "stale" indicator via the validTill field.
+        # Fallback: last 14 days even if valid_till has lapsed — screener may not
+        # have run today (maintenance window, holiday, etc.). The UI shows a
+        # "stale" indicator via the validTill field when it's in the past.
         two_weeks_ago = (date.today() - timedelta(days=14)).isoformat()
         rows = (db.table("recommendations")
                   .select("*")
@@ -1631,11 +1637,12 @@ async def get_governance_alerts(
 
         _seen_alert_keys: set[str] = set()
         for row in raw_alerts:
-            # Dedup key: alert_type + holding_id (or symbol as fallback).
-            # NOTE: the column is 'holding_id', NOT 'portfolio_id'.
-            # Using symbol (not title) so that price-change between monitor runs
-            # doesn't cause the same stock to appear multiple times.
-            dedup_key = f"{row.get('alert_type','?')}::{row.get('holding_id') or row.get('symbol') or row.get('title','?')}"
+            # Dedup key: alert_type + symbol (most reliable across all alert types).
+            # holding_id is belt-and-suspenders but symbol is always set for
+            # per-holding alerts (STOPLOSS_HIT, STOPLOSS_PROXIMITY, CRITICAL_DANGER).
+            # Portfolio-level alerts (SECTOR_CONCENTRATION, CORR_CLUSTER) also set symbol.
+            # Never use title — it includes the live price and changes every monitor run.
+            dedup_key = f"{row.get('alert_type','?')}::{row.get('symbol') or row.get('holding_id') or row.get('title','?')}"
             if dedup_key in _seen_alert_keys:
                 continue
             _seen_alert_keys.add(dedup_key)

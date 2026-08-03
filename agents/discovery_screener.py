@@ -1204,10 +1204,27 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
         pos_label = None
         try:
             from agents.position_sizer import calc_position_size
+
+            # For CRITICAL tier: run warren_bot (24h Supabase cache — fast if recently analysed)
+            # to get proper DCF MOS + quality score so FULL allocation is reachable.
+            _warren_score: Optional[float] = None
+            _mos_pct:      Optional[float] = None
+            if tier == "CRITICAL":
+                try:
+                    from agents.warren_bot import analyse as warren_analyse
+                    _wb = warren_analyse(result.symbol)
+                    if _wb and not _wb.get("error") and _wb.get("signal") != "AVOID":
+                        _warren_score = _wb.get("score")
+                        _mos_pct      = _wb.get("margin_of_safety_pct")
+                except Exception as _we:
+                    log.debug("_save_discovery(%s): warren_bot sizing skipped: %s", result.symbol, _we)
+
             _sizing   = calc_position_size(
                 upside_pct   = result.upside_pct,
                 confidence   = result.upside_confidence,
                 action       = action,
+                mos_pct      = _mos_pct,
+                warren_score = _warren_score,
             )
             pos_pct   = _sizing["suggested_position_pct"]
             pos_label = _sizing["position_label"]
