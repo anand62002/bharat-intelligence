@@ -253,6 +253,43 @@ def _persist_resolution(input_sym: str, yf_sym: str, source: str = "auto") -> No
         log.debug("Symbol resolution persist skipped: %s", exc)
 
 
+def _llm_normalise_to_ticker(query: str) -> str | None:
+    """
+    Use Claude Haiku to convert a natural-language company name into the most
+    likely NSE/BSE ticker.  Called only for multi-word or non-alphanumeric inputs
+    that fail the standard OVERRIDES → probe path.
+
+    Returns a clean uppercase ticker (no suffix) e.g. "TATASTEEL", or None if
+    the model isn't confident or ANTHROPIC_API_KEY is not set.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        import anthropic as _ant
+        client = _ant.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=40,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"What is the NSE stock ticker symbol for \"{query}\"?\n"
+                    "Reply with ONLY the ticker in uppercase (e.g. TATASTEEL). "
+                    "If BSE-only, suffix with .BO. "
+                    "If you are not confident, reply with exactly: UNKNOWN"
+                ),
+            }],
+        )
+        ticker = (msg.content[0].text or "").strip().upper().split()[0]
+        if ticker and ticker != "UNKNOWN" and len(ticker) <= 20:
+            log.info("LLM normalised '%s' → %s", query, ticker)
+            return ticker
+    except Exception as exc:
+        log.debug("LLM ticker normalisation failed for '%s': %s", query, exc)
+    return None
+
+
 def _search_yf_symbol(query: str) -> str | None:
     """
     Use yf.Search to find a valid NSE/BSE ticker for a company name or alias.
@@ -358,8 +395,29 @@ def _resolve_yf_symbol(raw: str) -> str:
         except Exception:
             pass
 
-    # 6. yf.Search fallback — works for company names and brand aliases that
-    #    don't match any NSE symbol directly (e.g. "IHCL", "Bharat Seats")
+    # 6a. LLM normalisation — for multi-word / natural-language inputs that look
+    #     nothing like a ticker (e.g. "tata steel limited", "hdfc bank ltd").
+    #     Haiku converts the name to a clean NSE ticker, then we re-probe it.
+    if " " in raw or len(raw) > 20:
+        llm_ticker = _llm_normalise_to_ticker(raw)
+        if llm_ticker:
+            # Strip any suffix Haiku might have added (.NS/.BO)
+            llm_base = llm_ticker.replace(".NS", "").replace(".BO", "").strip()
+            suffix_from_llm = ".BO" if llm_ticker.endswith(".BO") else ".NS"
+            for candidate in (f"{llm_base}{suffix_from_llm}", f"{llm_base}.NS", f"{llm_base}.BO"):
+                try:
+                    hist = yf.Ticker(candidate).history(period="1d")
+                    close = hist["Close"].dropna()
+                    if not close.empty and float(close.iloc[-1]) > 0:
+                        log.info("Symbol resolved via LLM+probe: %s → %s", raw, candidate)
+                        _symbol_cache[key] = candidate
+                        _persist_resolution(sym, candidate, "llm")
+                        return candidate
+                except Exception:
+                    pass
+
+    # 6b. yf.Search fallback — works for company names and brand aliases that
+    #     don't match any NSE symbol directly (e.g. "IHCL", "Bharat Seats")
     search_result = _search_yf_symbol(raw)
     if search_result:
         log.info("Symbol resolved via yf.Search: %s → %s", raw, search_result)
@@ -1264,6 +1322,16 @@ async def resolve_symbol(
     yf_symbol = await loop.run_in_executor(None, _resolve_yf_symbol, q)
     price     = await loop.run_in_executor(None, _fetch_current_price, yf_symbol)
 
+    # Fetch company long name from yfinance info (best-effort)
+    def _get_name(sym: str) -> str | None:
+        try:
+            info = yf.Ticker(sym).info
+            return info.get("longName") or info.get("shortName") or None
+        except Exception:
+            return None
+
+    name = await loop.run_in_executor(None, _get_name, yf_symbol)
+
     # Derive a human-readable exchange label
     if yf_symbol.startswith("^"):
         exchange = "INDEX"
@@ -1279,6 +1347,7 @@ async def resolve_symbol(
     return {
         "input":      q,
         "yf_symbol":  yf_symbol,
+        "name":       name,
         "exchange":   exchange,
         "price":      price,
         "price_str":  f"₹{price:,.2f}" if price and exchange in ("NSE", "BSE", "INDEX") else (f"{price:.4f}" if price else None),

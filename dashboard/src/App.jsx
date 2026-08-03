@@ -2072,11 +2072,23 @@ IMPORTANT: Output ONLY ONE <portfolio_action> tag per response, at the very end.
 
 ON-DEMAND FULL ANALYSIS:
 When the user types "/analyse SYMBOL" or "run analysis on SYMBOL" or "full analysis of SYMBOL" or "analyse SYMBOL now" or similar intent to trigger a full agent analysis:
-1. First ask for confirmation: "I'll run a full 10-agent analysis on **SYMBOL** — this takes ~60 seconds and queries all agents (technical, fundamental, sentiment, institutional, macro, historical patterns, sector valuation, commodities, warren bot). Confirm? (yes/no)"
-2. Output <confirm_analyse>SYMBOL</confirm_analyse> at the end of your confirmation message
-3. If the user says yes/confirm/proceed, output <run_analyse>SYMBOL</run_analyse> on its own line
-4. The system will run the analysis and show the result automatically
-5. If the user says no/cancel, acknowledge and move on
+1. ALWAYS normalise the company name to its NSE ticker symbol first. Use your knowledge of Indian stocks:
+   — "tata steel" / "tata steel limited" / "tata steel ltd" → TATASTEEL
+   — "hdfc bank" / "hdfcbank" / "hdfc" → HDFCBANK
+   — "reliance" / "ril" / "reliance industries" → RELIANCE
+   — "infosys" / "infy" → INFY
+   — "wipro limited" → WIPRO
+   — "tata motors" → TATAMOTORS
+   — "bajaj finance" → BAJFINANCE
+   — "asian paints" → ASIANPAINT
+   — "zomato" → ETERNAL (rebranded 2025)
+   — "l&t" / "larsen and toubro" → LT
+   — If unsure, use your best guess at the NSE ticker — the system will validate it
+2. Ask for confirmation showing the normalised ticker: "I'll run a full 10-agent analysis on **TATASTEEL** — this takes ~60 seconds and queries all agents. Confirm? (yes/no)"
+3. Output <confirm_analyse>TATASTEEL</confirm_analyse> using the NORMALISED ticker (not the raw user text)
+4. If the user says yes/confirm/proceed, output <run_analyse>TATASTEEL</run_analyse> with the same normalised ticker
+5. The system will run the analysis and show the result automatically
+6. If the user says no/cancel, acknowledge and move on
 
 WARREN BOT ON-DEMAND ANALYSIS:
 When the user asks to "analyse [stock] like Buffett", "what would Jhunjhunwala think of [stock]", "Buffett analysis of [stock]", or similar:
