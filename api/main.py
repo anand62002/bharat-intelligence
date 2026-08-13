@@ -1763,6 +1763,29 @@ async def get_system_health(
     # ── Supabase ──────────────────────────────────────────────────────────────
     checks.append(_ok("Supabase", "Connection active — this response proves it"))
 
+    # ── P7-H fundamentals memoisation ─────────────────────────────────────────
+    # Reports what the intra-run cache saved in THIS process. On the web dyno
+    # that covers on-demand /api/analyse runs; the worker logs its own totals
+    # per scheduled run.
+    try:
+        from data.run_cache import stats as _rc_stats
+        rc = _rc_stats()
+        if rc["attempted_calls"]:
+            detail = (
+                f"{rc['saved_calls']}/{rc['attempted_calls']} remote fundamentals "
+                f"calls avoided ({rc['saved_pct']}%) — {rc['entries']} cached"
+            )
+            checks.append(_ok("Fundamentals cache (P7-H)", detail))
+        else:
+            checks.append(_info(
+                "Fundamentals cache (P7-H)",
+                "Active — no fundamentals fetched in this process yet",
+                "Nothing to do; populates on the next on-demand analysis",
+            ))
+    except Exception as exc:
+        checks.append(_warn("Fundamentals cache (P7-H)", f"Stats unavailable: {exc}",
+                            "Check data/run_cache.py import"))
+
     # ── Last daily pipeline run ───────────────────────────────────────────────
     # daily_runs schema: run_date, symbols_processed, errors (INTEGER count),
     # duration_seconds, status (OK | WARNING | DATA_DEGRADATION), created_at.
@@ -2093,7 +2116,11 @@ async def debug_screener(
     if screener_working:
         try:
             from data.fetchers import get_screener_data
-            data_sample = get_screener_data(sym)
+            # Deliberately bypass the P7-H memo cache: this endpoint exists to
+            # test live screener.in reachability, and a cached hit would report
+            # success for a source that is currently blocked.
+            _uncached = getattr(get_screener_data, "_run_cache_uncached", get_screener_data)
+            data_sample = _uncached(sym)
             if data_sample and data_sample.get("data_source") == "yfinance_fallback":
                 screener_working = False
                 fallback_used = True
@@ -3035,12 +3062,26 @@ async def on_demand_analyse(
     agent_results = (state.get("symbol_results") or {}).get(yf_symbol, {})
 
     if not recs:
-        # No recommendation produced — return agent signals at minimum
+        # No recommendation produced. This is either a genuine suppression
+        # (validation gate) or a crash inside synthesise_node, which appends to
+        # state["errors"] and continues. Reporting both as "suppressed" made a
+        # real bug (float(None) on a Claude JSON null) indistinguishable from
+        # normal behaviour, so surface the actual reason.
+        pipeline_errors = [
+            str(e) for e in (state.get("errors") or [])
+            if yf_symbol.split(".")[0] in str(e) or yf_symbol in str(e)
+        ] or [str(e) for e in (state.get("errors") or [])]
+        if pipeline_errors:
+            detail = f"Analysis failed during synthesis: {pipeline_errors[0]}"
+            log.error("On-demand analysis produced no rec for %s: %s", yf_symbol, pipeline_errors)
+        else:
+            detail = "Synthesis was suppressed or no actionable signal produced"
         return {
             "symbol":    raw,
             "yf_symbol": yf_symbol,
             "status":    "NO_RECOMMENDATION",
-            "detail":    "Synthesis was suppressed or no actionable signal produced",
+            "detail":    detail,
+            "errors":    pipeline_errors,
             "agents":    {k: {"signal": v.get("signal"), "score": v.get("score"),
                               "detail": _build_rationale(k, v)}
                           for k, v in agent_results.items()},

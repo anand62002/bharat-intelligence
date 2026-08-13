@@ -154,6 +154,31 @@ def _load_semantic_layer() -> str:
         return ""
 
 
+def _num(value, default: float = 0.0) -> float:
+    """
+    Coerce a synthesis/agent field to float, treating None and unparseable
+    values as `default`.
+
+    Claude routinely emits explicit JSON nulls for numeric fields that do not
+    apply to the call it made — `"target": null` and `"upside_pct": null` on a
+    HOLD, for instance. `dict.get(key, default)` returns None in that case (the
+    key *is* present), so `float(...)` raised
+    "float() argument must be a string or a real number, not 'NoneType'"
+    and the whole symbol was dropped from the run. Every numeric read out of
+    synthesis_data must go through this helper.
+    """
+    if value is None:
+        return float(default)
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    # NaN/inf are equally unusable downstream (round() and Supabase both choke)
+    if f != f or f in (float("inf"), float("-inf")):
+        return float(default)
+    return f
+
+
 def _normalise_weights(raw: dict[str, float]) -> dict[str, float]:
     """
     Convert raw accuracy_90d scores per agent into normalised weights
@@ -324,7 +349,7 @@ def _apply_consensus_gate(
 
     Returns modified synthesis_data dict (may be same dict mutated in-place).
     """
-    action = str(synthesis_data.get("action", "HOLD")).upper()
+    action = str(synthesis_data.get("action") or "HOLD").upper()
     if action not in ("BUY",):
         return synthesis_data  # only gate BUY promotions
 
@@ -343,7 +368,8 @@ def _apply_consensus_gate(
     if n_bull >= 2:
         return synthesis_data  # solid consensus — no adjustment needed
 
-    confidence = float(synthesis_data.get("confidence", 65.0))
+    confidence = _num(synthesis_data.get("confidence"), 65.0)
+    _conf_before = confidence
     note       = ""
 
     if n_bull == 0:
@@ -358,7 +384,7 @@ def _apply_consensus_gate(
         )
         log.info(
             "[%s] consensus gate: 0 bullish agents → downgraded BUY→HOLD (confidence %.0f→%.0f)",
-            symbol, float(synthesis_data.get("confidence", 65)), confidence,
+            symbol, _conf_before, confidence,
         )
 
     elif n_bull == 1 and n_bear >= 2:
@@ -386,7 +412,7 @@ def _apply_consensus_gate(
         )
         log.info(
             "[%s] consensus gate: 1 bullish agent (%s), rest neutral — confidence %.0f→%.0f",
-            symbol, bull_signals[0], float(synthesis_data.get("confidence", 65)), confidence,
+            symbol, bull_signals[0], _conf_before, confidence,
         )
 
     synthesis_data["confidence"] = round(confidence, 2)
@@ -491,7 +517,14 @@ def _log_suppressed_synthesis(
         client.table("recommendations").insert(row).execute()
         log.info("[%s] Suppressed rec logged to DB for human review", symbol)
     except Exception as exc:
-        log.warning("[%s] Failed to log suppressed rec: %s", symbol, exc)
+        if "recommendations_action_check" in str(exc):
+            log.warning(
+                "[%s] Suppressed rec rejected — the action CHECK constraint does not "
+                "allow 'SUPPRESSED'. Run db/migrations/allow_suppressed_action.sql.",
+                symbol,
+            )
+        else:
+            log.warning("[%s] Failed to log suppressed rec: %s", symbol, exc)
 
 
 def _build_recommendation(
@@ -512,9 +545,9 @@ def _build_recommendation(
     tech_detail = (tech.get("detail") or {})
     targets     = tech_detail.get("targets", {}) if isinstance(tech_detail, dict) else {}
 
-    action     = str(synthesis_data.get("action", "HOLD")).upper()
-    confidence = float(synthesis_data.get("confidence", composite))
-    risk_score = float(synthesis_data.get("risk_score", 100.0 - composite))
+    action     = str(synthesis_data.get("action") or "HOLD").upper()
+    confidence = _num(synthesis_data.get("confidence"), composite)
+    risk_score = _num(synthesis_data.get("risk_score"), 100.0 - composite)
     gov_screen = None   # set below; default None if governance screener fails
 
     # ── Governance red-flag adjustment ────────────────────────────────────────
@@ -532,32 +565,52 @@ def _build_recommendation(
         log.debug("[%s] governance_screener failed (non-blocking): %s", symbol, exc)
 
     def _f(key: str, *fallbacks) -> Optional[float]:
-        v = synthesis_data.get(key)
-        if v is not None:
-            return float(v)
-        for fb in fallbacks:
-            if fb is not None:
-                return float(fb)
+        """First non-None of synthesis_data[key] then the fallbacks, as float.
+
+        Unlike _num() this legitimately returns None — entry/target/stoploss are
+        nullable in the schema (Claude sends null on SELL/AVOID) and must stay
+        null rather than collapse to 0.0.
+        """
+        for v in (synthesis_data.get(key), *fallbacks):
+            if v is None:
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f == f:          # skip NaN
+                return f
         return None
 
     entry_low   = _f("entry_low",  valuation.get("entry_low"))
     entry_high  = _f("entry_high", valuation.get("entry_high"))
     target      = _f("target",     valuation.get("target"), targets.get("target"))
     stoploss    = _f("stoploss",   targets.get("stoploss"))
-    horizon_days      = int(synthesis_data.get("horizon_days") or 180)
-    upside_pct        = float(synthesis_data.get("upside_pct",
-                              fund.get("upside_pct") or tech.get("upside_pct") or 0))
-    upside_confidence = float(synthesis_data.get("upside_confidence", confidence))
-    danger_drop_pct   = float(synthesis_data.get("danger_drop_pct",
-                              fund.get("danger_drop_pct") or 0))
-    danger_confidence = float(synthesis_data.get("danger_confidence",
-                              fund.get("danger_confidence") or 0))
+    # NOTE: every read below must use _num()/_f() — synthesis_data values can be
+    # explicit JSON nulls, which dict.get(key, default) does NOT replace.
+    horizon_days      = int(_num(synthesis_data.get("horizon_days"), 180) or 180)
+    upside_pct        = _num(synthesis_data.get("upside_pct"),
+                             _num(fund.get("upside_pct"), _num(tech.get("upside_pct"), 0.0)))
+    upside_confidence = _num(synthesis_data.get("upside_confidence"), confidence)
+    danger_drop_pct   = _num(synthesis_data.get("danger_drop_pct"),
+                             _num(fund.get("danger_drop_pct"), 0.0))
+    danger_confidence = _num(synthesis_data.get("danger_confidence"),
+                             _num(fund.get("danger_confidence"), 0.0))
 
-    headline = synthesis_data.get(
-        "headline",
-        f"{action}: {symbol} — {upside_pct:.0f}% upside, {confidence:.0f}% confidence",
+    # Claude sometimes gives a target but leaves upside_pct null. Derive it from
+    # the target rather than publishing a card that says "0% upside" next to a
+    # concrete price target.
+    if not upside_pct and target:
+        _tech_ind = tech_detail.get("indicators", {}) if isinstance(tech_detail, dict) else {}
+        _cur = _f("current_price", valuation.get("current_price"),
+                  _tech_ind.get("current_price") if isinstance(_tech_ind, dict) else None)
+        if _cur and _cur > 0:
+            upside_pct = round((target - _cur) / _cur * 100.0, 2)
+
+    headline = synthesis_data.get("headline") or (
+        f"{action}: {symbol} — {upside_pct:.0f}% upside, {confidence:.0f}% confidence"
     )
-    summary  = synthesis_data.get("synthesis", "")
+    summary  = synthesis_data.get("synthesis") or ""
 
     from agents.rationale import build_rationale
 
@@ -1183,8 +1236,8 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             _data_quality = _fund_detail.get("data_quality") or \
                             (agent_results.get("fundamental", {}) or {}).get("data_quality")
             if _years_avail is not None and _years_avail < 5:
-                _old_conf = synthesis_data.get("confidence", 50)
-                synthesis_data["confidence"] = min(float(_old_conf), 60.0)
+                _old_conf = _num(synthesis_data.get("confidence"), 50.0)
+                synthesis_data["confidence"] = min(_old_conf, 60.0)
                 _ddw = (
                     f"\n⚠ DATA DENSITY WARNING: Only {_years_avail} years of fundamental "
                     f"history available (minimum 5 required for reliable CAGR/DCF). "
@@ -1196,8 +1249,8 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 log.warning("[%s] P7-C data density: only %d years available — confidence capped at 60",
                             symbol, _years_avail)
             elif _data_quality == "ESTIMATED":
-                _old_conf = synthesis_data.get("confidence", 50)
-                synthesis_data["confidence"] = min(float(_old_conf), 65.0)
+                _old_conf = _num(synthesis_data.get("confidence"), 50.0)
+                synthesis_data["confidence"] = min(_old_conf, 65.0)
                 _eq = ("\n⚠ ESTIMATED DATA: Fundamental figures sourced from yfinance fallback "
                        "(screener.in unavailable). Treat specific ratio values with reduced confidence.\n")
                 synthesis_data["synthesis"] = _eq + (synthesis_data.get("synthesis") or "")
@@ -1232,7 +1285,7 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                     synthesis_data["synthesis"] = eg_line + (synthesis_data.get("synthesis") or "")
                     if eg["warning_level"] == "CRITICAL":
                         synthesis_data["confidence"] = max(
-                            0, float(synthesis_data.get("confidence", 50)) - 20
+                            0.0, _num(synthesis_data.get("confidence"), 50.0) - 20
                         )
             except Exception as _eg_exc:
                 log.debug("[%s] Earnings guard skipped: %s", symbol, _eg_exc)
@@ -1998,7 +2051,12 @@ async def run_pipeline(
         "data_quality_summary": {},
     }
 
-    return await graph.ainvoke(initial_state)
+    # P7-H: one cache scope per pipeline run. Clearing on entry means a run
+    # never inherits another run's fundamentals; the exit log reports how many
+    # remote fetches the memoisation avoided.
+    from data import run_cache
+    with run_cache.scope("orchestrator/on_demand" if on_demand else "orchestrator"):
+        return await graph.ainvoke(initial_state)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

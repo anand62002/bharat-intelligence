@@ -18,6 +18,8 @@ import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
 
+from data.run_cache import memoise_run   # P7-H intra-run memoisation
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
@@ -323,7 +325,24 @@ def get_ohlcv(symbol: str, period: str = "1y"):
             log.warning("get_ohlcv: no data returned for %s (period=%s)", resolved, period)
             return None
         df.index = df.index.tz_localize(None)
-        return df[["Open", "High", "Low", "Close", "Volume"]]
+        df = df[["Open", "High", "Low", "Close", "Volume"]]
+        # yfinance 1.2.x appends a partial bar for the current session that can
+        # carry Volume but NaN OHLC (seen intraday and shortly after close).
+        # Downstream every consumer does close.iloc[-1], so that NaN silently
+        # became the "current price" — the technical agent's completeness check
+        # then failed on "Current close price" and returned INSUFFICIENT_DATA for
+        # every symbol. Drop price-less rows here, once, for all callers.
+        _before = len(df)
+        df = df.dropna(subset=["Close"])
+        if len(df) < _before:
+            log.debug(
+                "get_ohlcv(%s): dropped %d row(s) with NaN Close (partial bar)",
+                resolved, _before - len(df),
+            )
+        if df.empty:
+            log.warning("get_ohlcv: all rows had NaN Close for %s (period=%s)", resolved, period)
+            return None
+        return df
     except Exception as e:
         log.error("get_ohlcv(%s): %s", resolved, e)
         return None
@@ -1067,6 +1086,10 @@ def get_bse_announcements(symbol: str = "", hours: int = 24) -> list[dict]:
 
 # ─── 5. SCREENER DATA ────────────────────────────────────────────────────────
 
+# P7-H: memoised for the duration of a run. fundamental, warren_bot,
+# mgmt_quality and governance_screener each fetch the same symbol — the first
+# three concurrently — so without this one symbol costs 4 identical requests.
+@memoise_run()
 def get_screener_data(symbol: str) -> dict | None:
     """
     Scrape key fundamentals from screener.in for an NSE-listed company.
@@ -1952,6 +1975,11 @@ def _parse_screener_excel(excel_bytes: bytes, symbol: str) -> dict | None:
     }
 
 
+# P7-H: memoised — warren_bot, mgmt_quality, governance_screener and
+# insider_signal (invoked twice, by sentiment and by institutional) all pull the
+# same multi-year history for one symbol. This is also the most expensive call
+# in the chain, since a thin HTML parse triggers the Excel-export fallback.
+@memoise_run()
 def get_screener_history(symbol: str) -> dict | None:
     """
     Fetch multi-year historical financial data from screener.in for a company.

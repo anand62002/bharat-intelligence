@@ -212,6 +212,20 @@ Stock analysis/
 │   │                           # get_gift_nifty_signal() — 06:30–09:15 IST pre-market window
 │   ├── impact_cost.py          # Market impact-cost (slippage) estimator from intraday OHLCV
 │   │                           # estimate_impact_cost(symbol, trade_value_inr) → liquidity_tier + impact_cost_pct
+│   ├── run_cache.py            # P7-H: intra-run memoisation for remote fundamentals
+│   │                           # @memoise_run() wraps get_screener_data + get_screener_history
+│   │                           # Per-KEY locking + double-checked reads: fundamental, warren_bot
+│   │                           #   and mgmt_quality run in ONE asyncio.gather (orchestrator:624),
+│   │                           #   so concurrent duplicate calls must collapse into one fetch —
+│   │                           #   a plain memo dict would miss in all three threads
+│   │                           # Returns deepcopies (caller mutation can't poison the entry)
+│   │                           # Caches None (a source that just failed will fail again);
+│   │                           #   never caches exceptions
+│   │                           # TTL 1800s default, RUN_CACHE_TTL_S to override
+│   │                           # scope()/scoped() clear at run start + log the saving;
+│   │                           #   wired into run_pipeline() and run_discovery()
+│   │                           # stats() → hits/collapsed/misses/saved_pct; shown on
+│   │                           #   /api/system/health. Measured: 9 → 2 fetches per symbol
 │   ├── proxy_session.py        # BF-15/15b: Outbound proxy abstraction for Railway IP blocks
 │   │                           # apply_proxy_to_session(session) — routes via SCRAPERAPI_KEY
 │   │                           # (rotating residential, $29/mo) or FIXIE_URL (static, $25/mo)
@@ -544,6 +558,10 @@ npm start          # CRA dev server on port 3000
 - **IS_LIVE / mock data as fallback.** `IS_LIVE = Boolean(API_URL)`. When live, states init empty and fill from API. When no backend (local dev), mock constants are used. No mock data shown in production.
 - **yf_symbol stored separately.** `portfolio_holdings` has both `symbol` (display, e.g. `RELIANCE`) and `yf_symbol` (e.g. `RELIANCE.NS`). GET /api/portfolio uses `yf_symbol` to refresh prices.
 - **60s market cache.** `_market_cache` + `_market_cache_ts` globals in `api/main.py` prevent hammering yfinance on every dashboard render.
+- **Fundamentals are fetched once per symbol per run (P7-H).** `get_screener_data` / `get_screener_history` are wrapped in `@memoise_run()` (`data/run_cache.py`). Five consumers — fundamental, warren_bot, mgmt_quality, governance_screener, and insider_signal (called twice, by sentiment and institutional) — used to issue ~9 identical requests per symbol. **When adding a new consumer of fundamentals, call the fetcher directly; do not add your own caching or thread a result through.** The cache is per-key-locked precisely because the first three run concurrently in one `asyncio.gather`. New pipeline entry points should wrap themselves in `run_cache.scope(...)` / `@run_cache.scoped(...)` so each run starts cold and logs its saving.
+- **Discovery valid_till, not created_at.** `GET /api/discovery` filters on `valid_till >= today`. Re-confirmations within the 10-day cooldown UPDATE the existing row and refresh `valid_till` but leave `created_at` at the original insert date, so a `created_at` filter silently drops them (BF-22).
+- **On-demand analysis runs a trimmed graph.** `POST /api/analyse` calls `run_pipeline(on_demand=True)`, which drops `sector_pe_snapshot`, `save_recs`, `monitor` and `log_run`. Ad-hoc single-symbol runs must never write a `daily_runs` row — it pollutes the run log and skews the P7-F data-quality percentages.
+- **Agent scores always ship with a reason.** `agents/rationale.py` templates a 50–100 word explanation from the agent's own numbers — deliberately no LLM call, so it costs nothing per screened stock and cannot cite a figure the agent didn't produce. Stored as `agent_signals[name].reason`, surfaced to React as `agents[name].detail`.
 - **Discovery price refresh.** `GET /api/discovery` refreshes live prices on every call (same pattern as GET /api/portfolio). `metadata.price` in recommendations is the snapshot at write-time; overwritten on each API response.
 - **Discovery valid_till filter.** 7-day fallback query uses `.gte("valid_till", today)` to exclude expired recs.
 - **Governance alerts have no dedicated table.** Aggregated on the fly from `portfolio_alerts` (CRITICAL/DANGER severity) + `agent_performance` (DEGRADING trend).

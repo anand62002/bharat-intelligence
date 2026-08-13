@@ -43,6 +43,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from data.fetchers import get_ohlcv, get_nse_fii_dii, get_screener_data  # noqa: E402
+from data import run_cache as _run_cache  # noqa: E402  — P7-H
 from agents.base import DataCompletenessValidator  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -1424,6 +1425,10 @@ def _sector_from_fundamental(agent_results: dict) -> str:
 # Main discovery run
 # ──────────────────────────────────────────────────────────────────────────────
 
+# P7-H: one cache scope for the whole discovery run. Pre-screen fetches each
+# slice symbol once; the deep-analysis phase then re-reads the same symbols
+# ~9 times each, so those all resolve from cache.
+@_run_cache.scoped("discovery")
 def run_discovery(
     max_candidates:     int   = _MAX_CANDIDATES_DEFAULT,
     max_prescreen:      int   = _MAX_PRESCREEN_DEFAULT,

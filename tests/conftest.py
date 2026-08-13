@@ -18,3 +18,21 @@ def pytest_configure(config):
         "integration: marks tests that make real network/API calls "
         "(skipped unless -m integration is passed explicitly)",
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_run_cache():
+    """
+    Clear the P7-H fundamentals memo cache between tests.
+
+    `get_screener_data` / `get_screener_history` are memoised per run
+    (data/run_cache.py). Tests routinely call them with the same symbol but
+    different mocked HTML, so without this the second test in a class is served
+    the first test's cached result and fails for reasons unrelated to its
+    subject. Production is unaffected — nothing there re-fetches one symbol
+    expecting different data inside the TTL — but tests must stay isolated.
+    """
+    from data import run_cache
+    run_cache.clear()
+    yield
+    run_cache.clear()
