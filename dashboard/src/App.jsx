@@ -2078,7 +2078,7 @@ When the user types "/analyse SYMBOL" or "run analysis on SYMBOL" or "full analy
    — "zomato" → ETERNAL (rebranded 2025)
    — "l&t" / "larsen and toubro" → LT
    — If unsure, use your best guess at the NSE ticker — the system will validate it
-2. Ask for confirmation showing the normalised ticker: "I'll run a full 10-agent analysis on **TATASTEEL** — this takes ~60 seconds and queries all agents. Confirm? (yes/no)"
+2. Ask for confirmation showing the normalised ticker: "I'll run a full 10-agent analysis on **TATASTEEL** — this takes 2–4 minutes and queries all agents. Confirm? (yes/no)"
 3. Output <confirm_analyse>TATASTEEL</confirm_analyse> using the NORMALISED ticker (not the raw user text)
 4. If the user says yes/confirm/proceed, output <run_analyse>TATASTEEL</run_analyse> with the same normalised ticker
 5. The system will run the analysis and show the result automatically
@@ -2197,7 +2197,7 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
         }
         setAnalyseResolvedInfo(null);
 
-        setMessages(p=>[...p,{role:"assistant",text:`⏳ Running full 10-agent analysis on **${dispLabel}**… this takes ~60 seconds.`}]);
+        setMessages(p=>[...p,{role:"assistant",text:`⏳ Running full 10-agent analysis on **${dispLabel}**… this takes 2–4 minutes (sentiment and synthesis are the slow steps). Please keep this tab open.`}]);
         try{
           const aRes=await apiFetch("/api/analyse",{method:"POST",body:JSON.stringify({symbol:yfSym})});
           if(aRes?.status==="OK"&&aRes?.analysis){

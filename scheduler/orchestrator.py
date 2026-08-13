@@ -1885,16 +1885,44 @@ async def run_discovery_node(state: OrchestratorState) -> dict:
 # Graph construction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_graph():
-    """Compile the LangGraph orchestration pipeline."""
+def _build_graph(on_demand: bool = False):
+    """
+    Compile the LangGraph orchestration pipeline.
+
+    on_demand=True builds a trimmed graph for single-symbol ad-hoc analysis
+    (the ARIA /analyse command). It drops four nodes that only make sense for
+    the scheduled market-wide run:
+
+      sector_pe_snapshot — market-wide NSE sector PE fetch + daily snapshot
+                           write; irrelevant to one stock and network-slow
+      save_recs          — an on-demand analysis is explicitly not published
+      monitor            — re-prices and alerts on every portfolio holding
+      log_run            — writes a daily_runs row; a 1-symbol ad-hoc run would
+                           pollute the run log and skew the P7-F data-quality
+                           percentages
+
+    Dropping these keeps the analysis itself identical while removing the work
+    that was pushing on-demand requests past their timeout.
+    """
     builder = StateGraph(OrchestratorState)
 
-    builder.add_node("sector_pe_snapshot", sector_pe_snapshot_node)
     builder.add_node("load_symbols",       load_symbols_node)
     builder.add_node("load_weights",       load_weights_node)
     builder.add_node("run_agents",         run_agents_node)
     builder.add_node("synthesise",         synthesise_node)
     builder.add_node("fact_check",         fact_check_node)
+
+    builder.add_edge("load_symbols",       "load_weights")
+    builder.add_edge("load_weights",       "run_agents")
+    builder.add_edge("run_agents",         "synthesise")
+    builder.add_edge("synthesise",         "fact_check")
+
+    if on_demand:
+        builder.set_entry_point("load_symbols")
+        builder.add_edge("fact_check", END)
+        return builder.compile()
+
+    builder.add_node("sector_pe_snapshot", sector_pe_snapshot_node)
     builder.add_node("save_recs",          save_recs_node)
     builder.add_node("monitor",            monitor_node)
     builder.add_node("log_run",            log_run_node)
@@ -1904,10 +1932,6 @@ def _build_graph():
 
     builder.set_entry_point("sector_pe_snapshot")
     builder.add_edge("sector_pe_snapshot", "load_symbols")
-    builder.add_edge("load_symbols",       "load_weights")
-    builder.add_edge("load_weights",       "run_agents")
-    builder.add_edge("run_agents",         "synthesise")
-    builder.add_edge("synthesise",         "fact_check")
     builder.add_edge("fact_check",         "save_recs")
     builder.add_edge("save_recs",          "monitor")
     builder.add_edge("monitor",            "log_run")
@@ -1923,9 +1947,10 @@ def _build_graph():
 async def run_pipeline(
     dry_run:          bool       = False,
     symbols_override: list[str]  | None = None,
+    on_demand:        bool       = False,
 ) -> OrchestratorState:
     """
-    Execute the full orchestration pipeline once and return the final state.
+    Execute the orchestration pipeline once and return the final state.
 
     Args:
         dry_run:          If True, skip all Supabase writes and print results.
@@ -1933,8 +1958,12 @@ async def run_pipeline(
                           exactly these symbols. Useful for ad-hoc testing of
                           a single stock without touching WATCHLIST or the DB.
                           Example: symbols_override=["PREMEXPLN.NS"]
+        on_demand:        If True, run the trimmed single-symbol graph — see
+                          _build_graph(). Skips the market-wide sector PE
+                          snapshot, portfolio monitor, rec persistence and
+                          daily_runs logging. Used by POST /api/analyse.
     """
-    graph = _build_graph()
+    graph = _build_graph(on_demand=on_demand)
 
     # Resolve and validate any override symbols up-front
     preloaded: list[str] = []

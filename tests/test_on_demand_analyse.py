@@ -165,3 +165,83 @@ class TestOnDemandAnalyseSymbolResolution:
             response = await on_demand_analyse(mock_request)
 
         assert response["yf_symbol"] == "ETERNAL.NS"
+
+
+class TestOnDemandPipelineShape:
+    """Regressions for the two bugs that made ARIA /analyse fail in production."""
+
+    def test_on_demand_graph_drops_market_wide_nodes(self):
+        """
+        The trimmed graph must exclude the four nodes that only make sense for
+        the scheduled market-wide run. Including them pushed a single-symbol
+        request past its timeout and wrote a bogus daily_runs row.
+        """
+        from scheduler.orchestrator import _build_graph
+
+        def _nodes(on_demand):
+            g = _build_graph(on_demand=on_demand)
+            return {n for n in g.get_graph().nodes if not n.startswith("__")}
+
+        full, lean = _nodes(False), _nodes(True)
+
+        for dropped in ("sector_pe_snapshot", "save_recs", "monitor", "log_run"):
+            assert dropped in full, f"{dropped} should exist in the scheduled graph"
+            assert dropped not in lean, f"{dropped} must not run for on-demand analysis"
+
+        # The analysis itself must be unchanged.
+        for kept in ("load_symbols", "load_weights", "run_agents", "synthesise", "fact_check"):
+            assert kept in lean
+
+    @pytest.mark.anyio
+    async def test_agents_read_from_symbol_results(self):
+        """
+        The endpoint previously read state["agent_results"], a key the
+        orchestrator never sets (it uses "symbol_results"), so the agents dict
+        came back empty even on a fully successful run.
+        """
+        from api.main import on_demand_analyse
+
+        mock_request = MagicMock()
+        mock_request.json = AsyncMock(return_value={"symbol": "TATASTEEL"})
+
+        state = {
+            "recommendations": [],
+            "symbol_results": {
+                "TATASTEEL.NS": {
+                    "fundamental": {"signal": "BUY", "score": 72, "detail": {}},
+                    "technical":   {"signal": "HOLD", "score": 55, "detail": {}},
+                }
+            },
+        }
+
+        with patch("api.main._resolve_yf_symbol", return_value="TATASTEEL.NS"), \
+             patch("api.main.asyncio.wait_for", new_callable=AsyncMock, return_value=state):
+            response = await on_demand_analyse(mock_request)
+
+        assert set(response["agents"]) == {"fundamental", "technical"}
+        assert response["agents"]["fundamental"]["score"] == 72
+        # Every agent card carries its plain-English justification.
+        assert response["agents"]["fundamental"]["detail"]
+
+    @pytest.mark.anyio
+    async def test_pipeline_invoked_in_on_demand_mode(self):
+        """run_pipeline must be called with on_demand=True and dry_run=True."""
+        import api.main as main_mod
+
+        mock_request = MagicMock()
+        mock_request.json = AsyncMock(return_value={"symbol": "TATASTEEL"})
+
+        seen = {}
+
+        async def fake_pipeline(**kwargs):
+            seen.update(kwargs)
+            return {"recommendations": [], "symbol_results": {}}
+
+        import scheduler.orchestrator as orch
+        with patch("api.main._resolve_yf_symbol", return_value="TATASTEEL.NS"), \
+             patch.object(orch, "run_pipeline", fake_pipeline):
+            await main_mod.on_demand_analyse(mock_request)
+
+        assert seen.get("on_demand") is True
+        assert seen.get("dry_run") is True
+        assert seen.get("symbols_override") == ["TATASTEEL.NS"]

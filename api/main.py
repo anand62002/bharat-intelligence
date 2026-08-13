@@ -3007,20 +3007,32 @@ async def on_demand_analyse(
     yf_symbol = _resolve_yf_symbol(raw)
     log.info("On-demand analysis triggered: %s -> %s", raw, yf_symbol)
 
+    # A single-symbol run measured ~173s of pure agent+synthesis work (sentiment
+    # alone is ~75s because of RSS translation and headline classification), so
+    # the old 180s ceiling was effectively guaranteed to trip. on_demand=True
+    # also drops the sector-PE snapshot, portfolio monitor, rec persistence and
+    # daily_runs logging, none of which an ad-hoc analysis needs.
+    _ANALYSE_TIMEOUT_S = 270          # kept under Railway's 300s edge timeout
     try:
         from scheduler.orchestrator import run_pipeline
         state = await asyncio.wait_for(
-            run_pipeline(dry_run=True, symbols_override=[yf_symbol]),
-            timeout=180,  # 3-minute timeout
+            run_pipeline(dry_run=True, symbols_override=[yf_symbol], on_demand=True),
+            timeout=_ANALYSE_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail=f"Analysis timed out after 180s for {raw}")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Analysis timed out after {_ANALYSE_TIMEOUT_S}s for {raw}",
+        )
     except Exception as exc:
         log.error("On-demand analysis failed for %s: %s", raw, exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
 
     recs = state.get("recommendations") or []
-    agent_results = (state.get("agent_results") or {}).get(yf_symbol, {})
+    # The orchestrator stores per-symbol agent output under "symbol_results";
+    # reading a non-existent "agent_results" key meant the agents dict in this
+    # response was always empty, even on a fully successful analysis.
+    agent_results = (state.get("symbol_results") or {}).get(yf_symbol, {})
 
     if not recs:
         # No recommendation produced — return agent signals at minimum
