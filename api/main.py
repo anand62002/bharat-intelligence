@@ -58,6 +58,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from supabase import Client, create_client
 
+from agents.rationale import build_rationale as _build_rationale
+
 load_dotenv()
 
 log = logging.getLogger(__name__)
@@ -696,6 +698,16 @@ def _transform_recommendation(row: dict) -> dict:
         agents = {k: v for k, v in agent_signals.items() if k != "warren_bot"}
     else:
         agents = agent_signals
+
+    # The dashboard's per-agent breakdown renders `detail` under each gauge.
+    # Recommendations store the plain-English justification as `reason`
+    # (agents/rationale.py), so surface it under the key the UI already reads.
+    if isinstance(agents, dict):
+        agents = {
+            k: ({**v, "detail": v.get("detail") or v.get("reason") or ""}
+                if isinstance(v, dict) else v)
+            for k, v in agents.items()
+        }
 
     return {
         "id":               row["id"],
@@ -3017,7 +3029,9 @@ async def on_demand_analyse(
             "yf_symbol": yf_symbol,
             "status":    "NO_RECOMMENDATION",
             "detail":    "Synthesis was suppressed or no actionable signal produced",
-            "agents":    {k: {"signal": v.get("signal"), "score": v.get("score")} for k, v in agent_results.items()},
+            "agents":    {k: {"signal": v.get("signal"), "score": v.get("score"),
+                              "detail": _build_rationale(k, v)}
+                          for k, v in agent_results.items()},
         }
 
     rec = recs[0]
@@ -3041,7 +3055,8 @@ async def on_demand_analyse(
             "horizon_days": rec.get("horizon_days"),
         },
         "agents": {
-            k: {"signal": v.get("signal"), "score": v.get("score")}
+            k: {"signal": v.get("signal"), "score": v.get("score"),
+                "detail": _build_rationale(k, v)}
             for k, v in agent_results.items()
         },
     }

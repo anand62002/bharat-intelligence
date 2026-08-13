@@ -1176,6 +1176,26 @@ def _derive_catalysts_and_risks(result: DiscoveryResult) -> tuple[list[str], lis
     return catalysts, risks
 
 
+def _agent_signals_with_reasons(agent_signals: dict) -> dict:
+    """
+    Compact the full agent-results dict down to what the dashboard needs:
+    signal, score, and a plain-English `reason` explaining the vote.
+
+    The reason is templated from the agent's own numbers (agents/rationale.py) —
+    no LLM call, so this adds no cost or latency per screened stock.
+    """
+    from agents.rationale import build_rationale
+
+    return {
+        k: {
+            "signal": (v or {}).get("signal"),
+            "score":  (v or {}).get("score"),
+            "reason": build_rationale(k, v),
+        }
+        for k, v in (agent_signals or {}).items()
+    }
+
+
 def _save_discovery(result: DiscoveryResult) -> Optional[str]:
     """
     Save or update a discovery recommendation.
@@ -1282,6 +1302,9 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             }
             client.table("recommendations").update({
                 "metadata":          updated_meta,
+                # Refresh agent votes + rationales — a re-confirmation re-ran all
+                # agents, so the stored explanation must reflect today's numbers.
+                "agent_signals":     _agent_signals_with_reasons(result.agent_signals),
                 "upside_pct":        result.upside_pct,
                 "upside_confidence": result.upside_confidence,
                 "confidence":        result.upside_confidence,
@@ -1320,10 +1343,7 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 f"{result.symbol} — {result.upside_pct:.0f}% upside potential"
             ),
             "summary":                result.upside_basis,
-            "agent_signals": {
-                k: {"signal": v.get("signal"), "score": v.get("score")}
-                for k, v in result.agent_signals.items()
-            },
+            "agent_signals": _agent_signals_with_reasons(result.agent_signals),
             "gov_check":              {"flags": [], "passed": True, "note": "discovery_auto"},
             "is_discovery":           True,
             "valid_till":             _valid_till(result.upside_horizon),

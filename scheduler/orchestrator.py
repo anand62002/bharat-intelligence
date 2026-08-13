@@ -559,11 +559,17 @@ def _build_recommendation(
     )
     summary  = synthesis_data.get("synthesis", "")
 
+    from agents.rationale import build_rationale
+
     agent_signals = {
         name: {
             "signal": agent_results.get(name, {}).get("signal"),
             "score":  agent_results.get(name, {}).get("score"),
             "weight": round(weights.get(name, 0.0), 6),
+            # Plain-English justification for this vote — templated from the
+            # agent's own numbers (no LLM call), rendered in the dashboard's
+            # per-agent breakdown so a score is never shown without a reason.
+            "reason": build_rationale(name, agent_results.get(name)),
         }
         for name in AGENT_NAMES
     }

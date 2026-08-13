@@ -624,7 +624,8 @@ def save_daily_snapshot(client, dry_run: bool = True) -> dict:
     try:
         positions = (
             client.table("paper_portfolio_positions")
-            .select("status,allocation_inr,current_value,unrealized_pnl,realized_pnl,alpha_pct")
+            .select("status,allocation_inr,entry_price,quantity,current_value,"
+                    "unrealized_pnl,realized_pnl,alpha_pct")
             .execute()
             .data or []
         )
@@ -635,7 +636,16 @@ def save_daily_snapshot(client, dry_run: bool = True) -> dict:
     open_positions   = [p for p in positions if p.get("status") == "OPEN"]
     closed_positions = [p for p in positions if p.get("status") == "CLOSED"]
 
-    total_invested  = sum(_safe_float(p.get("allocation_inr")) or 0 for p in open_positions)
+    # Cost basis, NOT the nominal allocation. quantity is floor(allocation/price),
+    # so actual capital deployed is always <= allocation_inr (e.g. a Rs 5,000
+    # allocation on a Rs 1,800 share buys 2 shares = Rs 3,600). Dividing P&L by
+    # the nominal figure understated every return by the undeployed remainder.
+    total_invested = sum(
+        (_safe_float(p.get("entry_price")) or 0) * (_safe_float(p.get("quantity")) or 0)
+        for p in open_positions
+    )
+    if total_invested <= 0:      # fallback for rows predating entry_price/quantity
+        total_invested = sum(_safe_float(p.get("allocation_inr")) or 0 for p in open_positions)
     total_cur_value = sum(_safe_float(p.get("current_value"))  or 0 for p in open_positions)
     unrealized_pnl  = sum(_safe_float(p.get("unrealized_pnl")) or 0 for p in open_positions)
     realized_pnl    = sum(_safe_float(p.get("realized_pnl"))   or 0 for p in closed_positions)
