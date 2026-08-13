@@ -14,7 +14,7 @@ Tests cover:
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -421,24 +421,39 @@ class TestDeduplicateArticles:
 class TestRun:
     """Integration tests for the run() pipeline with fully mocked I/O."""
 
+    @staticmethod
+    def _recent_pub_date(days_ago: int = 2, hour: int = 10) -> str:
+        """
+        RFC-2822 date a few days in the past, relative to today.
+
+        These articles feed run(), which drops anything older than its `days`
+        window (35 by default). Hardcoding a calendar date makes the whole
+        TestRun class start failing once real time moves past that window —
+        the pipeline short-circuits on the date filter and never reaches the
+        assertions, so the failures look unrelated to their cause.
+        """
+        stamp = datetime.now().replace(hour=hour, minute=0, second=0, microsecond=0) \
+                - timedelta(days=days_ago)
+        return stamp.strftime("%a, %d %b %Y %H:%M:%S +0530")
+
     def _mock_articles(self) -> list[dict]:
         return [
             {
                 "title":    "RBI cuts repo rate by 25 bps to stimulate growth",
                 "snippet":  "The Reserve Bank of India reduced the repo rate amid slowing economy.",
-                "pub_date": "Mon, 12 May 2026 10:00:00 +0530",
+                "pub_date": self._recent_pub_date(hour=10),
                 "link":     "https://example.com/rbi-cut",
             },
             {
                 "title":    "FII sells ₹6000 crore in Indian equities on outflow concerns",
                 "snippet":  "Foreign institutional investors have been net sellers this week.",
-                "pub_date": "Mon, 12 May 2026 09:00:00 +0530",
+                "pub_date": self._recent_pub_date(hour=9),
                 "link":     "https://example.com/fii-sell",
             },
             {
                 "title":    "Cricket: India beats Australia in final",
                 "snippet":  "India won the match by 5 wickets.",
-                "pub_date": "Mon, 12 May 2026 08:00:00 +0530",
+                "pub_date": self._recent_pub_date(hour=8),
                 "link":     "https://example.com/cricket",
             },
         ]
@@ -486,16 +501,21 @@ class TestRun:
         """Article with same event_type within 7 days of existing row is skipped."""
         mock_fetch.return_value = [self._mock_articles()[0]]   # RBI cut only
 
+        # Existing DB entry dated 3 days before the incoming article, i.e. inside
+        # the +/-7-day dedup window. Derived from today rather than hardcoded:
+        # the article's own pub_date is relative (see _recent_pub_date), so a
+        # fixed date here drifts out of the window as real time passes and the
+        # dedup never fires.
+        article_date  = date.today() - timedelta(days=2)    # matches _recent_pub_date()
+        existing_date = article_date - timedelta(days=3)
+
         mock_client = MagicMock()
-        # Existing DB entry: RBI_RATE_CHANGE 3 days ago
         mock_client.table.return_value.select.return_value \
             .gte.return_value.execute.return_value.data = [
-                {"event_type": "RBI_RATE_CHANGE", "event_date": "2026-05-09"}
+                {"event_type": "RBI_RATE_CHANGE", "event_date": existing_date.isoformat()}
             ]
 
         # Do NOT patch the date class — doing so breaks isinstance(ed, date) inside dedup.
-        # The article pub_date "Mon, 12 May 2026 10:00:00 +0530" parses to 2026-05-12,
-        # which is within 7 days of the existing "2026-05-09" → should be dropped.
         with patch("db.auto_seed_rag._get_supabase_client", return_value=mock_client):
             result = run(days=35, max_new=30, dry_run=False)
 

@@ -483,6 +483,7 @@ def _run_analyse(
     haiku_score: dict | None = None,
     fii_net: float | None = None,
     insider: dict | None = None,   # mock for get_promoter_signal; None → NEUTRAL
+    hindi_headlines: list | None = None,
 ):
     """
     Run analyse() with fully mocked external calls.
@@ -490,11 +491,19 @@ def _run_analyse(
     haiku_score=dict → _batch_classify_headlines returns those scores directly;
                        temporal decay is suppressed (weight=1.0) so scores are
                        deterministic regardless of headline publish date.
+
+    EVERY headline source analyse() consumes must be mocked here. There are four:
+    RSS, BSE announcements, Hindi RSS (P6-D-6) and NewsAPI. When a new source is
+    added to agents/sentiment.py it must be added to this harness too — otherwise
+    tests keep passing their own fixtures in while silently pulling live
+    headlines alongside them, and every count-based assertion becomes meaningless.
     """
     if rss_headlines is None:
         rss_headlines = _make_headlines(5)
     if newsapi_articles is None:
         newsapi_articles = []
+    if hindi_headlines is None:
+        hindi_headlines = []
 
     env_patch = {}
     if haiku_score is not None:
@@ -524,6 +533,7 @@ def _run_analyse(
     with patch("agents.sentiment.get_rss_headlines", return_value=rss_headlines), \
          patch("agents.sentiment._fetch_newsapi", return_value=newsapi_articles), \
          patch("agents.sentiment.get_bse_announcements", return_value=[]), \
+         patch("data.fetchers.get_hindi_headlines", return_value=hindi_headlines), \
          patch("agents.sentiment._batch_classify_headlines", side_effect=fake_batch_classify), \
          patch("agents.sentiment._call_haiku", side_effect=fake_haiku), \
          patch("agents.sentiment._call_finbert_hf", return_value=None), \
@@ -563,16 +573,32 @@ class TestAnalyseSchema:
 
 
 class TestAnalyseNoData:
+    """
+    NO_DATA is only correct when EVERY headline source is empty, so each of the
+    four must be silenced here. These cases deliberately call analyse() directly
+    rather than via _run_analyse so the "nothing anywhere" setup stays explicit.
+    """
+
+    @staticmethod
+    def _no_headlines(rss_return):
+        """Patch all four headline sources; RSS returns `rss_return`."""
+        return (
+            patch("agents.sentiment.get_rss_headlines", return_value=rss_return),
+            patch("agents.sentiment._fetch_newsapi", return_value=[]),
+            patch("agents.sentiment.get_bse_announcements", return_value=[]),
+            patch("data.fetchers.get_hindi_headlines", return_value=[]),
+        )
+
     def test_no_rss_no_newsapi_returns_no_data(self):
-        with patch("agents.sentiment.get_rss_headlines", return_value=None), \
-             patch("agents.sentiment._fetch_newsapi", return_value=[]):
+        p1, p2, p3, p4 = self._no_headlines(None)
+        with p1, p2, p3, p4:
             result = analyse("EMPTY")
         assert result["signal"] == "NO_DATA"
         assert result["score"] == 50  # neutral default
 
     def test_empty_rss_no_newsapi_returns_no_data(self):
-        with patch("agents.sentiment.get_rss_headlines", return_value=[]), \
-             patch("agents.sentiment._fetch_newsapi", return_value=[]):
+        p1, p2, p3, p4 = self._no_headlines([])
+        with p1, p2, p3, p4:
             result = analyse("EMPTY")
         assert result["signal"] == "NO_DATA"
 
@@ -851,3 +877,53 @@ class TestInsiderSentimentSignal:
         assert result["agent_name"] == "sentiment"
         # Should still produce a valid result
         assert result["signal"] in VALID_SIGNALS
+
+
+class TestHarnessCoversEverySource:
+    """
+    Guard against the failure mode that silently broke five tests in this file:
+    P6-D-6 added Hindi RSS as a fourth headline source in agents/sentiment.py,
+    but _run_analyse was never updated to mock it. The affected tests kept
+    "passing their fixtures in" while also pulling ~97 live headlines, so every
+    count-based assertion became meaningless and the suite went red for reasons
+    that looked unrelated to the cause.
+
+    These tests fail immediately if a new source starts reaching the network.
+    """
+
+    def test_analyse_makes_no_network_calls_under_the_harness(self):
+        """
+        Break the underlying network primitives. If _run_analyse still returns a
+        clean result, every source it feeds is genuinely mocked; if a new
+        unmocked source has been added, it will surface here as an error rather
+        than as silently inflated headline counts elsewhere.
+        """
+        def _boom(*args, **kwargs):
+            raise AssertionError("live network call escaped the test harness")
+
+        with patch("requests.get", side_effect=_boom), \
+             patch("requests.Session.get", side_effect=_boom), \
+             patch("feedparser.parse", side_effect=_boom):
+            result = _run_analyse(rss_headlines=_make_headlines(3))
+
+        assert result["detail"]["headlines_analysed"] == 3
+
+    def test_headline_count_matches_fixtures_exactly(self):
+        """
+        The count must equal what the test supplied — no extra headlines from an
+        unmocked source. This is the assertion that would have caught the Hindi
+        RSS regression the day it landed.
+        """
+        rss   = _make_headlines(4, prefix="Alpha")
+        hindi = _make_headlines(2, prefix="Beta")
+        result = _run_analyse(rss_headlines=rss, hindi_headlines=hindi)
+        assert result["detail"]["headlines_analysed"] == 6
+
+    def test_hindi_source_is_wired_through_the_harness(self):
+        """hindi_headlines= must actually reach analyse(), not be ignored."""
+        result = _run_analyse(
+            rss_headlines=_make_headlines(1, prefix="OnlyRss"),
+            hindi_headlines=_make_headlines(3, prefix="OnlyHindi"),
+        )
+        assert result["detail"]["headlines_analysed"] == 4
+        assert "hindi_rss" in result["data_sources"]
