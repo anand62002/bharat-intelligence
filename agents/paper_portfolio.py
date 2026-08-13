@@ -114,6 +114,11 @@ def _fetch_price_on_date(
         )
         if hist.empty:
             return None
+        # Drop yfinance's partial current-session bar (Volume present, OHLC NaN)
+        # so the closest-date match can never resolve to a NaN entry/exit price.
+        hist = hist.dropna(subset=["Close"])
+        if hist.empty:
+            return None
         hist.index = pd.to_datetime(hist.index).normalize()
         mask    = (hist.index >= pd.Timestamp(start)) & (hist.index <= pd.Timestamp(end))
         subset  = hist.loc[mask].copy()

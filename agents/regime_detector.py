@@ -129,7 +129,14 @@ def _fetch_ohlcv(symbol: str) -> pd.DataFrame | None:
     """Return daily OHLCV for last 1 year. None on failure."""
     try:
         hist = yf.Ticker(symbol).history(period=HISTORY_PERIOD, auto_adjust=True)
-        if hist.empty or len(hist) < 20:
+        if hist.empty:
+            return None
+        # yfinance 1.2.x appends a partial current-session bar with Volume but
+        # NaN OHLC; every indicator below reads Close.iloc[-1], so that NaN
+        # would become "today's level" and poison the regime classification.
+        if "Close" in hist.columns:
+            hist = hist.dropna(subset=["Close"])
+        if len(hist) < 20:
             return None
         return hist
     except Exception as exc:

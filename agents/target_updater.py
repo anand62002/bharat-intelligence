@@ -106,7 +106,9 @@ def _quick_technicals(yf_sym: str) -> dict:
         hist = ticker.history(period="30d")
         rsi  = None
         if not hist.empty and "Close" in hist.columns:
-            rsi = _compute_rsi(hist["Close"])
+            # .dropna() — yfinance's partial current-session bar carries a NaN
+            # Close, which propagates through the EWM and returns RSI = NaN.
+            rsi = _compute_rsi(hist["Close"].dropna())
 
         return {"pe": pe, "rsi": rsi}
     except Exception as e:

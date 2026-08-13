@@ -123,6 +123,11 @@ def _fetch_price_on_date(yf_symbol: str, target_date: date, window: int = WINDOW
         hist  = yf.Ticker(yf_symbol).history(start=str(start), end=str(end), auto_adjust=True)
         if hist.empty:
             return None
+        # Drop yfinance's partial current-session bar (Volume present, OHLC NaN)
+        # so the "closest available date" match can never resolve to a NaN price.
+        hist = hist.dropna(subset=["Close"])
+        if hist.empty:
+            return None
         # Find closest available date
         hist.index = hist.index.normalize()   # strip time component
         target_dt  = datetime.combine(target_date, datetime.min.time())

@@ -1,6 +1,6 @@
 # Bharat Intelligence — Investment-Grade Execution Plan
 ### Target: 6.0 → 8.8 / 10 System Robustness
-*Last updated: 2026-05-20*
+*Last updated: 2026-08-14*
 
 > **Standing rules (apply after every build):**
 > 1. Update `CLAUDE.md` — new files, tables, endpoints, env vars, resolved issues
@@ -107,6 +107,16 @@
 | P8-A | **ATR-14 Volatility Stoploss** — `agents/technical.py` computes `atr_14/atr_stoploss/atr_stoploss_pct`; synthesis prompt enforces 2×ATR floor via `{atr_stoploss}` placeholder; orchestrator injects from technical result. Replaces arbitrary 15% flat stoploss. 6 tests added. | ✅ DONE | 2026-07-22 |
 | P8-B | **ARIA On-Demand Analyse Command** — `POST /api/analyse` endpoint runs full 10-agent pipeline (dry_run=True, 180s timeout) for any symbol on demand. ARIA detects "analyse SYMBOL" intent → confirmation flow → `<run_analyse>` tag → dashboard calls endpoint + shows result inline. 10 tests added. | ✅ DONE | 2026-07-22 |
 | OPS-3 | **Weekly Health Audit** — `scripts/weekly_audit.py` with 9 checks (kappa, daily_runs, alpha_live, trendlyne, discovery, RAG, agent_performance, forward_poller, outcome_seeder). Sunday 07:45 IST worker job (`job_weekly_audit()`). 14 tests added. Exit code 1 on FAIL. | ✅ DONE | 2026-07-22 |
+
+### Session 2026-08-14 — ARIA /analyse failure (two root causes)
+| ID | Item | Status | Date |
+|---|---|---|---|
+| BF-23 | **`float(None)` on Claude's JSON nulls killed the symbol** — Railway 2026-08-13: `[TATASTEEL.NS] synthesis failed: float() argument must be a string or a real number, not 'NoneType'`. Claude emits explicit nulls for numeric fields that don't apply to its call (`"target": null`, `"upside_pct": null` on a HOLD); `float(synthesis_data.get(key, default))` does not substitute the default when the key exists with a None value. New `_num()` helper in `scheduler/orchestrator.py`; applied to `_build_recommendation`, `_apply_consensus_gate`, both P7-C confidence caps and the earnings-guard downgrade. `upside_pct` now derived from `target` when Claude leaves it null. | ✅ DONE | 2026-08-14 |
+| BF-24 | **Technical agent returned INSUFFICIENT_DATA for every symbol** — yfinance 1.2.x appends a partial current-session bar (Volume present, OHLC NaN), so `close.iloc[-1]` was NaN and `DataCompletenessValidator` failed on "Current close price" (`completeness=88%` in the logs). `data/fetchers.py::get_ohlcv` now drops NaN-Close rows for all callers; same guard added to `regime_detector._fetch_ohlcv`, `outcome_tracker._price_on_date`, `paper_portfolio._price_on_date`, `target_updater._quick_technicals`. TATASTEEL technical: INSUFFICIENT_DATA → BUY(62). | ✅ DONE | 2026-08-14 |
+| BF-25 | **`/api/analyse` reported every failure as "suppressed"** — the NO_RECOMMENDATION branch ignored `state["errors"]`, so a hard crash and a genuine validation suppression were indistinguishable on the dashboard. Errors are now returned in `detail` + `errors`. | ✅ DONE | 2026-08-14 |
+| BF-26 | **Suppressed recs never persisted** — `action='SUPPRESSED'` violates `recommendations_action_check` (error 23514, logged 19:14:53). `db/migrations/allow_suppressed_action.sql` widens the constraint; orchestrator now names the migration in its warning. | 🔲 **Run migration in Supabase** | — |
+
+> 25 regression tests in `tests/test_synthesis_null_fields.py`. Verified end-to-end with a local dry-run pipeline on TATASTEEL / GAIL / INFY — all three produce a full recommendation with `errors=[]`.
 
 ### Dashboard holes identified (2026-05-15)
 | Issue | Root cause | Fix status |
