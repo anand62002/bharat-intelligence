@@ -128,7 +128,17 @@ def _fetch_price_on_date(yf_symbol: str, target_date: date, window: int = WINDOW
         hist = hist.dropna(subset=["Close"])
         if hist.empty:
             return None
-        # Find closest available date
+        # Find closest available date.
+        # yfinance returns a tz-AWARE index for NSE symbols (Asia/Kolkata).
+        # Every comparison below builds tz-naive pd.Timestamps from `target_date`,
+        # and subtracting the two raises
+        #   TypeError: Cannot subtract tz-naive and tz-aware datetime-like objects
+        # which the except clause then swallowed into a silent None. That made
+        # EVERY nifty_entry lookup fail, so seed_pending_outcome wrote NULL for
+        # all 148 rows and both the tracker and the forward poller skipped them
+        # on `if not entry_price or not nifty_entry: continue`.
+        if getattr(hist.index, "tz", None) is not None:
+            hist.index = hist.index.tz_localize(None)
         hist.index = hist.index.normalize()   # strip time component
         target_dt  = datetime.combine(target_date, datetime.min.time())
         # Filter to window
@@ -146,7 +156,11 @@ def _fetch_price_on_date(yf_symbol: str, target_date: date, window: int = WINDOW
             return float(closest["Close"])
         return None
     except Exception as exc:
-        log.debug("Price fetch failed for %s on %s: %s", yf_symbol, target_date, exc)
+        # WARNING, not DEBUG: a failure here silently NULLs nifty_entry, which
+        # then makes the tracker and poller skip the row forever. That went
+        # unnoticed for ~3 months because it only logged at DEBUG.
+        log.warning("Price fetch failed for %s on %s: %s: %s",
+                    yf_symbol, target_date, type(exc).__name__, exc)
         return None
 
 

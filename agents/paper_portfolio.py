@@ -119,18 +119,31 @@ def _fetch_price_on_date(
         hist = hist.dropna(subset=["Close"])
         if hist.empty:
             return None
-        hist.index = pd.to_datetime(hist.index).normalize()
+        hist.index = pd.to_datetime(hist.index)
+        # yfinance returns a tz-AWARE index for NSE symbols (Asia/Kolkata) while
+        # every Timestamp built from `target_date` below is tz-naive. Subtracting
+        # the two raises TypeError, which the except clause swallows into a
+        # silent None — the same defect that NULLed every nifty_entry in
+        # recommendation_outcomes. Normalise to tz-naive before any date maths.
+        if getattr(hist.index, "tz", None) is not None:
+            hist.index = hist.index.tz_localize(None)
+        hist.index = hist.index.normalize()
         mask    = (hist.index >= pd.Timestamp(start)) & (hist.index <= pd.Timestamp(end))
         subset  = hist.loc[mask].copy()
         if subset.empty:
             return None
-        subset["delta"] = (subset.index - pd.Timestamp(target_date)).abs()
+        # Build the deltas as a Series: `index - Timestamp` yields a
+        # TimedeltaIndex, which has no .abs() in this pandas version.
+        subset["delta"] = pd.Series(
+            subset.index - pd.Timestamp(target_date), index=subset.index
+        ).abs()
         closest = subset.sort_values("delta").iloc[0]
         if closest["delta"].days <= window:
             return float(closest["Close"])
         return None
     except Exception as exc:
-        log.debug("Price fetch failed for %s on %s: %s", yf_symbol, target_date, exc)
+        log.warning("Price fetch failed for %s on %s: %s: %s",
+                    yf_symbol, target_date, type(exc).__name__, exc)
         return None
 
 
