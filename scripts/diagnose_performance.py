@@ -33,7 +33,13 @@ if str(_ROOT) not in sys.path:
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # override=True on purpose. load_dotenv() defaults to NOT overwriting a
+    # variable that already exists in the OS environment, so a stale
+    # SUPABASE_SERVICE_KEY left in the Windows user environment silently
+    # shadows .env — and this script then reports 0 rows everywhere while the
+    # .env file holds a perfectly good key. For a local diagnostic, the file on
+    # disk is the source of truth. (No effect on Railway, which has no .env.)
+    load_dotenv(override=True)
 except Exception:
     pass
 
