@@ -1747,8 +1747,12 @@ async def get_system_health(
     checks: list[dict] = []
     db = _db()
 
-    def _ok(name: str, detail: str) -> dict:
-        return {"name": name, "status": "ok", "detail": detail, "severity": "ok", "action": None}
+    def _ok(name: str, detail: str, action: str | None = None) -> dict:
+        # `action` is optional so _ok stays interchangeable with _warn/_err where a
+        # check picks its severity dynamically (see the Daily Pipeline check, which
+        # assigns check_fn = _ok | _warn and then calls it with a hint argument).
+        return {"name": name, "status": "ok", "detail": detail, "severity": "ok",
+                "action": action or None}
 
     def _info(name: str, detail: str, action: str) -> dict:
         # INFO = not an error, not a warning — informational note (e.g. deprecated integrations)
