@@ -45,17 +45,30 @@ def main() -> None:
         print("FAIL: SUPABASE_URL / SUPABASE_SERVICE_KEY not set")
         return
 
-    # Guard against the exact mistake that made every table look empty.
-    try:
-        payload = key.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        role = json.loads(base64.urlsafe_b64decode(payload)).get("role")
-    except Exception:
-        role = "unknown"
-    print(f"key role = {role}")
-    if role != "service_role":
-        print("  !! NOT the service_role key — RLS will filter reads to 0 rows.")
-        print("     Every count below will be meaningless. Use the service key.")
+    # Guard against the exact mistake that made every table look empty: an anon
+    # key reads 0 rows from every RLS-protected table, which looks identical to
+    # "the data is gone". Supabase issues two key formats — legacy JWTs
+    # (anon / service_role) and newer opaque keys (sb_secret_… / sb_publishable_…)
+    # — so handle both rather than assuming a JWT.
+    if key.startswith("sb_secret_"):
+        role, privileged = "secret (new format)", True
+    elif key.startswith("sb_publishable_"):
+        role, privileged = "publishable (new format)", False
+    else:
+        try:
+            payload = key.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            role = json.loads(base64.urlsafe_b64decode(payload)).get("role", "unknown")
+        except Exception:
+            role = "unrecognised"
+        privileged = (role == "service_role")
+
+    print(f"key type = {role}")
+    if not privileged:
+        print("  !! This key does not bypass RLS — reads will return 0 rows and")
+        print("     every count below will be meaningless.")
+        print("     Supabase dashboard -> Settings -> API -> service_role (or")
+        print("     'secret') key, then set SUPABASE_SERVICE_KEY in .env.")
         print()
 
     from supabase import create_client
