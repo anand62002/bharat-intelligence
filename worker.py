@@ -116,6 +116,25 @@ def job_research_agent() -> None:
     except Exception as exc:
         log.error("Research agent job failed: %s", exc, exc_info=True)
 
+    # Close the loop: until now the agent produced proposals and debates daily
+    # and nothing ever consumed the vote, so everything sat at 'pending'.
+    # Opens a PR for supermajority + zero-cost proposals; never merges.
+    # Runs in its own try so a gate failure cannot mask the scan above.
+    try:
+        from governance.research_agent import auto_approve_proposals
+        gate = auto_approve_proposals(dry_run=False)
+        log.info(
+            "Auto-approval gate — checked=%d approved=%d skipped=%d errors=%d",
+            gate.get("checked", 0), gate.get("approved", 0),
+            gate.get("skipped", 0), len(gate.get("errors", [])),
+        )
+        for url in gate.get("pr_urls", []):
+            log.info("  PR opened: %s", url)
+        for err in gate.get("errors", []):
+            log.warning("  auto-approval error: %s", err)
+    except Exception as exc:
+        log.error("Auto-approval gate failed: %s", exc, exc_info=True)
+
 
 def job_market_digest_morning() -> None:
     """05:30 IST — generate Morning Brief for Indian equity market (P6-C).

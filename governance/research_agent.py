@@ -1269,6 +1269,164 @@ See `{doc_path}` for full context.
 # Dashboard data access
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Auto-approval gate
+# ---------------------------------------------------------------------------
+# The research agent produced proposals and ran debates daily, but nothing ever
+# consumed the result: approve_proposal() was reachable only from the CLI, so
+# proposals accumulated at status='pending' forever regardless of how the agents
+# voted. This gate closes that loop.
+#
+# It opens a PULL REQUEST; it never merges. These are LLM-authored changes to a
+# system that sizes real positions, so a human still reads the diff. What is
+# removed is the manual triage, not the review.
+
+AUTO_APPROVE_MIN_FOR_RATIO = 0.75   # FOR / (FOR + AGAINST), abstains excluded
+AUTO_APPROVE_MAX_AGAINST   = 1      # a single dissenter is tolerated, two is not
+AUTO_APPROVE_MIN_VOTES     = 5      # too few voters is not a supermajority
+AUTO_APPROVE_ALLOWED_COST  = {"low", "none", "free", "zero"}
+AUTO_APPROVE_MAX_PER_RUN   = 3      # a bad day cannot open 20 PRs
+
+
+def evaluate_auto_approval(proposal: dict) -> tuple[bool, str]:
+    """
+    Decide whether `proposal` may be auto-PR'd. Pure function — no I/O.
+
+    Gate (supermajority + zero cost impact):
+      1. status is still 'pending' and no PR exists yet
+      2. at least AUTO_APPROVE_MIN_VOTES non-abstain votes
+      3. FOR / (FOR + AGAINST) >= AUTO_APPROVE_MIN_FOR_RATIO
+      4. AGAINST <= AUTO_APPROVE_MAX_AGAINST
+      5. cost_impact is low/none
+      6. metadata.requires_paid_data is falsy
+
+    Returns (eligible, human-readable reason).
+    """
+    status = str(proposal.get("status") or "").lower()
+    if status != "pending":
+        return False, f"status is '{status}', not pending"
+    if proposal.get("pr_url"):
+        return False, "a PR already exists for this proposal"
+
+    debate_log = proposal.get("debate_log") or []
+    if not debate_log:
+        return False, "no debate has been run"
+
+    for_n     = sum(1 for d in debate_log if str(d.get("stance", "")).upper() == "FOR")
+    against_n = sum(1 for d in debate_log if str(d.get("stance", "")).upper() == "AGAINST")
+    decisive  = for_n + against_n
+
+    if decisive < AUTO_APPROVE_MIN_VOTES:
+        return False, f"only {decisive} decisive votes (need {AUTO_APPROVE_MIN_VOTES})"
+    if against_n > AUTO_APPROVE_MAX_AGAINST:
+        return False, f"{against_n} agents voted AGAINST (max {AUTO_APPROVE_MAX_AGAINST})"
+
+    ratio = for_n / decisive
+    if ratio < AUTO_APPROVE_MIN_FOR_RATIO:
+        return False, (f"support {ratio:.0%} below the "
+                       f"{AUTO_APPROVE_MIN_FOR_RATIO:.0%} supermajority bar")
+
+    cost = str(proposal.get("cost_impact") or "medium").strip().lower()
+    if cost not in AUTO_APPROVE_ALLOWED_COST:
+        return False, f"cost_impact is '{cost}' — needs human sign-off on spend"
+
+    if (proposal.get("metadata") or {}).get("requires_paid_data"):
+        return False, "requires a paid data subscription"
+
+    return True, f"{for_n}/{decisive} FOR ({ratio:.0%}), cost_impact={cost}"
+
+
+def auto_approve_proposals(
+    dry_run: bool = False,
+    limit:   int  = AUTO_APPROVE_MAX_PER_RUN,
+) -> dict:
+    """
+    Open a PR for every pending proposal that clears `evaluate_auto_approval`.
+
+    Highest-relevance proposals are considered first, so if the per-run cap
+    binds it spends it on the strongest candidates.
+
+    Returns {checked, approved, skipped, pr_urls, errors, decisions}.
+    """
+    log.info("=== Auto-approval gate (dry_run=%s, limit=%d) ===", dry_run, limit)
+    result = {
+        "checked": 0, "approved": 0, "skipped": 0,
+        "pr_urls": [], "errors": [], "decisions": [],
+    }
+
+    client = _supabase()
+    if not client:
+        result["errors"].append("Supabase unavailable")
+        return result
+
+    try:
+        rows = (client.table("research_proposals")
+                      .select("*")
+                      .eq("status", "pending")
+                      .order("relevance", desc=True)
+                      .execute()
+                      .data or [])
+    except Exception as exc:
+        log.error("Auto-approval: could not load proposals: %s", exc)
+        result["errors"].append(str(exc))
+        return result
+
+    result["checked"] = len(rows)
+    log.info("Auto-approval: %d pending proposals to evaluate", len(rows))
+
+    for proposal in rows:
+        pid   = proposal.get("id")
+        title = str(proposal.get("title") or "")[:70]
+        eligible, reason = evaluate_auto_approval(proposal)
+        result["decisions"].append(
+            {"id": pid, "title": title, "eligible": eligible, "reason": reason}
+        )
+
+        if not eligible:
+            result["skipped"] += 1
+            log.info("  SKIP  %s — %s", title, reason)
+            continue
+
+        if result["approved"] >= limit:
+            result["skipped"] += 1
+            log.info("  DEFER %s — per-run cap of %d reached", title, limit)
+            continue
+
+        log.info("  PASS  %s — %s", title, reason)
+        if dry_run:
+            result["approved"] += 1
+            continue
+
+        try:
+            outcome = approve_proposal(pid, dry_run=False)
+            if outcome.get("error"):
+                result["errors"].append(f"{title}: {outcome['error']}")
+                log.warning("  PR failed for %s: %s", title, outcome["error"])
+                continue
+            result["approved"] += 1
+            if outcome.get("pr_url"):
+                result["pr_urls"].append(outcome["pr_url"])
+            log.info("  PR opened: %s", outcome.get("pr_url", "(no url)"))
+        except Exception as exc:
+            result["errors"].append(f"{title}: {exc}")
+            log.error("  Auto-approval failed for %s: %s", title, exc)
+
+    log.info(
+        "Auto-approval done — checked=%d approved=%d skipped=%d errors=%d",
+        result["checked"], result["approved"], result["skipped"], len(result["errors"]),
+    )
+
+    if result["pr_urls"] and not dry_run:
+        _send_telegram(
+            "<b>Governance: auto-approved proposals</b>\n"
+            + "\n".join(f"• {u}" for u in result["pr_urls"])
+            + "\n\nSupermajority + zero cost impact. Review before merging.",
+            dry_run=dry_run,
+        )
+
+    return result
+
+
 def list_proposals(
     status: Optional[str] = None,
     limit: int = 20,
@@ -1491,6 +1649,12 @@ Examples:
         help="Approve a proposal and create a GitHub PR",
     )
     parser.add_argument(
+        "--auto-approve", action="store_true",
+        help="Run the supermajority + zero-cost gate over all pending proposals "
+             "and open a PR for each that passes. Combine with --dry to preview "
+             "the verdicts without opening anything.",
+    )
+    parser.add_argument(
         "--list", action="store_true",
         help="List research proposals",
     )
@@ -1518,6 +1682,29 @@ Examples:
             pr_url = result.get("pr_url", "")
             log.info("PR created: %s", pr_url)
             print(f"\n  [OK] PR #{result.get('pr_number')} created: {pr_url}\n")
+        return
+
+    # ── Auto-approve mode ────────────────────────────────────────────────────
+    if args.auto_approve:
+        res = auto_approve_proposals(dry_run=args.dry)
+        mode = "DRY RUN — nothing opened" if args.dry else "LIVE"
+        print(f"\n  Auto-approval gate ({mode})")
+        print(f"  supermajority >= {AUTO_APPROVE_MIN_FOR_RATIO:.0%} FOR, "
+              f"<= {AUTO_APPROVE_MAX_AGAINST} AGAINST, "
+              f">= {AUTO_APPROVE_MIN_VOTES} votes, cost_impact in "
+              f"{sorted(AUTO_APPROVE_ALLOWED_COST)}\n")
+        print(f"  {'':2}{'VERDICT':<9} {'TITLE':<52} REASON")
+        print("  " + "-" * 108)
+        for d in res["decisions"]:
+            mark = "PASS" if d["eligible"] else "skip"
+            print(f"  {'':2}{mark:<9} {d['title'][:50]:<52} {d['reason']}")
+        print(f"\n  checked={res['checked']}  would-open={res['approved']}  "
+              f"skipped={res['skipped']}  errors={len(res['errors'])}")
+        for url in res["pr_urls"]:
+            print(f"  PR: {url}")
+        for err in res["errors"]:
+            print(f"  ERROR: {err}")
+        print()
         return
 
     # ── List mode ─────────────────────────────────────────────────────────────
