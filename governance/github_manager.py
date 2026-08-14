@@ -525,7 +525,12 @@ class GitHubManager:
         ]
 
     def get_pr_status(self, pr_number: int) -> dict:
-        """Return state, merge status, and review status for a PR."""
+        """
+        Return state, merge status, and review status for a PR.
+
+        NOTE: `mergeable` means "no merge conflicts" — it says NOTHING about
+        whether CI passed. Use get_pr_checks() before any automated merge.
+        """
         pr = self._repo.get_pull(pr_number)
         return {
             "number":    pr.number,
@@ -535,6 +540,51 @@ class GitHubManager:
             "mergeable": pr.mergeable,
             "url":       pr.html_url,
             "branch":    pr.head.ref,
+        }
+
+    def get_pr_checks(self, pr_number: int) -> dict:
+        """
+        Summarise CI check runs for a PR's head commit.
+
+        GitHub Actions reports through the *check runs* API, not the legacy
+        commit-status API, so a combined-status query would come back empty and
+        look like "nothing failed". This reads check runs directly.
+
+        Returns:
+            {total, success, failed, pending, all_green, conclusions}
+
+        all_green is True only when at least one check exists AND every check
+        has completed successfully. Zero checks yields all_green=False so an
+        automated merge fails closed rather than sailing through un-tested.
+        """
+        pr     = self._repo.get_pull(pr_number)
+        commit = self._repo.get_commit(pr.head.sha)
+
+        try:
+            runs = list(commit.get_check_runs())
+        except Exception as exc:
+            log.warning("PR #%d: could not read check runs: %s", pr_number, exc)
+            return {"total": 0, "success": 0, "failed": 0, "pending": 0,
+                    "all_green": False, "conclusions": [], "error": str(exc)}
+
+        success = failed = pending = 0
+        conclusions: list[str] = []
+        for r in runs:
+            conclusions.append(f"{r.name}={r.conclusion or r.status}")
+            if r.status != "completed":
+                pending += 1
+            elif r.conclusion in ("success", "neutral", "skipped"):
+                success += 1
+            else:
+                failed += 1
+
+        return {
+            "total":       len(runs),
+            "success":     success,
+            "failed":      failed,
+            "pending":     pending,
+            "all_green":   bool(runs) and failed == 0 and pending == 0,
+            "conclusions": conclusions,
         }
 
 

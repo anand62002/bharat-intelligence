@@ -1427,6 +1427,182 @@ def auto_approve_proposals(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Auto-merge (stricter than auto-PR)
+# ---------------------------------------------------------------------------
+# Auto-PR opens a PR on a supermajority. Auto-MERGE lands code on main without a
+# human reading it, so it is deliberately harder to reach:
+#
+#   * UNANIMOUS only — every decisive vote FOR, zero AGAINST. A supermajority
+#     is enough to ask for review; it is not enough to skip review.
+#   * CI must be fully green. Note that PR.mergeable only means "no conflicts",
+#     so this checks actual check runs, and FAILS CLOSED when a PR has no checks
+#     at all rather than treating "nothing failed" as success.
+#   * Opt-in via GOVERNANCE_AUTO_MERGE=true. Off by default so enabling it is a
+#     deliberate act, not a side effect of deploying this file.
+#
+# Merging happens on a LATER run than the PR: CI takes minutes, so a PR opened
+# at 07:30 is evaluated for merge the next time this runs.
+
+AUTO_MERGE_ENV_FLAG    = "GOVERNANCE_AUTO_MERGE"
+AUTO_MERGE_MAX_PER_RUN = 2
+
+
+def auto_merge_enabled() -> bool:
+    return os.getenv(AUTO_MERGE_ENV_FLAG, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def evaluate_auto_merge(proposal: dict) -> tuple[bool, str]:
+    """
+    Vote-side eligibility for auto-merge. Pure — CI is checked separately.
+
+    Requires an already-approved proposal with an open PR, a unanimous debate,
+    and zero cost impact.
+    """
+    if str(proposal.get("status") or "").lower() != "approved":
+        return False, f"status is '{proposal.get('status')}', not approved"
+    if not proposal.get("pr_url"):
+        return False, "no PR recorded"
+
+    debate_log = proposal.get("debate_log") or []
+    for_n     = sum(1 for d in debate_log if str(d.get("stance", "")).upper() == "FOR")
+    against_n = sum(1 for d in debate_log if str(d.get("stance", "")).upper() == "AGAINST")
+
+    if against_n > 0:
+        return False, f"not unanimous — {against_n} AGAINST (auto-merge requires 0)"
+    if for_n < AUTO_APPROVE_MIN_VOTES:
+        return False, f"only {for_n} FOR votes (need {AUTO_APPROVE_MIN_VOTES})"
+
+    cost = str(proposal.get("cost_impact") or "medium").strip().lower()
+    if cost not in AUTO_APPROVE_ALLOWED_COST:
+        return False, f"cost_impact is '{cost}'"
+    if (proposal.get("metadata") or {}).get("requires_paid_data"):
+        return False, "requires a paid data subscription"
+
+    return True, f"unanimous {for_n}/{for_n} FOR, cost_impact={cost}"
+
+
+def _pr_number_from_url(pr_url: str) -> Optional[int]:
+    try:
+        return int(str(pr_url).rstrip("/").rsplit("/", 1)[-1])
+    except (ValueError, AttributeError):
+        return None
+
+
+def auto_merge_approved_prs(
+    dry_run: bool = False,
+    limit:   int  = AUTO_MERGE_MAX_PER_RUN,
+) -> dict:
+    """
+    Merge PRs whose proposals were unanimous and whose CI is fully green.
+
+    Returns {checked, merged, skipped, merged_prs, errors, decisions}.
+    """
+    result = {"checked": 0, "merged": 0, "skipped": 0,
+              "merged_prs": [], "errors": [], "decisions": []}
+
+    if not auto_merge_enabled():
+        log.info("Auto-merge disabled (set %s=true to enable)", AUTO_MERGE_ENV_FLAG)
+        result["errors"].append(f"disabled — set {AUTO_MERGE_ENV_FLAG}=true")
+        return result
+
+    log.info("=== Auto-merge (dry_run=%s, limit=%d) ===", dry_run, limit)
+
+    client = _supabase()
+    if not client:
+        result["errors"].append("Supabase unavailable")
+        return result
+
+    try:
+        rows = (client.table("research_proposals")
+                      .select("*")
+                      .eq("status", "approved")
+                      .order("relevance", desc=True)
+                      .execute()
+                      .data or [])
+    except Exception as exc:
+        result["errors"].append(str(exc))
+        return result
+
+    result["checked"] = len(rows)
+    mgr = None
+
+    for proposal in rows:
+        title = str(proposal.get("title") or "")[:60]
+        ok, reason = evaluate_auto_merge(proposal)
+
+        pr_no = _pr_number_from_url(proposal.get("pr_url", "")) if ok else None
+        if ok and pr_no is None:
+            ok, reason = False, "could not parse PR number from pr_url"
+
+        # CI gate — only consulted once the vote gate passes.
+        if ok:
+            try:
+                if mgr is None:
+                    from governance.github_manager import get_manager
+                    mgr = get_manager()
+                checks = mgr.get_pr_checks(pr_no)
+                if not checks["all_green"]:
+                    ok, reason = False, (
+                        f"CI not green — {checks['success']} ok, "
+                        f"{checks['failed']} failed, {checks['pending']} pending"
+                        + (" (no checks found — failing closed)"
+                           if checks["total"] == 0 else "")
+                    )
+                else:
+                    reason += f", CI green ({checks['total']} checks)"
+            except Exception as exc:
+                ok, reason = False, f"could not read CI status: {exc}"
+
+        result["decisions"].append(
+            {"pr": pr_no, "title": title, "eligible": ok, "reason": reason}
+        )
+
+        if not ok:
+            result["skipped"] += 1
+            log.info("  SKIP  PR#%s %s — %s", pr_no, title, reason)
+            continue
+        if result["merged"] >= limit:
+            result["skipped"] += 1
+            log.info("  DEFER PR#%s %s — per-run cap %d", pr_no, title, limit)
+            continue
+
+        log.info("  MERGE PR#%s %s — %s", pr_no, title, reason)
+        if dry_run:
+            result["merged"] += 1
+            continue
+
+        try:
+            if mgr.merge_pull_request(pr_no):
+                result["merged"] += 1
+                result["merged_prs"].append(pr_no)
+                try:
+                    (client.table("research_proposals")
+                           .update({"status": "implemented"})
+                           .eq("id", proposal["id"]).execute())
+                except Exception as exc:
+                    log.warning("Merged PR#%s but status update failed: %s", pr_no, exc)
+            else:
+                result["errors"].append(f"PR#{pr_no}: merge returned False")
+        except Exception as exc:
+            result["errors"].append(f"PR#{pr_no}: {exc}")
+            log.error("  Merge failed for PR#%s: %s", pr_no, exc)
+
+    log.info("Auto-merge done — checked=%d merged=%d skipped=%d errors=%d",
+             result["checked"], result["merged"],
+             result["skipped"], len(result["errors"]))
+
+    if result["merged_prs"] and not dry_run:
+        _send_telegram(
+            "<b>Governance: auto-MERGED to main</b>\n"
+            + "\n".join(f"• PR #{n}" for n in result["merged_prs"])
+            + "\n\nUnanimous vote + green CI. Railway will redeploy.",
+            dry_run=dry_run,
+        )
+
+    return result
+
+
 def list_proposals(
     status: Optional[str] = None,
     limit: int = 20,

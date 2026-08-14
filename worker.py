@@ -135,6 +135,27 @@ def job_research_agent() -> None:
     except Exception as exc:
         log.error("Auto-approval gate failed: %s", exc, exc_info=True)
 
+    # Auto-merge, gated on GOVERNANCE_AUTO_MERGE=true. Stricter than auto-PR:
+    # unanimous vote AND fully green CI. Merges PRs opened on EARLIER runs,
+    # since CI cannot have finished for one opened moments ago.
+    try:
+        from governance.research_agent import auto_merge_approved_prs, auto_merge_enabled
+        if auto_merge_enabled():
+            mg = auto_merge_approved_prs(dry_run=False)
+            log.info(
+                "Auto-merge — checked=%d merged=%d skipped=%d errors=%d",
+                mg.get("checked", 0), mg.get("merged", 0),
+                mg.get("skipped", 0), len(mg.get("errors", [])),
+            )
+            for n in mg.get("merged_prs", []):
+                log.info("  MERGED PR #%s", n)
+            for err in mg.get("errors", []):
+                log.warning("  auto-merge error: %s", err)
+        else:
+            log.info("Auto-merge disabled (GOVERNANCE_AUTO_MERGE not set)")
+    except Exception as exc:
+        log.error("Auto-merge failed: %s", exc, exc_info=True)
+
 
 def job_market_digest_morning() -> None:
     """05:30 IST — generate Morning Brief for Indian equity market (P6-C).
