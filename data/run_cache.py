@@ -327,6 +327,14 @@ class scope:
         _depth.level = max(0, getattr(_depth, "level", 1) - 1)
         if self._outermost:
             log_stats(self.context)
+            # P7-I sits directly beneath this cache; report both together so one
+            # log line explains where a run's fundamentals actually came from.
+            try:
+                from data import fundamentals_cache
+                fundamentals_cache.log_stats(self.context)
+                fundamentals_cache.reset_stats()
+            except Exception:
+                pass
         return False
 
 

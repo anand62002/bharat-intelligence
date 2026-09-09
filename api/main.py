@@ -1790,6 +1790,34 @@ async def get_system_health(
         checks.append(_warn("Fundamentals cache (P7-H)", f"Stats unavailable: {exc}",
                             "Check data/run_cache.py import"))
 
+    # ── P7-I persistent fundamentals cache ────────────────────────────────────
+    try:
+        from data.fundamentals_cache import stats as _fc_stats
+        fcs = _fc_stats()
+        if not fcs["enabled"]:
+            checks.append(_info("Fundamentals cache (P7-I)", "Disabled via FUNDAMENTALS_CACHE",
+                                "Unset FUNDAMENTALS_CACHE to re-enable"))
+        else:
+            try:
+                n = (db.table("fundamentals_cache")
+                       .select("symbol", count="exact").limit(1).execute().count) or 0
+                detail = f"{n} symbols cached"
+                if fcs["lookups"]:
+                    detail += (f" — {fcs['hits']}/{fcs['lookups']} served from cache "
+                               f"({fcs['hit_rate_pct']}%)")
+                if fcs["stale_served"]:
+                    detail += f", {fcs['stale_served']} served during source outage"
+                checks.append(_ok("Fundamentals cache (P7-I)", detail))
+            except Exception:
+                checks.append(_warn(
+                    "Fundamentals cache (P7-I)",
+                    "Table not found — falling back to live fetches on every call",
+                    "Run db/migrations/create_fundamentals_cache.sql in Supabase",
+                ))
+    except Exception as exc:
+        checks.append(_warn("Fundamentals cache (P7-I)", f"Stats unavailable: {exc}",
+                            "Check data/fundamentals_cache.py import"))
+
     # ── Last daily pipeline run ───────────────────────────────────────────────
     # daily_runs schema: run_date, symbols_processed, errors (INTEGER count),
     # duration_seconds, status (OK | WARNING | DATA_DEGRADATION), created_at.

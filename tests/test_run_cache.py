@@ -470,13 +470,21 @@ class TestSymbolKeyNormalisation:
             )
 
     def test_real_fetchers_are_decorated_with_the_normaliser(self):
-        """Structural guard: the decorator must actually carry key_fn."""
+        """
+        Structural guard: the memo decorator must carry key_fn. Tolerates other
+        decorators between it and the def (P7-I inserts @persist_cache there),
+        so this checks the decorator block rather than line adjacency.
+        """
         import inspect
+        import re
         import data.fetchers as F
 
         src = inspect.getsource(F)
         for fn_name in ("get_screener_data", "get_screener_history"):
-            assert f"@memoise_run(key_fn=symbol_key)\ndef {fn_name}(" in src, (
+            m = re.search(rf"((?:^@.*\n)+)def {fn_name}\(", src, re.M)
+            assert m, f"{fn_name} has no decorator block"
+            block = m.group(1)
+            assert "memoise_run(key_fn=symbol_key)" in block, (
                 f"{fn_name} is memoised without symbol normalisation"
             )
 

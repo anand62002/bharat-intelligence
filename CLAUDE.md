@@ -212,6 +212,23 @@ Stock analysis/
 │   │                           # get_gift_nifty_signal() — 06:30–09:15 IST pre-market window
 │   ├── impact_cost.py          # Market impact-cost (slippage) estimator from intraday OHLCV
 │   │                           # estimate_impact_cost(symbol, trade_value_inr) → liquidity_tier + impact_cost_pct
+│   ├── fundamentals_cache.py   # P7-I: PERSISTENT fundamentals cache (Supabase, days)
+│   │                           # @persist_cache(kind="snapshot"|"history") sits BENEATH
+│   │                           #   the P7-H memo, above the network
+│   │                           # TTL: snapshot 7d, history 30d (env-overridable)
+│   │                           # Early invalidation when earnings_calendar shows results
+│   │                           #   reported between fetched_at and now
+│   │                           # Quality rank: screener_in 3 / trendlyne 2 / yfinance 1.
+│   │                           #   A successful screener fetch leaves data_source UNSET —
+│   │                           #   that absence is what identifies it as tier-1
+│   │                           # Two rules this exists for:
+│   │                           #   (a) a degraded fetch never overwrites a better cached row
+│   │                           #   (b) on a 403 outage, returns last-known-good REAL
+│   │                           #       fundamentals (flagged served_from_cache +
+│   │                           #       cache_age_days) instead of thin yfinance data
+│   │                           # STALE_FLOOR_DAYS=90 — beyond that, live data wins
+│   │                           # Never raises: any cache failure falls through to live fetch
+│   │                           # Requires db/migrations/create_fundamentals_cache.sql
 │   ├── run_cache.py            # P7-H: intra-run memoisation for remote fundamentals
 │   │                           # @memoise_run() wraps get_screener_data + get_screener_history
 │   │                           # Per-KEY locking + double-checked reads: fundamental, warren_bot
@@ -311,6 +328,8 @@ Stock analysis/
 | `market_digests` | P6-C daily market briefs | `id (UUID PK), digest_type (MORNING/CLOSING), digest_date (DATE), headline_count, top_themes (jsonb), summary, key_events (jsonb), market_mood, nifty_signal, sectors_in_focus (jsonb), raw_headlines (jsonb), created_at` — unique on (digest_type, digest_date) |
 
 > **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results, create_paper_portfolio, p5d_live_performance_columns, create_market_digests, allow_suppressed_action)
+>
+> **⏳ Pending:** `db/migrations/create_fundamentals_cache.sql` (P7-I) — until it is run in Supabase → SQL Editor, every fundamentals call falls through to a live fetch and `/api/system/health` shows a warning for "Fundamentals cache (P7-I)". Nothing breaks without it; the cache simply never populates.
 >
 > `allow_suppressed_action.sql` ✅ applied 2026-08-14 — `recommendations_action_check` now accepts `action='SUPPRESSED'`, so `_log_suppressed_synthesis()` persists suppressed recs for human review instead of failing with error 23514.
 
@@ -560,6 +579,7 @@ npm start          # CRA dev server on port 3000
 - **IS_LIVE / mock data as fallback.** `IS_LIVE = Boolean(API_URL)`. When live, states init empty and fill from API. When no backend (local dev), mock constants are used. No mock data shown in production.
 - **yf_symbol stored separately.** `portfolio_holdings` has both `symbol` (display, e.g. `RELIANCE`) and `yf_symbol` (e.g. `RELIANCE.NS`). GET /api/portfolio uses `yf_symbol` to refresh prices.
 - **60s market cache.** `_market_cache` + `_market_cache_ts` globals in `api/main.py` prevent hammering yfinance on every dashboard render.
+- **Fundamentals are cached across days (P7-I), not just within a run.** `data/fundamentals_cache.py` wraps the same two fetchers beneath the P7-H memo with a Supabase-backed cache: snapshot 7d TTL, history 30d, invalidated early when the symbol reports results. It ranks payload origin (screener 3 / trendlyne 2 / yfinance 1) so **a degraded fetch can never overwrite a good cached row**, and on a source outage it returns last-known-good real fundamentals — flagged `served_from_cache` / `cache_age_days` — rather than letting agents score on thin yfinance data. Requires `db/migrations/create_fundamentals_cache.sql`; without the table it logs a warning on `/api/system/health` and every call falls through to a live fetch.
 - **Fundamentals are fetched once per symbol per run (P7-H).** `get_screener_data` / `get_screener_history` are wrapped in `@memoise_run()` (`data/run_cache.py`). Five consumers — fundamental, warren_bot, mgmt_quality, governance_screener, and insider_signal (called twice, by sentiment and institutional) — used to issue ~9 identical requests per symbol. **When adding a new consumer of fundamentals, call the fetcher directly; do not add your own caching or thread a result through.** The cache is per-key-locked precisely because the first three run concurrently in one `asyncio.gather`. New pipeline entry points should wrap themselves in `run_cache.scope(...)` / `@run_cache.scoped(...)` so each run starts cold and logs its saving.
 - **Discovery valid_till, not created_at.** `GET /api/discovery` filters on `valid_till >= today`. Re-confirmations within the 10-day cooldown UPDATE the existing row and refresh `valid_till` but leave `created_at` at the original insert date, so a `created_at` filter silently drops them (BF-22).
 - **On-demand analysis runs a trimmed graph.** `POST /api/analyse` calls `run_pipeline(on_demand=True)`, which drops `sector_pe_snapshot`, `save_recs`, `monitor` and `log_run`. Ad-hoc single-symbol runs must never write a `daily_runs` row — it pollutes the run log and skews the P7-F data-quality percentages.
