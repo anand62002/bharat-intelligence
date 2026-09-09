@@ -101,6 +101,30 @@ def _make_key(label: str, args: tuple, kwargs: dict) -> Optional[str]:
         return None
 
 
+def symbol_key(args: tuple, kwargs: dict) -> tuple[tuple, dict]:
+    """
+    Key normaliser for symbol-first fetchers: fold "TITAN" and "TITAN.NS" onto
+    the same cache entry.
+
+    Different consumers pass different forms of the same symbol — discovery and
+    governance_screener pass the bare ticker, the fundamental agent passes the
+    yfinance form — so without this the cache treats them as unrelated and each
+    runs its own full fallback chain. Observed in the 2026-09-09 06:00 run:
+    9 of 14 companies were fetched under both forms, doubling the work.
+
+    Safe because resolve_screener() calls _base(), which strips .NS/.BO — both
+    forms resolve to the same screener slug and therefore the same data.
+    """
+    if not args:
+        return args, kwargs
+    head = str(args[0]).strip().upper()
+    for suffix in (".NS", ".BO"):
+        if head.endswith(suffix):
+            head = head[: -len(suffix)]
+            break
+    return (head,) + tuple(args[1:]), kwargs
+
+
 def _read(key: str, ttl: float) -> Any:
     """Return the cached value, or _MISS when absent or expired."""
     with _GUARD:
@@ -167,6 +191,7 @@ def _bump(field: str) -> None:
 def memoise_run(
     ttl: float | None = None,
     label: str | None = None,
+    key_fn: Callable[[tuple, dict], tuple] | None = None,
 ) -> Callable:
     """
     Memoise a function for the duration of a run (bounded by `ttl`).
@@ -182,7 +207,16 @@ def memoise_run(
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            key = _make_key(fn_label, args, kwargs)
+            # key_fn only rewrites the CACHE KEY — the wrapped function still
+            # receives the caller's original arguments untouched.
+            if key_fn is not None:
+                try:
+                    k_args, k_kwargs = key_fn(args, kwargs)
+                except Exception:
+                    k_args, k_kwargs = args, kwargs
+            else:
+                k_args, k_kwargs = args, kwargs
+            key = _make_key(fn_label, k_args, k_kwargs)
             if key is None:                       # unhashable/unrepresentable
                 _bump("bypassed")
                 return fn(*args, **kwargs)

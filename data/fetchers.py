@@ -18,7 +18,7 @@ import requests
 import yfinance as yf
 from bs4 import BeautifulSoup
 
-from data.run_cache import memoise_run   # P7-H intra-run memoisation
+from data.run_cache import memoise_run, symbol_key   # P7-H intra-run memoisation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -1089,7 +1089,7 @@ def get_bse_announcements(symbol: str = "", hours: int = 24) -> list[dict]:
 # P7-H: memoised for the duration of a run. fundamental, warren_bot,
 # mgmt_quality and governance_screener each fetch the same symbol — the first
 # three concurrently — so without this one symbol costs 4 identical requests.
-@memoise_run()
+@memoise_run(key_fn=symbol_key)
 def get_screener_data(symbol: str) -> dict | None:
     """
     Scrape key fundamentals from screener.in for an NSE-listed company.
@@ -1979,7 +1979,7 @@ def _parse_screener_excel(excel_bytes: bytes, symbol: str) -> dict | None:
 # insider_signal (invoked twice, by sentiment and by institutional) all pull the
 # same multi-year history for one symbol. This is also the most expensive call
 # in the chain, since a thin HTML parse triggers the Excel-export fallback.
-@memoise_run()
+@memoise_run(key_fn=symbol_key)
 def get_screener_history(symbol: str) -> dict | None:
     """
     Fetch multi-year historical financial data from screener.in for a company.

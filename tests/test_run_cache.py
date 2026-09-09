@@ -385,3 +385,111 @@ class TestNestedScopes:
         with run_cache.scope("next2"):
             fetch2("A")
         assert len(calls) == 2, "scope depth leaked after an exception"
+
+
+class TestSymbolKeyNormalisation:
+    """
+    Consumers pass different forms of the same symbol — discovery and
+    governance_screener use the bare ticker, the fundamental agent uses the
+    yfinance form. Without normalisation each form is its own cache entry and
+    runs its own full fallback chain. Observed live in the 2026-09-09 06:00
+    run: 9 of 14 companies were fetched under BOTH forms.
+    """
+
+    def test_bare_and_suffixed_forms_share_one_entry(self):
+        from data.run_cache import symbol_key
+
+        calls = []
+
+        @memoise_run(key_fn=symbol_key)
+        def fetch(symbol):
+            calls.append(symbol)
+            return {"pe": 24.1}
+
+        fetch("TITAN")
+        fetch("TITAN.NS")
+        fetch("TITAN.BO")
+        fetch("titan")
+        assert len(calls) == 1, f"expected one fetch, got {calls}"
+
+    def test_wrapped_function_still_receives_original_argument(self):
+        """Normalisation must rewrite the KEY only, never the call itself."""
+        from data.run_cache import symbol_key
+
+        seen = []
+
+        @memoise_run(key_fn=symbol_key)
+        def fetch(symbol):
+            seen.append(symbol)
+            return symbol
+
+        assert fetch("TITAN.NS") == "TITAN.NS"
+        assert seen == ["TITAN.NS"], "the callee must see what the caller passed"
+
+    def test_distinct_symbols_still_separate(self):
+        from data.run_cache import symbol_key
+
+        calls = []
+
+        @memoise_run(key_fn=symbol_key)
+        def fetch(symbol):
+            calls.append(symbol)
+            return symbol
+
+        fetch("TITAN"); fetch("TCS.NS"); fetch("TITAN.NS")
+        assert len(calls) == 2
+
+    def test_screener_fetchers_share_a_key_across_symbol_forms(self):
+        """
+        End-to-end on the real fetchers: call each with both symbol forms while
+        the network layer is stubbed, and assert the underlying function ran
+        once. This is the regression that cost ~2x the work in the 06:00 run.
+        """
+        from unittest.mock import patch
+        from data import run_cache
+        import data.fetchers as F
+
+        for fn_name in ("get_screener_data", "get_screener_history"):
+            run_cache.clear()
+            entered = []
+            fn = getattr(F, fn_name)
+
+            def stub(symbol, _e=entered):
+                _e.append(symbol)
+                return {"ok": True}
+
+            # Replace the memoised function's body, keeping the cache wrapper.
+            with patch.object(fn, "__wrapped__", stub, create=True):
+                cached = run_cache.memoise_run(key_fn=run_cache.symbol_key,
+                                               label=f"data.fetchers.{fn_name}")(stub)
+                cached("TITAN")
+                cached("TITAN.NS")
+
+            assert len(entered) == 1, (
+                f"{fn_name}: 'TITAN' and 'TITAN.NS' did not share a cache entry"
+            )
+
+    def test_real_fetchers_are_decorated_with_the_normaliser(self):
+        """Structural guard: the decorator must actually carry key_fn."""
+        import inspect
+        import data.fetchers as F
+
+        src = inspect.getsource(F)
+        for fn_name in ("get_screener_data", "get_screener_history"):
+            assert f"@memoise_run(key_fn=symbol_key)\ndef {fn_name}(" in src, (
+                f"{fn_name} is memoised without symbol normalisation"
+            )
+
+    def test_key_fn_failure_falls_back_to_raw_args(self):
+        def boom(args, kwargs):
+            raise ValueError("bad normaliser")
+
+        calls = []
+
+        @memoise_run(key_fn=boom)
+        def fetch(symbol):
+            calls.append(symbol)
+            return 1
+
+        fetch("A"); fetch("A")
+        assert len(calls) == 1, "a broken key_fn must degrade to raw-arg keying, not break caching"
