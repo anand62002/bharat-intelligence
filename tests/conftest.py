@@ -21,18 +21,28 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def _reset_run_cache():
+def _reset_run_cache(monkeypatch):
     """
-    Clear the P7-H fundamentals memo cache between tests.
+    Isolate both fundamentals cache layers for every test.
 
-    `get_screener_data` / `get_screener_history` are memoised per run
-    (data/run_cache.py). Tests routinely call them with the same symbol but
-    different mocked HTML, so without this the second test in a class is served
-    the first test's cached result and fails for reasons unrelated to its
-    subject. Production is unaffected — nothing there re-fetches one symbol
-    expecting different data inside the TTL — but tests must stay isolated.
+    P7-H (in-process memo): `get_screener_data` / `get_screener_history` are
+    memoised per run. Tests routinely call them with the same symbol but
+    different mocked HTML, so without clearing, the second test in a class is
+    served the first test's result and fails for reasons unrelated to its
+    subject.
+
+    P7-I (persistent, Supabase): disabled outright during tests. Left on, every
+    fetcher-touching test makes live database round-trips — which slowed the
+    suite badly — and, worse, tests that call get_screener_data("TEST") with
+    mocked HTML WRITE that fixture into the production cache table. A `TEST`
+    row was found there on 2026-09-09 and removed.
+
+    Tests that want to exercise the persistent cache re-enable it explicitly;
+    tests/test_fundamentals_cache.py drives it through mocks instead.
     """
-    from data import run_cache
+    from data import run_cache, fundamentals_cache
+
+    monkeypatch.setattr(fundamentals_cache, "_ENABLED", False, raising=False)
     run_cache.clear()
     yield
     run_cache.clear()

@@ -25,7 +25,16 @@ YFIN = {"pe": 23.9, "data_source": "yfinance_fallback"}
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
+    """
+    Re-enable the persistent cache for this file only.
+
+    The global conftest fixture disables it for the rest of the suite (it would
+    otherwise make live Supabase calls and write test fixtures into the
+    production table). These tests exercise the cache itself and drive it
+    entirely through mocks, so no real database is touched.
+    """
+    monkeypatch.setattr(fc, "_ENABLED", True, raising=False)
     fc.reset_stats()
     yield
     fc.reset_stats()
