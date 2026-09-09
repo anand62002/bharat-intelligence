@@ -94,6 +94,22 @@ def _supabase():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _resolve_yf_symbol(symbol: str) -> str:
+    """
+    Convert a plain NSE symbol to its yfinance ticker.
+
+    Consults YF_SYMBOL_MAP first — appending ".NS" is wrong for every
+    brand-name alias (IHCL -> INDHOTEL.NS, BHARATSEAT -> BHARATSE.NS,
+    HITACHIENERGYINDIA -> POWERINDIA.NS). Without this those positions never
+    price: the batch download logs "No data found, symbol may be delisted",
+    current_price stays at entry, and stoploss/target exits never fire.
+    """
+    try:
+        from data.symbol_map import YF_SYMBOL_MAP
+        base = symbol.replace(".NS", "").replace(".BO", "").upper()
+        if base in YF_SYMBOL_MAP:
+            return YF_SYMBOL_MAP[base]
+    except Exception:
+        pass
     if "." in symbol or symbol.startswith("^"):
         return symbol
     return f"{symbol}.NS"

@@ -165,7 +165,23 @@ def _fetch_price_on_date(yf_symbol: str, target_date: date, window: int = WINDOW
 
 
 def _resolve_yf_symbol(symbol: str) -> str:
-    """Convert plain NSE symbol to yfinance format."""
+    """
+    Convert a plain NSE symbol to its yfinance ticker.
+
+    Consults YF_SYMBOL_MAP first. Appending ".NS" is wrong for every brand-name
+    alias — IHCL is INDHOTEL.NS, BHARATSEAT is BHARATSE.NS,
+    HITACHIENERGYINDIA is POWERINDIA.NS — and yfinance answers those with
+    "No data found, symbol may be delisted", which this module turns into a
+    silent None and then skips the row forever. Same fix portfolio_risk already
+    carries.
+    """
+    try:
+        from data.symbol_map import YF_SYMBOL_MAP
+        base = symbol.replace(".NS", "").replace(".BO", "").upper()
+        if base in YF_SYMBOL_MAP:
+            return YF_SYMBOL_MAP[base]
+    except Exception:
+        pass
     if "." in symbol or symbol.startswith("^"):
         return symbol
     return f"{symbol}.NS"
