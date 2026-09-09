@@ -329,7 +329,7 @@ Stock analysis/
 
 > **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results, create_paper_portfolio, p5d_live_performance_columns, create_market_digests, allow_suppressed_action)
 >
-> **⏳ Pending:** `db/migrations/create_fundamentals_cache.sql` (P7-I) — until it is run in Supabase → SQL Editor, every fundamentals call falls through to a live fetch and `/api/system/health` shows a warning for "Fundamentals cache (P7-I)". Nothing breaks without it; the cache simply never populates.
+> `create_fundamentals_cache.sql` (P7-I) ✅ applied 2026-09-09 (RLS disabled on the table — it holds public market data only). Verified live: a second run with the in-process memo cleared served 1/1 from the persistent cache with zero live fetches.
 >
 > `allow_suppressed_action.sql` ✅ applied 2026-08-14 — `recommendations_action_check` now accepts `action='SUPPRESSED'`, so `_log_suppressed_synthesis()` persists suppressed recs for human review instead of failing with error 23514.
 
