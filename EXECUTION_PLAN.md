@@ -970,11 +970,13 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P6-C** | Market tab daily news digest (Morning Brief + Closing Digest, single Haiku call) | Code | None (existing Anthropic key) | L | ✅ Done |
 | **P7-A** | Fable 5 synthesis — replace claude-sonnet-4-6 with claude-fable-5 + adaptive thinking; better contradiction detection, calibrated confidence, causal reasoning | Code | None (existing key) | M | ⬜ TODO |
 | **P7-B** | Fable 5 lead validation judge — replace claude-opus-4-8 judge; kappa threshold recalibration post-Fable-5 distribution shift | Code | None | S | ⬜ TODO |
-| **P7-C** | Data density firewall — data_years_available field; block DCF/CAGR on <5yr data; emit INSUFFICIENT_DATA; inject data_years into synthesis prompt | Code | None | M | ⬜ TODO |
-| **P7-D** | Signal independence — promote ATR entry zones to top-level rec fields; synthesis must reconcile technical support with fundamental fair value | Code | None | S | ⬜ TODO |
+| **P7-C** | Data density firewall — data_years_available field; block DCF/CAGR on <5yr data; emit INSUFFICIENT_DATA; inject data_years into synthesis prompt | Code | None | M | ✅ Done 2026-08-04 |
+| **P7-D** | Signal independence — promote ATR entry zones to top-level rec fields; synthesis must reconcile technical support with fundamental fair value | Code | None | S | ✅ Done 2026-08-04 |
 | **P7-E** | Adversarial 2-pass debate — Pass 1 devil's advocate (forced bear case), Pass 2 synthesis; prevents narrative lock-in. Requires Fable 5 | Code | None | L | ⬜ TODO |
-| **P7-F** | Partial/degraded data alerting — per-symbol data source flag; alert when >30% of run used degraded data; Governance tab "Data Source Quality" panel | Code | None | S | ⬜ TODO |
+| **P7-F** | Partial/degraded data alerting — per-symbol data source flag; alert when >30% of run used degraded data; Governance tab "Data Source Quality" panel | Code | None | S | ✅ Done 2026-08-04 |
 | **P7-G** | Trendlyne MCP connector — replace HTML scraping with MCP API for fundamentals, DVM, shareholding, insider trades, quarterly results; frugal caching (Supabase 24h TTL) to stay within 2,000–5,000 calls/month limit. Requires TRENDLYNE_MCP_KEY. Individual plan only — confirm with Trendlyne if automated server-side use is permitted | Code + Service | ₹2,990–₹4,990/yr (Pro or Max annual MCP plan) | M | ⬜ TODO |
+| **P7-H** | Fundamentals cache Phase 1 — intra-run memoisation; per-key locking so the concurrent fundamental/warren_bot/mgmt_quality gather collapses to one fetch; 9 → 2 fetches per symbol | Code | None | S | ✅ Done 2026-08-14 |
+| **P7-I** | Fundamentals cache Phase 2 — persistent cache with per-field decay (ratios ~7d, annual history ~30d, promoter ~30d); earnings-date invalidation; serve stale-but-flagged on source outage. Precondition for P7-G | Code | None | M | ⬜ **NEXT** |
 | **P8-A** | Live trading agent — signal + Telegram alert engine | Code | None (Telegram free) | L | ⬜ TODO |
 | **P8-B** | Paper-to-live promotion gate — 60d paper validation before live signals | Code | None | M | ⬜ TODO |
 | **P8-C** | Kite Connect / Zerodha demat API integration (optional) | Code + Service | ₹0 Kite (free with demat) | XL | ⬜ TODO |
