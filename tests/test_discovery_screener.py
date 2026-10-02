@@ -1101,6 +1101,35 @@ class TestRunDiscovery:
         monkeypatch.setattr("agents.discovery_screener._save_discovery", lambda d: None)
         monkeypatch.setattr("agents.discovery_screener._log_daily_run",  lambda **kw: None)
 
+        # No live LLM. The CRITICAL path runs validate_discovery_synthesis, which
+        # was NOT mocked here — so these "unit" tests were making real, paid,
+        # non-deterministic judge calls, and the tier they asserted depended on
+        # whatever three LLMs happened to score that day. Changing the opus judge
+        # to claude-opus-5-5 duly broke test_critical_opportunity_detected: kappa
+        # landed at 0.333 against the 0.35 discovery threshold and the CRITICAL
+        # result was demoted to STANDARD.
+        #
+        # These tests are about tier CLASSIFICATION logic, not judge behaviour,
+        # so the validator is stubbed to a clean PASS. The judge panel has its
+        # own coverage, and the production threshold question is tracked as
+        # OBS-1 rather than being settled by what makes a unit test green.
+        async def _pass_validation(symbol, synthesis, agents, client=None, **kw):
+            from scheduler.synthesis_validator import ValidationOutcome
+            return ValidationOutcome(
+                status             = "PASS",
+                aggregate_kappa    = 0.90,
+                dimensions         = {},
+                failed_dimensions  = [],
+                caveats            = [],
+                suppression_reason = None,
+                judge_errors       = [],
+                elapsed_seconds    = 0.0,
+            )
+        monkeypatch.setattr(
+            "scheduler.synthesis_validator.validate_discovery_synthesis",
+            _pass_validation,
+        )
+
     def test_returns_list(self, monkeypatch):
         self._patch_all(monkeypatch)
         results = run_discovery(max_candidates=2, save_to_db=False)
