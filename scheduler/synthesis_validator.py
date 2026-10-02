@@ -67,9 +67,25 @@ log = logging.getLogger(__name__)
 JUDGE_MODELS: dict[str, str] = {
     "gpt":    os.getenv("JUDGE_MODEL_GPT",    "gpt-4o-mini"),
     "sonnet": os.getenv("JUDGE_MODEL_SONNET", "claude-sonnet-4-6"),
-    "opus":   os.getenv("JUDGE_MODEL_OPUS",   "claude-opus-4-8"),
+    # Upgraded 2026-09-10: claude-opus-4-8 -> claude-opus-5-5. The judge panel
+    # is the lever on aggregate kappa (observed 0.359 against a 0.30 threshold,
+    # with 4 of 5 rubrics failing individually), and P7-B identifies judge
+    # reasoning quality as the cause rather than any code defect.
+    # NOTE: changing this shifts the kappa DISTRIBUTION, and kappa gates
+    # publishing via KAPPA_SUPPRESS. Watch the suppression rate for a few days
+    # before recalibrating the threshold.
+    "opus":   os.getenv("JUDGE_MODEL_OPUS",   "claude-opus-5-5"),
 }
-JUDGE_MAX_TOKENS = 150   # JSON score + one-sentence rationale
+
+# Was 150, which silently truncated Opus. A truncated response fails
+# json.loads, raises, and that judge's score is DROPPED — so the dimension's
+# kappa is computed from 2 raters instead of 3, which both adds noise and
+# depresses agreement. Seen live on 2026-08-13: opus/data_provenance and
+# opus/logic_coherence both logged "returned non-JSON: Unterminated string",
+# and those two rubrics scored 0.281 and 0.250 — the lowest of the five.
+# The rationale is clipped to 200 chars downstream, so this is pure headroom;
+# max_tokens is a ceiling, not a target, and costs nothing unless generated.
+JUDGE_MAX_TOKENS = int(os.getenv("JUDGE_MAX_TOKENS", 500))
 JUDGE_TIMEOUT    = 45    # seconds per judge call
 
 

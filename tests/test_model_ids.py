@@ -28,8 +28,16 @@ RETIRED = [
     "claude-2",
 ]
 
-# Current, per the Anthropic model list.
+# Current, verified against client.models.list() on 2026-09-10. Newest first.
+# Re-run that call before editing this set — a cached list goes stale fast:
+# the one this project was working from in May 2026 topped out at Opus 4.8 and
+# had missed six later releases by September.
 CURRENT = {
+    "claude-sonnet-5-5",
+    "claude-opus-5-5",
+    "claude-fable-5-1",
+    "claude-opus-5",
+    "claude-sonnet-5",
     "claude-fable-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
