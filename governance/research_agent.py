@@ -69,7 +69,12 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 HAIKU_MODEL         = os.getenv("CLAUDE_HAIKU_MODEL", "claude-haiku-4-5")
-SONNET_MODEL        = os.getenv("CLAUDE_MODEL",       "claude-sonnet-4-5")
+# claude-sonnet-4-5 is deprecated — migrated to its direct successor 2026-09-10.
+# Reads its OWN env var: this previously shared CLAUDE_MODEL with the
+# orchestrator but with a *different* default, so the two silently drifted apart
+# (synthesis on 4-6, research still on the retired 4-5) and setting CLAUDE_MODEL
+# to tune synthesis would have changed the research agent as a side effect.
+SONNET_MODEL        = os.getenv("RESEARCH_AGENT_MODEL", "claude-sonnet-4-6")
 HAIKU_MAX_TOKENS    = 512
 SONNET_MAX_TOKENS   = 1024
 RELEVANCE_THRESHOLD = 75    # papers scoring >= this get a Sonnet proposal
