@@ -63,6 +63,7 @@ from agents.rationale import build_rationale as _build_rationale
 load_dotenv()
 
 log = logging.getLogger(__name__)
+from data.llm_utils import first_text  # model-agnostic response text extraction
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -291,7 +292,7 @@ def _llm_normalise_to_ticker(query: str) -> str | None:
                 ),
             }],
         )
-        ticker = (msg.content[0].text or "").strip().upper().split()[0]
+        ticker = (first_text(msg) or "").strip().upper().split()[0]
         if ticker and ticker != "UNKNOWN" and len(ticker) <= 20:
             log.info("LLM normalised '%s' → %s", query, ticker)
             return ticker

@@ -63,6 +63,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 log = logging.getLogger(__name__)
+from data.llm_utils import first_text  # model-agnostic response text extraction
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -835,7 +836,7 @@ def _score_relevance(paper: ResearchPaper, client) -> int:
             system     = _RELEVANCE_SYSTEM,
             messages   = [{"role": "user", "content": prompt}],
         )
-        raw = msg.content[0].text.strip()
+        raw = first_text(msg).strip()
         parsed = _extract_json(raw)
         score  = int(parsed.get("relevance", 0))
         reason = str(parsed.get("reason", ""))
@@ -903,7 +904,7 @@ def _generate_proposal(paper: ResearchPaper, client) -> Optional[dict]:
             system     = _SYSTEM_CONTEXT,
             messages   = [{"role": "user", "content": prompt}],
         )
-        raw    = msg.content[0].text.strip()
+        raw    = first_text(msg).strip()
         parsed = _extract_json(raw)
         return parsed
     except Exception as exc:
@@ -974,7 +975,7 @@ def _debate_one_agent(
             system     = persona,
             messages   = [{"role": "user", "content": prompt}],
         )
-        raw    = msg.content[0].text.strip()
+        raw    = first_text(msg).strip()
         parsed = _extract_json(raw)
         stance = str(parsed.get("stance", "ABSTAIN")).upper()
         if stance not in {"FOR", "AGAINST", "ABSTAIN"}:

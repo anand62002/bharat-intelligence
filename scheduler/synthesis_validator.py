@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
+from data.llm_utils import first_text  # model-agnostic response text extraction
 
 # ── Model identifiers (overridable via env vars) ──────────────────────────────
 # Judge 1: GPT-4o-mini — independent provider (requires OPENAI_API_KEY)
@@ -465,7 +466,7 @@ async def _call_anthropic_judge(
             ),
             timeout=JUDGE_TIMEOUT,
         )
-        text = response.content[0].text.strip()
+        text = first_text(response).strip()
         m = re.search(r"\{.*?\}", text, re.DOTALL)
         raw_json = m.group(0) if m else text
         data      = json.loads(raw_json)

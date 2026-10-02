@@ -58,6 +58,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 log = logging.getLogger(__name__)
+from data.llm_utils import first_text  # model-agnostic response text extraction
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 MAX_SAMPLE_RECS          = 20
@@ -753,7 +754,7 @@ def _llm_reconcile_contradiction(
             max_tokens=150,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = (resp.content[0].text or "").strip() if resp.content else ""
+        text = first_text(resp).strip()
         reconciled = text.upper().startswith("RECONCILABLE")
         note_line  = text.split("\n", 1)[-1].strip() if "\n" in text else text
         return reconciled, note_line

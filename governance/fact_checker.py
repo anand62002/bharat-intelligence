@@ -54,6 +54,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 log = logging.getLogger(__name__)
+from data.llm_utils import first_text  # model-agnostic response text extraction
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 FACT_CHECK_PROMPT_PATH  = _ROOT / "prompts" / "fact_check.txt"
@@ -526,7 +527,7 @@ def _verify_claim(
             max_tokens = HAIKU_MAX_TOKENS,
             messages   = [{"role": "user", "content": prompt}],
         )
-        raw_text = response.content[0].text.strip()
+        raw_text = first_text(response).strip()
 
         # Strip markdown fences if present (e.g. ```json ... ```)
         raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)

@@ -66,6 +66,7 @@ from governance.performance_tracker import audit_data_leakage   # noqa: E402
 
 # ── LangGraph ─────────────────────────────────────────────────────────────────
 from langgraph.graph import StateGraph, END                    # noqa: E402
+from data.llm_utils import first_text  # model-agnostic response text extraction
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 AGENT_NAMES: list[str] = [
@@ -73,8 +74,20 @@ AGENT_NAMES: list[str] = [
     "institutional", "macro", "historical_rag", "commodities",
 ]
 DEFAULT_ACCURACY      = 70.0    # fallback accuracy when agent_performance has no row
-CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-CLAUDE_MAX_TOKENS     = 2048
+# Upgraded 2026-10-02: claude-sonnet-4-6 -> claude-opus-5-5 (P7-A).
+# Synthesis is the highest-leverage call in the system — it runs the bull/bear
+# debate across 7 agent signals and produces the published recommendation — so
+# it gets the strongest model. P7-A wanted this for contradiction detection
+# across conflicting agents and better-calibrated confidence.
+CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
+# Raised from 2048. The synthesis JSON is large (3 bull points, 3 bear points, a
+# synthesis paragraph, market_constraints, headline and ~12 numeric fields), and
+# on models with adaptive thinking the thinking tokens also count against this
+# ceiling. Truncation here is silent and total: the JSON fails to parse and the
+# symbol is dropped from the run. The same 150-token ceiling was already
+# discarding ~every Opus judge reply before it was raised. A ceiling costs
+# nothing unless generated.
+CLAUDE_MAX_TOKENS     = int(os.getenv("CLAUDE_MAX_TOKENS", 4096))
 SYNTHESIS_PROMPT_PATH = _ROOT / "prompts" / "orchestrator_synthesis.txt"
 SEMANTIC_LAYER_PATH   = _ROOT / "docs"    / "semantic_layer.md"
 
@@ -1149,7 +1162,7 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                             system=_system if _system else anthropic.NOT_GIVEN,
                             messages=[{"role": "user", "content": prompt}],
                         )
-                        _synthesis_raw = _resp.content[0].text
+                        _synthesis_raw = first_text(_resp)
                         break
                     except Exception as _api_exc:
                         _last_exc = _api_exc

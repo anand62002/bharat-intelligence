@@ -515,10 +515,12 @@ Uses `ANTHROPIC_API_KEY` env var server-side (never exposed to browser).
 | `ICICI_USER_ID` | *(Optional)* ICICI Direct login ID — enables auto-token refresh at 08:30 IST |
 | `ICICI_PASSWORD` | *(Optional)* ICICI Direct password — enables auto-token refresh |
 | `BREEZE_TOTP_SECRET` | *(Optional)* Base32 TOTP secret — enables fully automated daily refresh (DEPRECATED, see P4-D) |
-| `CLAUDE_MODEL` | *(Optional)* Synthesis model for `scheduler/orchestrator.py`. Default `claude-sonnet-4-6`. |
+| `CLAUDE_MODEL` | *(Optional)* Synthesis model for `scheduler/orchestrator.py`. Default `claude-opus-5-5` (P7-A, 2026-10-02). |
+| `CLAUDE_MAX_TOKENS` | *(Optional)* Synthesis ceiling. Default 4096 (was 2048 — adaptive-thinking tokens share this budget, and truncation drops the whole symbol). |
+| `JUDGE_MAX_TOKENS` | *(Optional)* Per-judge ceiling. Default 500 (was 150, which truncated ~every Opus reply and silently dropped that judge from the kappa calculation). |
 | `RESEARCH_AGENT_MODEL` | *(Optional)* Proposal-generation model for `governance/research_agent.py`. Default `claude-sonnet-4-6`. Separate from `CLAUDE_MODEL` since 2026-09-10 — the two previously shared that variable with **different defaults**, so they drifted apart silently and tuning synthesis would have changed the research agent as a side effect. |
 | `CLAUDE_HAIKU_MODEL` | *(Optional)* Haiku model for fact-checker / sentiment / digest / warren_bot commentary. Default `claude-haiku-4-5`. |
-| `JUDGE_MODEL_GPT` / `JUDGE_MODEL_SONNET` / `JUDGE_MODEL_OPUS` | *(Optional)* Override the three synthesis-validation judges. Defaults `gpt-4o-mini` / `claude-sonnet-4-6` / `claude-opus-4-8`. |
+| `JUDGE_MODEL_GPT` / `JUDGE_MODEL_SONNET` / `JUDGE_MODEL_OPUS` | *(Optional)* Override the three synthesis-validation judges. Defaults `gpt-4o-mini` / `claude-sonnet-4-6` / `claude-opus-5-5`. |
 | `TRENDLYNE_SESSION` | `.trendlyne` cookie value — required for F&O Excel download + analyst targets scraper |
 | `TRENDLYNE_CSRF` | `csrftoken` cookie value — required alongside TRENDLYNE_SESSION |
 | `TRENDLYNE_USER` | *(Optional)* Trendlyne login email — enables auto-cookie-refresh when session expires |

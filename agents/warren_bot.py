@@ -32,6 +32,7 @@ from agents.base import DataCompletenessValidator, insufficient_data_result
 _dcv = DataCompletenessValidator()
 
 log = logging.getLogger(__name__)
+from data.llm_utils import first_text  # model-agnostic response text extraction
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -727,7 +728,7 @@ def _generate_commentary(
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = msg.content[0].text.strip()
+        raw = first_text(msg).strip()
 
         # Strip markdown code fences if Haiku wraps output
         if raw.startswith("```"):
