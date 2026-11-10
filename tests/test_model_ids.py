@@ -219,3 +219,24 @@ def test_every_haiku_call_disables_thinking():
         if n_think < n_calls:
             missing.append(f"{f.relative_to(_ROOT)} ({n_calls} calls, {n_think} with thinking off)")
     assert not missing, f"Haiku calls without HAIKU_THINKING: {missing}"
+
+
+def test_no_code_assumes_first_content_block_is_text():
+    """
+    content[0] is a `thinking` block on models with adaptive thinking (Opus 5.5,
+    Haiku 5.5 unless disabled). scripts/test_synthesis.py read
+    `resp.content[0].text` and failed the 2026-11-10 Railway deploy with
+    "'ThinkingBlock' object has no attribute 'text'". Use data.llm_utils.first_text
+    (SDK objects) or scan for the first {"type": "text"} block (raw HTTP).
+    """
+    pattern = re.compile(r"""content\s*\[\s*0\s*\]\s*(\.text|\[\s*["']text["']\s*\])|content\?\.\[0\]\?\.text""")
+    hits = []
+    for f in _all_code_files():
+        for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("//") or stripped.startswith("*"):
+                continue
+            # Backtick spans are prose quoting the anti-pattern (docstrings).
+            if pattern.search(re.sub(r"`[^`]*`", "", line)):
+                hits.append(f"{f.relative_to(_ROOT)}:{i}")
+    assert not hits, f"code reads content[0] as the text block: {hits}"

@@ -67,7 +67,11 @@ def hdr(msg):  print(f"\n{BOLD}{msg}{RESET}")
 def check_env() -> bool:
     hdr("1. Environment variables")
     required = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "ANTHROPIC_API_KEY"]
-    optional = ["OPENAI_API_KEY", "HF_API_TOKEN"]
+    # What each optional key degrades to when unset.
+    optional = {
+        "OPENAI_API_KEY": "GPT judge will fall back to Haiku",
+        "HF_API_TOKEN":   "sentiment uses Haiku only, no FinBERT ensemble",
+    }
     all_ok = True
     for k in required:
         if os.getenv(k):
@@ -75,11 +79,11 @@ def check_env() -> bool:
         else:
             fail(f"{k} MISSING — required")
             all_ok = False
-    for k in optional:
+    for k, degraded in optional.items():
         if os.getenv(k):
             ok(f"{k} set (optional)")
         else:
-            warn(f"{k} not set (optional — GPT judge will fall back to Haiku)")
+            warn(f"{k} not set (optional — {degraded})")
     return all_ok
 
 
@@ -207,8 +211,10 @@ def run_synthesis(symbol: str, agent_results: dict) -> dict | None:
             _load_semantic_layer,
             _format_agent_outputs,
             _composite_score,
+            _extract_json,
             CLAUDE_MODEL, CLAUDE_MAX_TOKENS,
         )
+        from data.llm_utils import first_text
     except ImportError as exc:
         fail(f"Cannot import synthesis helpers: {exc}")
         return None
@@ -262,17 +268,25 @@ def run_synthesis(symbol: str, agent_results: dict) -> dict | None:
             messages   = [{"role": "user", "content": prompt}],
         )
         elapsed = time.time() - t0
-        raw_text = resp.content[0].text.strip()
+        # Same extraction as the orchestrator. content[0] is NOT the answer on
+        # models with adaptive thinking (Opus 5.5 returns a thinking block
+        # first) — reading content[0].text is what broke this check on deploy.
+        raw_text = first_text(resp).strip()
+        if resp.stop_reason == "max_tokens":
+            fail(f"Synthesis truncated at max_tokens={CLAUDE_MAX_TOKENS} ({elapsed:.1f}s) — "
+                 "thinking shares this budget; raise CLAUDE_MAX_TOKENS")
+            return None
+        if not raw_text:
+            fail(f"Claude returned no text block (stop_reason={resp.stop_reason}, "
+                 f"blocks={[b.type for b in resp.content]}, {elapsed:.1f}s)")
+            return None
 
-        # Parse JSON (same logic as orchestrator)
-        import re
-        m = re.search(r"\{.*\}", raw_text, re.DOTALL)
-        if not m:
+        try:
+            synthesis_data = _extract_json(raw_text)
+        except ValueError:
             fail(f"Claude response has no JSON block ({elapsed:.1f}s)")
             print(f"     Raw response snippet: {raw_text[:300]}")
             return None
-
-        synthesis_data = json.loads(m.group(0))
         action     = synthesis_data.get("action", "?")
         confidence = synthesis_data.get("confidence", "?")
         upside     = synthesis_data.get("upside_pct", "?")
