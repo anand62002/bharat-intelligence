@@ -90,7 +90,7 @@ class TestSectorPe:
 
 class TestIsSteam:
     def _make_warren(self, intrinsic=1000):
-        return {"intrinsic_value": intrinsic, "signal": "BUY"}
+        return {"intrinsic_value_per_share": intrinsic, "signal": "BUY"}
 
     @patch("agents.target_updater._quick_technicals")
     def test_steam_when_rsi_high_and_pe_stretched(self, mock_tech):
@@ -277,7 +277,7 @@ class TestMaybeExtendTarget:
         return c
 
     def _warren(self, intrinsic):
-        return {"intrinsic_value": intrinsic, "signal": "BUY",
+        return {"intrinsic_value_per_share": intrinsic, "signal": "BUY",
                 "score": 75, "margin_of_safety_pct": 15}
 
     @patch("agents.target_updater._warren_analyse")
@@ -352,7 +352,7 @@ class TestMaybeReviewLaggard:
         return c
 
     def _warren(self, intrinsic, signal="HOLD"):
-        return {"intrinsic_value": intrinsic, "signal": signal,
+        return {"intrinsic_value_per_share": intrinsic, "signal": signal,
                 "score": 45, "margin_of_safety_pct": 5}
 
     @patch("agents.target_updater._warren_analyse")
@@ -434,3 +434,17 @@ class TestRunTargetUpdates:
         assert mock_ratchet.called
         assert mock_rev.called
         assert mock_lag.called
+
+
+# ── Interface contract with warren_bot (2026-11-11) ──────────────────────────
+# The mocks above once used "intrinsic_value", matching a bug in target_updater
+# rather than what warren_bot really returns — so extension silently never ran.
+
+def test_reads_the_key_warren_bot_actually_emits():
+    import inspect
+    from agents import warren_bot
+    src = inspect.getsource(warren_bot.analyse)
+    assert '"intrinsic_value_per_share"' in src
+    from agents.target_updater import _intrinsic
+    assert _intrinsic({"intrinsic_value_per_share": 2522.44}) == 2522.44
+    assert _intrinsic({}) == 0.0 and _intrinsic(None) == 0.0

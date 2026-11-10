@@ -147,6 +147,24 @@ def _warren_analyse(symbol: str) -> Optional[dict]:
         return None
 
 
+def _intrinsic(warren_result: Optional[dict]) -> float:
+    """
+    Per-share DCF intrinsic value from a warren_bot result, or 0.0.
+
+    warren_bot returns `intrinsic_value_per_share`. This module read
+    `intrinsic_value` — a key warren_bot never emits — so every lookup was 0:
+    target extension and the steam check never ran on any holding, and the
+    laggard review's "thin upside" test never fired. The tests mocked the same
+    wrong key, so they passed. Found 2026-11-11 with 12 holdings past 80% of
+    their target and target_update_count = 0 on all of them.
+    """
+    r = warren_result or {}
+    try:
+        return float(r.get("intrinsic_value_per_share") or r.get("intrinsic_value") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ── Steam detection ────────────────────────────────────────────────────────────
 def _is_steam(
     yf_sym:       str,
@@ -164,7 +182,7 @@ def _is_steam(
     rsi       = techs.get("rsi")
     pe        = techs.get("pe")
     sec_pe    = _sector_pe(sector)
-    intrinsic = (warren_result or {}).get("intrinsic_value")
+    intrinsic = _intrinsic(warren_result) or None
 
     reasons = []
 
@@ -338,7 +356,7 @@ def _maybe_extend_target(holding: dict, client, dry_run: bool) -> Optional[dict]
         log.warning("[%s] Warren bot failed — skipping target extension", symbol)
         return None
 
-    intrinsic = float(warren.get("intrinsic_value") or 0)
+    intrinsic = _intrinsic(warren)
     if intrinsic <= 0:
         log.debug("[%s] Warren returned no intrinsic value — skipping", symbol)
         return None
@@ -514,7 +532,7 @@ def _maybe_review_laggard(holding: dict, client, dry_run: bool) -> Optional[dict
     log.info("[%s] Laggard review triggered", symbol)
 
     warren = _warren_analyse(symbol)
-    intrinsic = float((warren or {}).get("intrinsic_value") or 0)
+    intrinsic = _intrinsic(warren)
     signal    = (warren or {}).get("signal", "UNKNOWN")
     current   = float(holding.get("current_price") or holding.get("avg_buy") or 0)
     avg_buy   = float(holding.get("avg_buy") or 0)
