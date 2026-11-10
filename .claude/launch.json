@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": ["-NoProfile", "-Command", "$env:VERCEL_DASHBOARD_URL='http://localhost:3000'; $env:DASHBOARD_API_KEY=''; python -m uvicorn api.main:app --port 8000"],
+      "port": 8000
+    },
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": ["-NoProfile", "-Command", "$env:BROWSER='none'; $env:REACT_APP_API_URL='http://localhost:8000'; $env:REACT_APP_API_KEY=''; Set-Location dashboard; npm start"],
+      "port": 3000
+    }
+  ]
+}

@@ -28,7 +28,7 @@ import os
 import random
 import sys
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace as _dc_replace
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -45,6 +45,7 @@ if _ROOT not in sys.path:
 from data.fetchers import get_ohlcv, get_nse_fii_dii, get_screener_data  # noqa: E402
 from data import run_cache as _run_cache  # noqa: E402  — P7-H
 from agents.base import DataCompletenessValidator  # noqa: E402
+from agents.call_calibration import CALL_HORIZON_DAYS  # noqa: E402
 
 log = logging.getLogger(__name__)
 AGENT_NAME = "discovery_screener"
@@ -80,6 +81,22 @@ _CRITICAL_UPSIDE    = 40.0   # ≥40% upside — achievable for real opportuniti
 _CRITICAL_CONF      = 75.0   # ≥75% confidence — tighter bar than STANDARD to ensure conviction
 _STANDARD_UPSIDE    = 20.0
 _STANDARD_CONF      = 65.0
+# The thresholds above gate on the RAW signal score (`upside_confidence` on
+# DiscoveryResult) — that score is good at ranking candidates. What is stored and
+# shown as `confidence` is the calibrated historical hit rate for the score's
+# band (agents/call_calibration.py), because the raw score is not a probability:
+# across 231 tracked calls, stated 90%+ "confidence" beat Nifty only 40% of the time.
+
+# CRITICAL additionally needs the calibrated hit rate to clear this bar. Until the
+# track record supports it, nothing is labelled CRITICAL — the old banner
+# promised "high conviction" on calls whose band beat Nifty ~40% of the time.
+_CRITICAL_CALIBRATED_MIN = 60.0
+
+# Valuation gap (sector-PE re-rating) above this is stored but not used as the
+# call's upside: calls with a >200% gap beat Nifty 1/11 times (median −6.4%), and
+# gaps that large are usually a structural discount (conglomerate, PSU) or a data
+# artefact (e.g. 2,509% "revenue growth"), not a near-term re-rating.
+_UPSIDE_CAP = 100.0
 # NOTE: CRITICAL also requires data_quality != "ESTIMATED" (enforced in run_discovery classify block).
 # Rationale: old threshold of 100% upside fired almost exclusively on screener data artefacts for
 # illiquid small-caps. 40%/75% distinguishes meaningfully from STANDARD (20%/65%) while remaining
@@ -287,6 +304,7 @@ class DiscoveryResult:
     forward_pe:          Optional[float] = None
     peg_ratio_fwd:       Optional[float] = None
     eps_growth_pct:      Optional[float] = None
+    valuation_gap_pct:   Optional[float] = None   # raw gap before _UPSIDE_CAP
     saved_rec_id:        Optional[str] = None   # Supabase recommendations.id
     discovered_at:       str = field(
         default_factory=lambda: datetime.utcnow().isoformat()
@@ -921,7 +939,7 @@ def _upside_basis(symbol: str, agent_results: dict, tier: str) -> str:
     # Sentence 3: Macro / historical context + horizon
     macro_sig = macro.get("signal", "NEUTRAL")
     hist_sig  = hist.get("signal", "NO_DATA")
-    horizon   = _upside_horizon(agent_results)
+    horizon   = f"{CALL_HORIZON_DAYS}-day"
 
     if macro_sig == "RISK_ON" and hist_sig == "BULLISH_ANALOGUE":
         s3 = (
@@ -978,23 +996,6 @@ def _upside_basis(symbol: str, agent_results: dict, tier: str) -> str:
         sentences.append(s4.strip())
 
     return "  ".join(sentences)
-
-
-def _upside_horizon(agent_results: dict) -> str:
-    """
-    Estimate the investment horizon based on signal strength and macro.
-    Returns a human-readable string like "3–6 months".
-    """
-    comp = _composite_score(agent_results)
-    macro_sig = agent_results.get("macro", {}).get("signal", "NEUTRAL")
-
-    if comp >= 75 and macro_sig == "RISK_ON":
-        return "2–4 months"
-    if comp >= 65:
-        return "3–6 months"
-    if comp >= 50:
-        return "4–8 months"
-    return "6–12 months"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1137,7 +1138,6 @@ def _normalise_symbol(sym: str) -> str:
 # Supabase persistence
 # ──────────────────────────────────────────────────────────────────────────────
 
-_DISCOVERY_COOLDOWN_DAYS = 10   # same symbol won't create a new row within this window
 
 _RISK_AGENT_LABELS = {
     "technical":      "Technical",
@@ -1173,6 +1173,13 @@ def _derive_catalysts_and_risks(result: DiscoveryResult) -> tuple[list[str], lis
             risks.append(f"Illiquid stock{cost_str} — may be hard to exit at size")
         else:
             risks.append(f"Low liquidity{cost_str} — expect meaningful slippage on exit")
+
+    gap = result.valuation_gap_pct
+    if gap is not None and gap > _UPSIDE_CAP:
+        risks.append(
+            f"Valuation gap of {gap:.0f}% capped at {_UPSIDE_CAP:.0f}% — gaps this large are "
+            "usually a structural discount or a data artefact, not a near-term re-rating"
+        )
 
     return catalysts, risks
 
@@ -1254,7 +1261,6 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
 
         client   = create_client(url, key)
         today    = date.today().isoformat()
-        cooldown = (date.today() - timedelta(days=_DISCOVERY_COOLDOWN_DAYS)).isoformat()
         catalysts, risks = _derive_catalysts_and_risks(result)
 
         # ── Compute entry / target / stoploss from price + upside ─────────────
@@ -1268,13 +1274,18 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                        if _atr_sl and isinstance(_atr_sl, (int, float)) and _atr_sl > 0
                        else (round(cp * 0.85, 2) if cp else None))
 
-        # ── Check 10-day cooldown window ──────────────────────────────────────
+        # ── Merge into the symbol's ACTIVE call if one exists ─────────────────
+        # One live call per symbol. This used to match only rows created in the
+        # last 10 days, so every ~12-day screener cycle added a fresh duplicate —
+        # INFY had 12 concurrent "valid" rows, each with a 6–9 month valid_till,
+        # which crowded new finds out of the dashboard.
         existing = (
             client.table("recommendations")
-            .select("id,metadata,upside_pct,upside_confidence,created_at")
+            .select("id,metadata,upside_pct,upside_confidence,created_at,"
+                    "entry_low,entry_high,target,stoploss")
             .eq("symbol", result.symbol)
             .eq("is_discovery", True)
-            .gte("created_at", cooldown)
+            .gte("valid_till", today)
             .order("created_at", desc=True)
             .limit(1)
             .execute()
@@ -1291,8 +1302,14 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 discovery_dates.append(today)
             discovery_count = len(discovery_dates)
 
+            cal = _get_calibration()
+            hit_rate = cal.confidence(result.upside_confidence)
             updated_meta = {
                 **old_meta,
+                **_calibration_meta(result, cal),
+                "call_status":      "ACTIVE",
+                "call_date":        old_meta.get("call_date") or discovery_dates[0],
+                "call_price":       old_meta.get("call_price") or old_meta.get("price"),
                 "price":            result.current_price,  # refresh snapshot price
                 "discovery_score":  result.composite_score,
                 "discovery_count":  discovery_count,
@@ -1307,18 +1324,22 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 # agents, so the stored explanation must reflect today's numbers.
                 "agent_signals":     _agent_signals_with_reasons(result.agent_signals),
                 "upside_pct":        result.upside_pct,
-                "upside_confidence": result.upside_confidence,
-                "confidence":        result.upside_confidence,
-                "valid_till":        _valid_till(result.upside_horizon),
+                "upside_confidence": hit_rate,
+                "confidence":        hit_rate,
+                "horizon_days":      CALL_HORIZON_DAYS,
+                "valid_till":        _call_valid_till(),
                 "headline": (
                     f"{'⚡ CRITICAL' if tier == 'CRITICAL' else '✅ STANDARD'} DISCOVERY"
                     f" ×{discovery_count}: {result.symbol} — {result.upside_pct:.0f}% upside"
                 ),
                 "summary":     result.upside_basis,
-                "entry_low":   _entry_low,
-                "entry_high":  _entry_high,
-                "target":      _target,
-                "stoploss":    _stoploss,
+                # A re-confirmation keeps the ORIGINAL call levels. Rewriting them
+                # from today's price let the stop slide down behind a falling stock
+                # (SWIGGY −31% without a stop). Only fill levels an old row lacks.
+                "entry_low":   existing_row.get("entry_low")  or _entry_low,
+                "entry_high":  existing_row.get("entry_high") or _entry_high,
+                "target":      existing_row.get("target")     or _target,
+                "stoploss":    existing_row.get("stoploss")   or _stoploss,
             }).eq("id", rec_id).execute()
             log.info(
                 "_save_discovery(%s): UPDATED existing rec %s (count=%d) tier=%s upside=%.1f%%",
@@ -1326,19 +1347,21 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             )
             return rec_id
 
-        # ── INSERT: first appearance within cooldown window ───────────────────
+        # ── INSERT: no active call for this symbol ─────────────────────────────
+        cal = _get_calibration()
+        hit_rate = cal.confidence(result.upside_confidence)
         row = {
             "symbol":                 result.symbol,
             "action":                 action,
-            "confidence":             result.upside_confidence,
+            "confidence":             hit_rate,
             "upside_pct":             result.upside_pct,
-            "upside_confidence":      result.upside_confidence,
+            "upside_confidence":      hit_rate,
             "risk_score":             None,
             "entry_low":              _entry_low,
             "entry_high":             _entry_high,
             "target":                 _target,
             "stoploss":               _stoploss,
-            "horizon_days":           _horizon_to_days(result.upside_horizon),
+            "horizon_days":           CALL_HORIZON_DAYS,
             "headline": (
                 f"{'⚡ CRITICAL' if tier == 'CRITICAL' else '✅ STANDARD'} DISCOVERY: "
                 f"{result.symbol} — {result.upside_pct:.0f}% upside potential"
@@ -1347,7 +1370,7 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             "agent_signals": _agent_signals_with_reasons(result.agent_signals),
             "gov_check":              {"flags": [], "passed": True, "note": "discovery_auto"},
             "is_discovery":           True,
-            "valid_till":             _valid_till(result.upside_horizon),
+            "valid_till":             _call_valid_till(),
             "suggested_position_pct": pos_pct,
             "position_label":         pos_label,
             "metadata": {
@@ -1359,6 +1382,10 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 "catalysts":         catalysts,
                 "upside_basis":      result.upside_basis,
                 "upside_horizon":    result.upside_horizon,
+                **_calibration_meta(result, cal),
+                "call_date":         today,
+                "call_price":        result.current_price,
+                "call_status":       "ACTIVE",
                 "liquidity_tier":    result.liquidity_tier,
                 "impact_cost_pct":   result.impact_cost_pct,
                 "forward_pe":        result.forward_pe,
@@ -1387,22 +1414,47 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
     return None
 
 
-def _horizon_to_days(horizon: str) -> int:
-    """Convert '3–6 months' string to midpoint in days."""
-    mapping = {
-        "2–4 months":  90,
-        "3–6 months":  135,
-        "4–8 months":  180,
-        "6–12 months": 270,
+_CALL_HORIZON_LABEL = f"{CALL_HORIZON_DAYS}-day call · re-checked daily"
+
+_calibration_cache: dict = {}
+
+
+def _get_calibration():
+    """
+    Calibration for today, loaded once per process per day. Never raises —
+    load_calibration falls back to a neutral 50% without a track record.
+    """
+    from agents.call_calibration import Calibration, load_calibration
+    today = date.today().isoformat()
+    if _calibration_cache.get("date") != today:
+        url = os.getenv("SUPABASE_URL", "")
+        key = os.getenv("SUPABASE_SERVICE_KEY", "")
+        cal = Calibration()
+        if url and key:
+            try:
+                from supabase import create_client
+                cal = load_calibration(create_client(url, key))
+            except Exception as exc:
+                log.warning("discovery: calibration load failed (%s) — neutral confidence", exc)
+        _calibration_cache.update(date=today, cal=cal)
+    return _calibration_cache["cal"]
+
+
+def _calibration_meta(result: "DiscoveryResult", cal) -> dict:
+    """Metadata recording how `confidence` was derived, for the dashboard."""
+    return {
+        "signal_score":       result.upside_confidence,
+        "calibration_n":      cal.band_n(result.upside_confidence),
+        "calibration_as_of":  cal.as_of,
+        "has_track_record":   cal.has_history,
+        "valuation_gap_pct":  result.valuation_gap_pct,
+        "call_horizon_days":  CALL_HORIZON_DAYS,
     }
-    return mapping.get(horizon, 135)
 
 
-def _valid_till(horizon: str) -> str:
-    """Return ISO date string for recommendation expiry."""
-    from datetime import timedelta
-    days = _horizon_to_days(horizon)
-    return (date.today() + timedelta(days=days)).isoformat()
+def _call_valid_till() -> str:
+    """A call stays live for CALL_HORIZON_DAYS from its latest confirmation."""
+    return (date.today() + timedelta(days=CALL_HORIZON_DAYS)).isoformat()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1550,6 +1602,8 @@ def run_discovery(
         try:
             agent_results = _run_all_agents(symbol, macro_result=macro_result)
             upside_pct, upside_conf = _best_upside(agent_results)
+            valuation_gap = upside_pct
+            upside_pct = min(upside_pct, _UPSIDE_CAP)
             comp_score = _composite_score(agent_results)
 
             # ── Classify ──────────────────────────────────────────────────────
@@ -1611,7 +1665,16 @@ def run_discovery(
                          symbol, upside_pct, upside_conf)
                 continue
 
-            horizon = _upside_horizon(agent_results)
+            if tier == "CRITICAL":
+                _hit_rate = _get_calibration().confidence(upside_conf)
+                if _hit_rate < _CRITICAL_CALIBRATED_MIN:
+                    log.info(
+                        "  %s demoted CRITICAL→STANDARD: calibrated hit rate %.1f%% < %.0f%% "
+                        "for signal score %.0f", symbol, _hit_rate, _CRITICAL_CALIBRATED_MIN, upside_conf,
+                    )
+                    tier = "STANDARD"
+
+            horizon = _CALL_HORIZON_LABEL
             basis   = _upside_basis(symbol, agent_results, tier)
             price   = _current_price(symbol)
             sector  = _sector_from_fundamental(agent_results)
@@ -1660,6 +1723,7 @@ def run_discovery(
                 forward_pe        = fwd_pe,
                 peg_ratio_fwd     = fwd_peg,
                 eps_growth_pct    = fwd_eps_gr,
+                valuation_gap_pct = round(valuation_gap, 2),
             )
 
             # ── CRITICAL discovery: light hallucination check (P6-D κ≥0.35) ──────
@@ -1708,24 +1772,7 @@ def run_discovery(
                             # Demote to STANDARD rather than discard — signal may still be real
                             if upside_pct >= _STANDARD_UPSIDE and upside_conf >= _STANDARD_CONF:
                                 tier = "STANDARD"
-                                dr = DiscoveryResult(
-                                    symbol            = symbol,
-                                    opportunity_tier  = "STANDARD",
-                                    upside_pct        = dr.upside_pct,
-                                    upside_confidence = dr.upside_confidence,
-                                    upside_basis      = dr.upside_basis,
-                                    upside_horizon    = dr.upside_horizon,
-                                    screen_triggers   = dr.screen_triggers,
-                                    agent_signals     = dr.agent_signals,
-                                    composite_score   = dr.composite_score,
-                                    current_price     = dr.current_price,
-                                    sector            = dr.sector,
-                                    liquidity_tier    = dr.liquidity_tier,
-                                    impact_cost_pct   = dr.impact_cost_pct,
-                                    forward_pe        = dr.forward_pe,
-                                    peg_ratio_fwd     = dr.peg_ratio_fwd,
-                                    eps_growth_pct    = dr.eps_growth_pct,
-                                )
+                                dr = _dc_replace(dr, opportunity_tier="STANDARD")
                             else:
                                 log.info("  %s also fails STANDARD thresholds — discarding", symbol)
                                 continue

@@ -6,7 +6,7 @@ Serves live data to the React dashboard.
 Endpoints
 ---------
   GET  /api/recommendations        Latest recs sorted by upside_pct, critical first
-  GET  /api/discovery              is_discovery=true recs created today (7-day fallback)
+  GET  /api/discovery              one live discovery call per symbol, newest confirmation first
   GET  /api/portfolio              Open portfolio holdings (status = OPEN)
   POST /api/portfolio              Add or update a holding (upsert by symbol+OPEN)
   GET  /api/portfolio/alerts       Unresolved portfolio alerts
@@ -743,12 +743,28 @@ def _transform_recommendation(row: dict) -> dict:
         # Discovery streak — how many times this stock appeared within the cooldown window
         "discoveryCount":   int(meta.get("discovery_count") or 1),
         "discoveryDates":   meta.get("discovery_dates")   or [],
+        # Last day the SCREENER found this stock (re-checks don't count).
+        "lastDiscoveredAt": max(meta.get("discovery_dates") or [str(row.get("created_at") or "")[:10]]),
         "lastConfirmedAt":  meta.get("last_confirmed_at") or str(row.get("created_at") or "")[:10],
         "screenTriggers":   meta.get("screen_triggers")  or [],
         "risks":            meta.get("risks")             or [],
         "catalysts":        meta.get("catalysts")         or [],
         "upsideBasis":      meta.get("upside_basis")      or "",
         "upsideHorizon":    meta.get("upside_horizon")    or "",
+        # Daily re-check (agents/discovery_rescorer.py) — call lifecycle.
+        # `confidence` / `upsideConfidence` are the calibrated historical hit rate
+        # for the call's signal band; signalScore is the raw screening score.
+        "callStatus":        meta.get("call_status")       or ("ACTIVE" if row.get("is_discovery") else None),
+        "statusReason":      meta.get("status_reason")     or "",
+        "callDate":          meta.get("call_date")         or str(row.get("created_at") or "")[:10],
+        "callPrice":         meta.get("call_price"),
+        "returnSinceCallPct": meta.get("return_since_call_pct"),
+        "daysActive":        meta.get("days_active"),
+        "lastRescoredAt":    meta.get("last_rescored_at"),
+        "signalScore":       meta.get("signal_score"),
+        "valuationGapPct":   meta.get("valuation_gap_pct"),
+        "calibrationN":      meta.get("calibration_n"),
+        "hasTrackRecord":    meta.get("has_track_record"),
         "name":             meta.get("name")              or row["symbol"].replace(".NS","").replace(".BO",""),
         "sector":           meta.get("sector")            or "",
         "price":            meta.get("price")             or 0,
@@ -1026,96 +1042,115 @@ async def get_recommendations(
     _:    None     = Depends(require_api_key),
 ):
     """
-    Latest recommendations sorted critical-first, then by upside_pct desc.
-    Critical = upside_pct >= 100 AND upside_confidence >= 70.
+    Latest recommendation per symbol, newest first (CRITICAL discoveries first).
+
+    This used to take the top `limit` rows by upside_pct across ALL history with
+    no date filter, so a handful of months-old +200–700% rows held the slots
+    permanently and the tab never appeared to change. Closed discovery calls
+    (stopped out / target hit / superseded by the daily re-check) are excluded.
     """
+    from agents.discovery_rescorer import CLOSED_STATUSES
+
     rows = (_db()
             .table("recommendations")
             .select("*")
-            .order("upside_pct", desc=True)
-            .limit(limit)
+            .order("created_at", desc=True)
+            .limit(limit * 4)          # headroom for the per-symbol dedup below
             .execute()
             .data or [])
+    rows = [r for r in rows
+            if (r.get("metadata") or {}).get("call_status") not in CLOSED_STATUSES]
 
-    # Deduplicate by symbol — keep only the row with the highest upside_pct
-    # (DB may have multiple rows per symbol from different run dates; the UI
-    # should show one card per stock, not one card per run).
+    # One card per stock — rows arrive newest first, so the first seen wins.
     seen: dict[str, dict] = {}
     for row in rows:
-        sym = row["symbol"]
-        if sym not in seen or (row.get("upside_pct") or 0) > (seen[sym].get("upside_pct") or 0):
-            seen[sym] = row
-    rows = list(seen.values())
+        seen.setdefault(row["symbol"], row)
+    rows = list(seen.values())[:limit]
 
     recs = [_transform_recommendation(r) for r in rows]
-    recs.sort(key=lambda r: (0 if (r["upsidePct"] >= 100 and r["upsideConfidence"] >= 70) else 1,
-                              -r["upsidePct"]))
+    recs.sort(key=lambda r: 0 if r["opportunityTier"] == "CRITICAL" else 1)   # stable: keeps newest-first
     return recs
 
 
 # ── 2. Discovery ───────────────────────────────────────────────────────────────
+
+# 60s response cache — same pattern as _market_cache. The endpoint batch-prices
+# ~80 symbols (~6s), and the dashboard requests it on every load.
+_DISCOVERY_CACHE_TTL = 60
+_discovery_cache: dict = {"ts": 0.0, "data": None}
+
 
 @app.get("/api/discovery", tags=["recommendations"])
 async def get_discovery(
     _: None = Depends(require_api_key),
 ):
     """
-    Returns is_discovery=true recommendations created today.
-    Falls back to last 14 days when today has no rows.
-    The valid_till filter is intentionally NOT applied in the fallback — discovery
-    ideas are still research-worthy even when technically "expired" (they have
-    fresh prices refreshed below), and removing the filter prevents the dashboard
-    from going blank when the scheduler hasn't run today yet.
-    Live current_price is refreshed from yfinance for every returned symbol (same pattern
-    as GET /api/portfolio) so the UI never shows stale entry prices.
+    One live discovery call per symbol, most recently confirmed first.
+
+    A call is live while valid_till >= today and it has not been closed by the
+    daily re-check (agents/discovery_rescorer.py — STOPPED_OUT / TARGET_HIT /
+    SUPERSEDED). Older duplicates of the same symbol are collapsed here too, so
+    the response is correct even before the re-check has run.
+
+    Previously this returned the top 50 rows by upside_pct. With 233 overlapping
+    "valid" rows, May's +762% SPARC and +234% ITC permanently held those slots,
+    and every find made since (JIOFIN +26%, GRASIM +21%, ...) was cut off — the
+    dashboard looked frozen while the daily-runs panel kept showing new finds.
+
+    Falls back to the last 14 days when nothing is live (screener not yet run).
+    Live prices are refreshed in a single batch download.
     """
+    from agents.discovery_rescorer import CLOSED_STATUSES, pick_primary
+
+    if _discovery_cache["data"] is not None and time.time() - _discovery_cache["ts"] < _DISCOVERY_CACHE_TTL:
+        return _discovery_cache["data"]
+
     db    = _db()
     today = date.today().isoformat()
 
-    # Primary query: all currently-valid discovery recs (valid_till >= today).
-    # This catches BOTH new insertions AND re-confirmed stocks within the 10-day
-    # cooldown window — re-confirmations UPDATE the row and refresh valid_till,
-    # but leave created_at unchanged, so a created_at>=today filter misses them.
-    rows = (db.table("recommendations")
-              .select("*")
-              .eq("is_discovery", True)
-              .gte("valid_till", today)
-              .order("upside_pct", desc=True)
-              .limit(50)
-              .execute()
-              .data or [])
+    rows: list[dict] = []
+    off = 0
+    while True:
+        page = (db.table("recommendations").select("*")
+                  .eq("is_discovery", True).gte("valid_till", today)
+                  .range(off, off + 999).execute().data or [])
+        rows += page
+        if len(page) < 1000:
+            break
+        off += 1000
+    rows = [r for r in rows
+            if (r.get("metadata") or {}).get("call_status") not in CLOSED_STATUSES]
 
     if not rows:
-        # Fallback: last 14 days even if valid_till has lapsed — screener may not
-        # have run today (maintenance window, holiday, etc.). The UI shows a
-        # "stale" indicator via the validTill field when it's in the past.
         two_weeks_ago = (date.today() - timedelta(days=14)).isoformat()
-        rows = (db.table("recommendations")
-                  .select("*")
-                  .eq("is_discovery", True)
-                  .gte("created_at", two_weeks_ago)
-                  .order("created_at", desc=True)
-                  .limit(20)
-                  .execute()
-                  .data or [])
+        rows = (db.table("recommendations").select("*")
+                  .eq("is_discovery", True).gte("created_at", two_weeks_ago)
+                  .order("created_at", desc=True).limit(50).execute().data or [])
 
-    # ── Refresh live prices (mirrors GET /api/portfolio pattern) ─────────────────
-    # Discovery rows have metadata.price set at write-time by _save_discovery().
-    # We overwrite it here with a fresh yfinance quote so the UI always shows the
-    # current market price regardless of when the recommendation was created.
+    # One call per symbol — the most recently confirmed.
+    by_symbol: dict[str, list[dict]] = {}
+    for r in rows:
+        by_symbol.setdefault(r["symbol"], []).append(r)
+    rows = [pick_primary(group)[0] for group in by_symbol.values()]
+
+    # ── Refresh live prices — one batch download, not one request per row ────
     if rows:
         def _refresh_discovery_prices(rows_: list[dict]) -> list[dict]:
+            from agents.outcome_tracker import _batch_current_prices
+            yf_of  = {r["symbol"]: _resolve_yf_symbol(r["symbol"]) for r in rows_}
+            prices = _batch_current_prices(sorted(set(yf_of.values())))
             updated: list[dict] = []
             for row in rows_:
-                yf_sym = _resolve_yf_symbol(row["symbol"])
-                price  = _fetch_current_price(yf_sym)
+                price = prices.get(yf_of[row["symbol"]])
                 if price:
                     meta = dict(row.get("metadata") or {})
                     meta["price"] = round(price, 2)
+                    call_price = meta.get("call_price")
+                    if call_price:
+                        meta["return_since_call_pct"] = round((price / float(call_price) - 1) * 100, 2)
                     row = {**row, "metadata": meta}
 
-                    # Back-fill entry/target/stoploss for older rows that were
-                    # saved before the Aug-03 fix computed these at write time.
+                    # Back-fill levels for rows saved before the Aug-03 fix.
                     upside = row.get("upside_pct") or 20.0
                     if not row.get("entry_low"):
                         row = {**row,
@@ -1127,36 +1162,21 @@ async def get_discovery(
                         atr_sl = (row.get("metadata") or {}).get("atr_stoploss")
                         sl = round(float(atr_sl), 2) if atr_sl else round(price * 0.85, 2)
                         row = {**row, "stoploss": sl}
-
                 updated.append(row)
             return updated
 
         loop = asyncio.get_event_loop()
         rows = await loop.run_in_executor(None, _refresh_discovery_prices, rows)
 
-    # Deduplicate by symbol — keep only the most recent row per symbol.
-    # Multiple rows can exist from different daily screener runs or when the
-    # 10-day cooldown window straddles the lookback window.
-    seen_disc: dict[str, dict] = {}
-    for row in rows:
-        sym = row["symbol"]
-        if sym not in seen_disc:
-            seen_disc[sym] = row
-        else:
-            # Keep row with highest discovery_count (streak), then by created_at
-            existing_count = (seen_disc[sym].get("metadata") or {}).get("discovery_count", 1)
-            new_count      = (row.get("metadata") or {}).get("discovery_count", 1)
-            if new_count > existing_count:
-                seen_disc[sym] = row
-            elif new_count == existing_count:
-                # Same streak — prefer most recently created
-                if (row.get("created_at") or "") > (seen_disc[sym].get("created_at") or ""):
-                    seen_disc[sym] = row
-    rows = list(seen_disc.values())
-
     recs = [_transform_recommendation(r) for r in rows]
-    recs.sort(key=lambda r: (0 if (r["upsidePct"] >= 100 and r["upsideConfidence"] >= 70) else 1,
-                              -r["upsidePct"]))
+    # Stable sorts, least significant key first: CRITICAL, then most recently
+    # found BY THE SCREENER ("found today" beats "found in May"), then hit rate.
+    # Not lastConfirmedAt — the daily re-check stamps every intact call with
+    # today, which would tie them all.
+    recs.sort(key=lambda r: (-r["confidence"], -r["upsidePct"]))
+    recs.sort(key=lambda r: r["lastDiscoveredAt"], reverse=True)
+    recs.sort(key=lambda r: 0 if r["opportunityTier"] == "CRITICAL" else 1)
+    _discovery_cache.update(ts=time.time(), data=recs)
     return recs
 
 

@@ -24,6 +24,7 @@ Schedule (all times IST / Asia/Kolkata)
   16:15  Paper portfolio      — refresh prices, check exits, save daily snapshot (P5-B)
   16:20  Market Digest CLOSING — end-of-day recap
   16:30  Forward poller       — live price snapshot for all open recs + t+30 resolve (P5-D)
+  16:45  Discovery re-check   — one live call per symbol, stop/target closes, calibrated confidence
   18:30  Outcome tracker      — resolve t+90/180/365 milestones + sentiment validation (P5-D/P6-D-8)
   07:45 (Sunday)  Weekly health audit — kappa, alpha_live, Trendlyne, discovery, RAG freshness
 
@@ -383,6 +384,29 @@ def job_forward_poller() -> None:
                 log.warning("  forward poller error: %s", e)
     except Exception as exc:
         log.error("Forward poller job failed: %s", exc, exc_info=True)
+
+
+def job_discovery_rescorer() -> None:
+    """
+    16:45 IST — re-check every live discovery call: collapse duplicates, close
+    calls that hit stoploss/target, re-run fundamental + technical to confirm or
+    weaken the thesis, and recompute confidence as the calibrated hit rate.
+    """
+    log.info("-" * 50)
+    log.info("  JOB START: Discovery Re-check (16:45 IST)")
+    try:
+        from agents.discovery_rescorer import run_rescore
+        s = run_rescore(dry_run=False)
+        log.info(
+            "Discovery re-check done — symbols=%d superseded=%d active=%d weakened=%d "
+            "stopped=%d target=%d errors=%d",
+            s["symbols"], s["superseded"], s["ACTIVE"], s["WEAKENED"],
+            s["STOPPED_OUT"], s["TARGET_HIT"], len(s["errors"]),
+        )
+        for e in s["errors"][:10]:
+            log.warning("  discovery re-check error: %s", e)
+    except Exception as exc:
+        log.error("Discovery re-check job failed: %s", exc, exc_info=True)
 
 
 def job_paper_portfolio_open() -> None:
@@ -794,6 +818,19 @@ def build_scheduler():
         misfire_grace_time=3600,
     )
 
+    # ── Discovery re-check — after the forward poller ────────────────────────
+    # One live call per symbol, stop/target closes, thesis re-check, calibrated
+    # confidence. Keeps the Discovery tab current between ~12-day screener cycles.
+    scheduler.add_job(
+        job_discovery_rescorer,
+        CronTrigger(hour=16, minute=45, timezone=IST),
+        id="discovery_rescorer",
+        name="Discovery Re-check (16:45 IST)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+
     # ── Rec outcome seeder — after orchestrator (P5-C) ───────────────────────
     # Seeds PENDING rows for any new recs saved by the orchestrator (06:00).
     # Runs at 06:55 so orchestrator + discovery (06:00) have time to finish.
@@ -946,6 +983,7 @@ def main() -> None:
         job_rec_outcome_seeder()
         job_paper_portfolio_open()
         job_forward_poller()
+        job_discovery_rescorer()
         job_outcome_tracker()
         job_paper_portfolio_update()
         job_options_snapshot()

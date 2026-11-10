@@ -108,6 +108,15 @@
 | P8-B | **ARIA On-Demand Analyse Command** — `POST /api/analyse` endpoint runs full 10-agent pipeline (dry_run=True, 180s timeout) for any symbol on demand. ARIA detects "analyse SYMBOL" intent → confirmation flow → `<run_analyse>` tag → dashboard calls endpoint + shows result inline. 10 tests added. | ✅ DONE | 2026-07-22 |
 | OPS-3 | **Weekly Health Audit** — `scripts/weekly_audit.py` with 9 checks (kappa, daily_runs, alpha_live, trendlyne, discovery, RAG, agent_performance, forward_poller, outcome_seeder). Sunday 07:45 IST worker job (`job_weekly_audit()`). 14 tests added. Exit code 1 on FAIL. | ✅ DONE | 2026-07-22 |
 
+### Session 2026-11-10 (part 2) — Discovery freshness, calibrated confidence, scroll
+| ID | Item | Status | Date |
+|---|---|---|---|
+| BF-31 | **Discovery tab frozen on May calls** — 233 overlapping "valid" rows + top-50-by-upside query crowded out every new find. One live call per symbol, newest first; same fix for `/api/recommendations`. | ✅ DONE | 2026-11-10 |
+| CAL-1 | **Calibrated confidence** — `agents/call_calibration.py`: confidence = band's historical P(beat Nifty at 90d). The old number (raw quality score) ran inversely to outcomes. CRITICAL also needs ≥60% calibrated. | ✅ DONE | 2026-11-10 |
+| CAL-2 | **Daily re-check** — `agents/discovery_rescorer.py` at 16:45 IST: supersede duplicates, stop/target closes anchored to the call price, thesis re-check (ACTIVE/WEAKENED), confidence refreshed. 90-day calls. Applied to prod: 81 live symbols (42 active / 22 weakened / 13 stopped / 4 target). | ✅ DONE | 2026-11-10 |
+| DB-11 | **Scroll everywhere** — visible 9px scrollbars, no nested scroll boxes, clipped tables now scroll both axes with sticky headers. | ✅ DONE | 2026-11-10 |
+| P8-C | **Paper portfolio conviction sizing** — every position is ₹5k HALF; `total_pnl_pct` excludes realised losses. Awaiting decision on a high-conviction tier (see session notes). | ⬜ PENDING | — |
+
 ### Session 2026-11-10 — Model deprecation sweep
 | ID | Item | Status | Date |
 |---|---|---|---|

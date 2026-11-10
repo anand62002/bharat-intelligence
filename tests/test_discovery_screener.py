@@ -7,9 +7,8 @@ Tests cover:
   - _rsi(), _price_above_ema200() helper correctness
   - _composite_score() weighted averaging
   - _best_upside() priority logic
-  - _upside_horizon() thresholds
   - _upside_basis() structure (3 sentences)
-  - _horizon_to_days() / _valid_till()
+  - _call_valid_till() 90-day call window
   - DiscoveryResult dataclass / to_dict()
   - run_discovery() full pipeline: exclusion, tiering, sorting, DB save
 """
@@ -31,6 +30,25 @@ def no_supabase(monkeypatch):
     monkeypatch.setenv("SUPABASE_SERVICE_KEY", "")
 
 
+def _calibration(rate: float):
+    """A Calibration whose every band reports `rate` — no DB access."""
+    from agents.call_calibration import Calibration, SIGNAL_BANDS
+    return Calibration(
+        bands=[{"lo": lo, "hi": hi, "n": 40, "hits": int(rate * 0.4), "rate": rate}
+               for lo, hi in SIGNAL_BANDS],
+        overall=rate, n=160, has_history=True,
+    )
+
+
+@pytest.fixture(autouse=True)
+def strong_track_record(monkeypatch):
+    """
+    Tier-logic tests assume a track record good enough for CRITICAL (≥60%).
+    Tests of the calibrated gate itself override this with a weak record.
+    """
+    monkeypatch.setattr("agents.discovery_screener._get_calibration", lambda: _calibration(65.0))
+
+
 @pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
     """Prevent real sleeps in tests."""
@@ -49,10 +67,8 @@ from agents.discovery_screener import (
     prescreen,
     _composite_score,
     _best_upside,
-    _upside_horizon,
     _upside_basis,
-    _horizon_to_days,
-    _valid_till,
+    _call_valid_till,
     _normalise_symbol,
     _load_portfolio_symbols,
     _save_discovery,
@@ -677,42 +693,6 @@ class TestBestUpside:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# _upside_horizon
-# ──────────────────────────────────────────────────────────────────────────────
-
-class TestUpsideHorizon:
-    def test_high_score_risk_on_shortest_horizon(self):
-        results = _make_agent_results(80)
-        results["macro"]["signal"] = "RISK_ON"
-        results["macro"]["score"]  = 80
-        horizon = _upside_horizon(results)
-        assert horizon == "2–4 months"
-
-    def test_moderate_score_medium_horizon(self):
-        results = _make_agent_results(66)
-        results["macro"]["signal"] = "NEUTRAL"
-        horizon = _upside_horizon(results)
-        assert horizon == "3–6 months"
-
-    def test_low_score_long_horizon(self):
-        results = _make_agent_results(40)
-        results["macro"]["signal"] = "RISK_OFF"
-        horizon = _upside_horizon(results)
-        assert horizon in ("4–8 months", "6–12 months")
-
-    def test_returns_string(self):
-        results = _make_agent_results(55)
-        assert isinstance(_upside_horizon(results), str)
-
-    def test_all_valid_horizons_set(self):
-        valid = {"2–4 months", "3–6 months", "4–8 months", "6–12 months"}
-        for score in [20, 45, 60, 70, 80]:
-            results = _make_agent_results(score)
-            h = _upside_horizon(results)
-            assert h in valid
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # _upside_basis
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -764,29 +744,14 @@ class TestUpsideBasis:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# _horizon_to_days / _valid_till
+# _call_valid_till — calls run 90 days from their latest confirmation
 # ──────────────────────────────────────────────────────────────────────────────
 
-class TestHorizonHelpers:
-    def test_known_horizons(self):
-        assert _horizon_to_days("2–4 months")  == 90
-        assert _horizon_to_days("3–6 months")  == 135
-        assert _horizon_to_days("4–8 months")  == 180
-        assert _horizon_to_days("6–12 months") == 270
-
-    def test_unknown_defaults_to_135(self):
-        assert _horizon_to_days("unknown") == 135
-
-    def test_valid_till_future_date(self):
-        vt = _valid_till("3–6 months")
-        vt_date = date.fromisoformat(vt)
-        assert vt_date > date.today()
-        assert vt_date <= date.today() + timedelta(days=200)
-
-    def test_valid_till_is_iso_string(self):
-        vt = _valid_till("6–12 months")
-        assert isinstance(vt, str)
-        date.fromisoformat(vt)   # should not raise
+class TestCallValidTill:
+    def test_is_ninety_days_out(self):
+        from agents.call_calibration import CALL_HORIZON_DAYS
+        assert CALL_HORIZON_DAYS == 90
+        assert date.fromisoformat(_call_valid_till()) == date.today() + timedelta(days=90)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -945,9 +910,9 @@ class TestSaveDiscovery:
         assert _save_discovery(dr) is None
 
     def _mock_client_fresh(self):
-        """Return a mock Supabase client where the cooldown SELECT returns no rows (fresh insert)."""
+        """Return a mock Supabase client where the active-call SELECT returns no rows (fresh insert)."""
         mock_client = MagicMock()
-        # Cooldown check: .table().select().eq().eq().gte().order().limit().execute().data = []
+        # Active-call check: .table().select().eq().eq().gte().order().limit().execute().data = []
         select_chain = mock_client.table.return_value.select.return_value
         select_chain.eq.return_value.eq.return_value.gte.return_value.order.return_value.limit.return_value.execute.return_value.data = []
         # INSERT: .table().insert().execute().data = [{"id": "abc-123"}]
@@ -985,6 +950,32 @@ class TestSaveDiscovery:
 
         assert len(inserted_rows) == 1
         assert inserted_rows[0]["is_discovery"] is True
+
+    def test_insert_stores_calibrated_confidence_and_raw_signal(self, monkeypatch):
+        """confidence = band hit rate; the raw screening score survives as signal_score."""
+        monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake_key")
+        monkeypatch.setattr("agents.discovery_screener._get_calibration", lambda: _calibration(47.5))
+
+        inserted_rows = []
+        mock_client = self._mock_client_fresh()
+        def capture_insert(row):
+            inserted_rows.append(row)
+            m = MagicMock()
+            m.execute.return_value.data = [{"id": "xyz"}]
+            return m
+        mock_client.table.return_value.insert.side_effect = capture_insert
+
+        dr = _make_discovery()
+        with patch("supabase.create_client", return_value=mock_client):
+            _save_discovery(dr)
+
+        row = inserted_rows[0]
+        assert row["confidence"] == 47.5 and row["upside_confidence"] == 47.5
+        assert row["metadata"]["signal_score"] == dr.upside_confidence
+        assert row["horizon_days"] == 90
+        assert date.fromisoformat(row["valid_till"]) == date.today() + timedelta(days=90)
+        assert row["metadata"]["call_status"] == "ACTIVE"
 
     def test_insert_row_metadata_has_catalysts_and_risks(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
@@ -1146,6 +1137,22 @@ class TestRunDiscovery:
         results = run_discovery(max_candidates=2, save_to_db=False)
         assert len(results) >= 1
         assert results[0].opportunity_tier == "CRITICAL"
+
+    def test_critical_demoted_when_track_record_is_weak(self, monkeypatch):
+        """Raw score clears CRITICAL, but the band's real hit rate (45%) does not."""
+        self._patch_all(monkeypatch, upside=120.0, conf=75.0)
+        monkeypatch.setattr("agents.discovery_screener._get_calibration", lambda: _calibration(45.0))
+        results = run_discovery(max_candidates=2, save_to_db=False)
+        assert results and all(r.opportunity_tier == "STANDARD" for r in results)
+
+    def test_upside_capped_and_raw_gap_kept(self, monkeypatch):
+        self._patch_all(monkeypatch, upside=762.0, conf=75.0)
+        results = run_discovery(max_candidates=2, save_to_db=False)
+        assert results
+        assert results[0].upside_pct == 100.0
+        assert results[0].valuation_gap_pct == 762.0
+        _, risks = _derive_catalysts_and_risks(results[0])
+        assert any("capped" in r for r in risks)
 
     def test_below_threshold_excluded(self, monkeypatch):
         # upside=10, conf=50 → below both CRITICAL and STANDARD thresholds
