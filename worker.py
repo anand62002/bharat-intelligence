@@ -25,6 +25,9 @@ Schedule (all times IST / Asia/Kolkata)
   16:20  Market Digest CLOSING — end-of-day recap
   16:30  Forward poller       — live price snapshot for all open recs + t+30 resolve (P5-D)
   16:45  Discovery re-check   — one live call per symbol, stop/target closes, calibrated confidence
+  12:30  Multibagger screen   — long-horizon track on today's discovery slice (P8-E)
+  16:50  Long-horizon book    — open/update/close paper positions, t+180/365/730 outcomes (P8-E)
+  08:00 (Sunday)  Multibagger review — re-check durability of every active long-horizon pick
   18:30  Outcome tracker      — resolve t+90/180/365 milestones + sentiment validation (P5-D/P6-D-8)
   07:45 (Sunday)  Weekly health audit — kappa, alpha_live, Trendlyne, discovery, RAG freshness
 
@@ -407,6 +410,49 @@ def job_discovery_rescorer() -> None:
             log.warning("  discovery re-check error: %s", e)
     except Exception as exc:
         log.error("Discovery re-check job failed: %s", exc, exc_info=True)
+
+
+def job_multibagger_screen() -> None:
+    """12:30 IST — P8-E long-horizon screen on today's discovery slice (cached fundamentals)."""
+    log.info("-" * 50)
+    log.info("  JOB START: Multibagger Screen (12:30 IST)")
+    try:
+        from agents.multibagger_screener import run_screen
+        r = run_screen(dry_run=False)
+        log.info("Multibagger screen done — screened=%d prefilter=%d deep=%d picks=%d errors=%d",
+                 r["screened"], r["prefilter_passed"], r["deep_checked"], len(r["picks"]), len(r["errors"]))
+        for e in r["errors"][:5]:
+            log.warning("  multibagger error: %s", e)
+    except Exception as exc:
+        log.error("Multibagger screen job failed: %s", exc, exc_info=True)
+
+
+def job_long_horizon_book() -> None:
+    """16:50 IST — P8-E long-horizon paper book: open, update, close, resolve outcomes."""
+    log.info("-" * 50)
+    log.info("  JOB START: Long-Horizon Book (16:50 IST)")
+    try:
+        from agents.long_horizon_book import run_book
+        r = run_book(dry_run=False)
+        log.info("Long-horizon book done — opened=%d closed=%d updated=%d resolved=%d errors=%d",
+                 len(r["opened"]), len(r["closed"]), r["updated"], r["resolved"], len(r["errors"]))
+        for e in r["errors"][:5]:
+            log.warning("  long-horizon book error: %s", e)
+    except Exception as exc:
+        log.error("Long-horizon book job failed: %s", exc, exc_info=True)
+
+
+def job_multibagger_review() -> None:
+    """Sunday 08:00 IST — P8-E: is each active pick's quality still durable?"""
+    log.info("-" * 50)
+    log.info("  JOB START: Multibagger Review (Sunday 08:00 IST)")
+    try:
+        from agents.multibagger_screener import review_picks
+        r = review_picks(dry_run=False)
+        log.info("Multibagger review done — reviewed=%d broken=%d errors=%d",
+                 r["reviewed"], len(r["broken"]), len(r["errors"]))
+    except Exception as exc:
+        log.error("Multibagger review job failed: %s", exc, exc_info=True)
 
 
 def job_paper_portfolio_open() -> None:
@@ -816,6 +862,31 @@ def build_scheduler():
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,
+    )
+
+    # ── P8-E long-horizon multibagger track ──────────────────────────────────
+    # Screen after the 10:30 discovery run has cached today's slice fundamentals;
+    # book after the 16:45 discovery re-check; durability review weekly.
+    scheduler.add_job(
+        job_multibagger_screen,
+        CronTrigger(hour=12, minute=30, timezone=IST),
+        id="multibagger_screen",
+        name="Multibagger Screen (12:30 IST)",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        job_long_horizon_book,
+        CronTrigger(hour=16, minute=50, timezone=IST),
+        id="long_horizon_book",
+        name="Long-Horizon Book (16:50 IST)",
+        max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        job_multibagger_review,
+        CronTrigger(day_of_week="sun", hour=8, minute=0, timezone=IST),
+        id="multibagger_review",
+        name="Multibagger Review (Sunday 08:00 IST)",
+        max_instances=1, coalesce=True, misfire_grace_time=7200,
     )
 
     # ── Discovery re-check — after the forward poller ────────────────────────

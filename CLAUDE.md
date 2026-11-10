@@ -111,6 +111,18 @@ Stock analysis/
 │   │                           #   fundamental+technical → ACTIVE (extend 90d) or WEAKENED (not extended),
 │   │                           #   recompute calibrated confidence + tier. Reversible (metadata.prev_*).
 │   │                           #   CLI: python -m agents.discovery_rescorer [--run] [--no-agents]
+│   ├── multibagger_screener.py # P8-E long-horizon screen (12:30 IST) on today's discovery slice
+│   │                           #   (cached fundamentals). prefilter(): ₹300–15,000 Cr, ROCE≥15,
+│   │                           #   growth≥12, D/E≤1, pledge≤10, promoter≥35, 0<PE≤60. deep_check():
+│   │                           #   warren 10y ROCE≥12 & 10y EPS CAGR≥10 — warren's BUY/AVOID verdict is
+│   │                           #   IGNORED (DCF-driven; calls most compounders AVOID). score() 0–100:
+│   │                           #   runway 20/quality 25/growth 25/valuation(PEG) 15/ownership 15; pick ≥80
+│   │                           #   (EPS growth capped at 40% for scoring). Dry run 11-10 slice: 200→18→15→2 picks.
+│   │                           #   review_picks(): Sunday 08:00 durability re-check → THESIS_BROKEN
+│   ├── long_horizon_book.py    # P8-E paper book (16:50 IST): BASE ₹10k/pick; CONVICTION ₹50k LOCKED
+│   │                           #   until ≥20 picks resolved at 1y with ≥60% beating Nifty. Stop −35%;
+│   │                           #   after peak ≥2× entry, trail 30% below peak; THESIS_BROKEN exits.
+│   │                           #   Outcomes t+180/365/730. get_summary() → GET /api/long_horizon
 │   ├── rec_outcome_seeder.py   # P5-C: seeds PENDING recommendation_outcomes rows for new recs (06:55 IST)
 │   ├── backtester.py           # Walk-forward backtest on NIFTY 500 quality universe (monthly)
 │   ├── base.py                 # DataCompletenessValidator — pre-signal data-quality gate shared by agents
@@ -197,6 +209,7 @@ Stock analysis/
 │   #    16:20 — market digest CLOSING (P6-C)
 │   #    16:30 — forward outcome poller (P5-D, live alpha_live + t+30 milestone)
 │   #    16:45 — discovery re-check (agents/discovery_rescorer.py)
+│   #    12:30 — multibagger screen (P8-E); 16:50 — long-horizon book; Sun 08:00 — multibagger review
 │   #    17:00 — target updater (P7-A, stoploss ratchet + target extension + laggard review)
 │   #    18:30 — outcome tracker (t+90/180/365 resolution + sentiment validation)
 │   #    07:45 (Sunday) — weekly health audit (scripts/weekly_audit.py)
@@ -363,9 +376,13 @@ Stock analysis/
 | `backtest_results` | Walk-forward backtest runs | `run_date, universe, period_start/end, split_type (TRAIN/TEST/FULL), hit_rate_90d, avg_alpha_90d/180d, sharpe_ratio, max_drawdown, win_loss_ratio, signal_details (jsonb)` |
 | `paper_portfolio_positions` | P5-B paper trade log | `rec_id, symbol, yf_symbol, entry_date, entry_price, quantity, allocation_inr, position_label, stoploss_price, target_price, nifty_entry, current_price, current_value, unrealized_pnl, unrealized_pnl_pct, status (OPEN/CLOSED/SKIPPED), exit_date, exit_price, nifty_exit, realized_pnl, realized_pnl_pct, alpha_pct, exit_reason` |
 | `paper_portfolio_snapshots` | P5-B daily portfolio P&L | `snapshot_date (unique), total_invested, total_current_value, unrealized_pnl, realized_pnl, total_pnl, total_pnl_pct, open_positions, closed_positions, nifty_value, nifty_return_pct, alpha_pct` |
+| `long_horizon_picks` | P8-E multibagger picks | `symbol, pick_date, score, components (jsonb), thesis, entry_price, market_cap_cr, nifty_entry, status (ACTIVE/THESIS_BROKEN/EXITED), status_reason, price/nifty/alpha_t180/t365/t730` — one ACTIVE per symbol (partial unique index) |
+| `long_horizon_positions` | P8-E paper positions | `pick_id, symbol, entry_price, quantity, allocation_inr, tier (BASE/CONVICTION), peak_price, stop_price, status, exit_reason (HARD_STOP/TRAILING_STOP/THESIS_BROKEN), realized_pnl_pct, alpha_pct` |
 | `market_digests` | P6-C daily market briefs | `id (UUID PK), digest_type (MORNING/CLOSING), digest_date (DATE), headline_count, top_themes (jsonb), summary, key_events (jsonb), market_mood, nifty_signal, sectors_in_focus (jsonb), raw_headlines (jsonb), created_at` — unique on (digest_type, digest_date) |
 
 > **All migrations applied ✅** (warren_bot_cache, sector_pe_snapshots, discovery_runs, symbol_resolutions, add_yf_symbol_danger_sources, enhancement_proposals, recommendation_outcomes, market_regime, earnings_calendar, portfolio_risk_snapshots, backtest_results, create_paper_portfolio, p5d_live_performance_columns, create_market_digests, allow_suppressed_action)
+>
+> `create_long_horizon.sql` (P8-E) ✅ applied 2026-11-11.
 >
 > `create_fundamentals_cache.sql` (P7-I) ✅ applied 2026-09-09 (RLS disabled on the table — it holds public market data only). Verified live: a second run with the in-process memo cleared served 1/1 from the persistent cache with zero live fetches.
 >
@@ -382,6 +399,7 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/health` | Health check — no auth needed. Returns `{"status":"ok","db":true}` |
 | GET | `/api/recommendations` | Newest rec per symbol (CRITICAL first); closed discovery calls excluded. Was top-N by upside across all history — stale forever. |
 | GET | `/api/discovery` | One live call per symbol (valid_till ≥ today, not STOPPED_OUT/TARGET_HIT/SUPERSEDED), CRITICAL first then most recently confirmed. Batch live-price refresh; 60s response cache. Adds callStatus/statusReason/callDate/returnSinceCallPct/daysActive/signalScore/calibrationN. |
+| GET | `/api/long_horizon` | P8-E long-horizon track: picks, paper positions, summary (total P&L incl. realised), rules, track record + conviction unlock status. `migration_needed:true` instead of 500 before `create_long_horizon.sql`. |
 | GET | `/api/discovery/runs` | Last N days of screener run logs (slice/passed/discovery symbols + coverage stats). Powers dashboard "Daily Screened Stocks" panel. |
 | GET | `/api/portfolio` | Open holdings, refreshes current_price from yfinance |
 | POST | `/api/portfolio` | Add/update holding — auto-resolves yfinance symbol, fetches live price |

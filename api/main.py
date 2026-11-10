@@ -1184,6 +1184,20 @@ async def get_discovery(
     return recs
 
 
+# ── 2a. Long-horizon multibagger track (P8-E) ────────────────────────────────
+
+@app.get("/api/long_horizon", tags=["recommendations"])
+async def get_long_horizon(_: None = Depends(require_api_key)):
+    """
+    Long-horizon multibagger track: picks, paper positions, summary, rules and
+    the track record that gates conviction sizing. Returns migration_needed=true
+    (not a 500) until db/migrations/create_long_horizon.sql has been applied.
+    """
+    from agents.long_horizon_book import get_summary
+    loop = asyncio.get_event_loop()
+    return _sanitise_floats(await loop.run_in_executor(None, get_summary, _supabase))
+
+
 # ── 2b. Discovery runs log ────────────────────────────────────────────────────
 
 @app.get("/api/discovery/runs", tags=["recommendations"])

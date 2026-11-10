@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import LongHorizonPanel from "./LongHorizonPanel";
 
 const C = {
   bg:"#06060f", surface:"#0c0c1e", panel:"#10102a", border:"#1a1a35", borderHi:"#2a2a55",
@@ -2043,6 +2044,7 @@ function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBrok
 
       {/* Paper Portfolio Panel (P5-B) */}
       <PaperPortfolioPanel data={paperPortfolio} history={paperHistory} apiLoaded={apiLoaded}/>
+      <LongHorizonPanel C={C} apiFetch={apiFetch} isLive={IS_LIVE}/>
     </div>
   );
 }
