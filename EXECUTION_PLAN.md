@@ -115,6 +115,9 @@
 | CAL-1 | **Calibrated confidence** — `agents/call_calibration.py`: confidence = band's historical P(beat Nifty at 90d). The old number (raw quality score) ran inversely to outcomes. CRITICAL also needs ≥60% calibrated. | ✅ DONE | 2026-11-10 |
 | CAL-2 | **Daily re-check** — `agents/discovery_rescorer.py` at 16:45 IST: supersede duplicates, stop/target closes anchored to the call price, thesis re-check (ACTIVE/WEAKENED), confidence refreshed. 90-day calls. Applied to prod: 81 live symbols (42 active / 22 weakened / 13 stopped / 4 target). | ✅ DONE | 2026-11-10 |
 | DB-11 | **Scroll everywhere** — visible 9px scrollbars, no nested scroll boxes, clipped tables now scroll both axes with sticky headers. | ✅ DONE | 2026-11-10 |
+| BF-32 | **Target extension never ran** — wrong warren_bot key (`intrinsic_value` vs `intrinsic_value_per_share`). Fixed + contract test. | ✅ DONE | 2026-11-11 |
+| P8-D | **Exit marker + trailing stop** — EXIT / BOOK PARTIAL / REVIEW / TRAIL / HOLD per holding on the Portfolio tab; stop trails 15% below price above +40% gain. | ✅ DONE | 2026-11-11 |
+| P8-E | **Long-horizon multibagger track** — separate screen + paper book, 1–3 yr horizon, sizing unlocks only on its own proven hit rate. | ⬜ NEXT | — |
 | P8-C | **Paper portfolio conviction sizing** — every position is ₹5k HALF; `total_pnl_pct` excludes realised losses. Awaiting decision on a high-conviction tier (see session notes). | ⬜ PENDING | — |
 
 ### Session 2026-11-10 — Model deprecation sweep
