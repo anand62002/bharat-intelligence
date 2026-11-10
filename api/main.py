@@ -670,6 +670,10 @@ def _transform_holding(row: dict) -> dict:
         "protectGainsFlag":      protect_gains,
         "stoplossRatchetLevel":  ratchet_level,
         "lastReviewAt":          str(row.get("last_review_at") or ""),
+        # Exit marker (agents/target_updater.exit_signal) — injected by get_portfolio
+        "exitSignal":            (row.get("_exit") or {}).get("signal"),
+        "exitReason":            (row.get("_exit") or {}).get("reason"),
+        "fairValue":             (row.get("_exit") or {}).get("fair_value"),
     }
 
 
@@ -1286,6 +1290,27 @@ async def get_portfolio(
             r["_earnings_alert"] = eg_results.get(r["symbol"])
     except Exception:
         pass  # non-fatal — skip earnings enrichment
+
+    # ── Exit marker: EXIT / BOOK_PARTIAL / TRAIL / REVIEW / HOLD ───────────────
+    # Fair value comes from warren_bot_cache, refreshed daily by the 17:00
+    # target updater for every holding it re-analyses (≥80% to target, laggards).
+    try:
+        from agents.target_updater import _intrinsic, exit_signal
+        fair: dict[str, float] = {}
+        if _supabase and rows:
+            # Only recent analyses: entries from months ago (e.g. TITAN ₹1,188 from
+            # April vs ₹2,522 today) would produce wrong BOOK_PARTIAL markers.
+            fresh_after = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            cached = (_supabase.table("warren_bot_cache").select("symbol,result")
+                      .in_("symbol", [r["symbol"].upper() for r in rows])
+                      .gte("cached_at", fresh_after).execute().data or [])
+            fair = {c["symbol"]: _intrinsic(c.get("result")) for c in cached}
+        for r in rows:
+            fv = fair.get(r["symbol"].upper()) or None
+            sig, why = exit_signal(r, fv)
+            r["_exit"] = {"signal": sig, "reason": why, "fair_value": round(fv, 2) if fv else None}
+    except Exception as exc:
+        log.warning("exit signal enrichment skipped: %s", exc)
 
     holdings = [_transform_holding(r) for r in rows]
     # Critical danger holdings first

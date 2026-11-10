@@ -225,7 +225,8 @@ class TestMaybeRatchetStoploss:
         assert result["new_sl"] == 1000.0
 
     def test_ratchet_to_lock_20_at_40_pct(self):
-        h = self._make(avg_buy=1000, current=1420, stoploss=850)  # +42%
+        # +40% exactly: 15% below price (1190) is under the +20% lock (1200)
+        h = self._make(avg_buy=1000, current=1400, stoploss=850)
         result = _maybe_ratchet_stoploss(h, self._client(), dry_run=True)
         assert result is not None
         assert result["level"] == "LOCK_20"
@@ -237,7 +238,7 @@ class TestMaybeRatchetStoploss:
         assert result is None
 
     def test_no_ratchet_if_already_lock_20(self):
-        h = self._make(avg_buy=1000, current=1420, stoploss=1200, ratchet_level="LOCK_20")
+        h = self._make(avg_buy=1000, current=1400, stoploss=1200, ratchet_level="LOCK_20")
         result = _maybe_ratchet_stoploss(h, self._client(), dry_run=True)
         assert result is None
 
@@ -248,10 +249,31 @@ class TestMaybeRatchetStoploss:
         assert result is None
 
     def test_upgrades_from_breakeven_to_lock_20(self):
-        h = self._make(avg_buy=1000, current=1450, stoploss=1000, ratchet_level="BREAKEVEN")
+        h = self._make(avg_buy=1000, current=1410, stoploss=1000, ratchet_level="BREAKEVEN")
         result = _maybe_ratchet_stoploss(h, self._client(), dry_run=True)
         assert result is not None
         assert result["level"] == "LOCK_20"
+
+    # ── Trailing stop above +40% (2026-11-11) ────────────────────────────────
+    def test_trails_15_pct_below_price_on_big_gains(self):
+        # YATHARTH-like: +81% with the stop stuck at the +20% lock
+        h = self._make(avg_buy=584.52, current=1055.9, stoploss=701.42, ratchet_level="LOCK_20")
+        result = _maybe_ratchet_stoploss(h, self._client(), dry_run=True)
+        assert result["level"] == "TRAIL"
+        assert abs(result["new_sl"] - 1055.9 * 0.85) < 0.01
+
+    def test_trailing_stop_never_moves_down(self):
+        # Price fell back from the peak that set the stop — stop stays.
+        h = self._make(avg_buy=1000, current=1500, stoploss=1400, ratchet_level="TRAIL")
+        assert _maybe_ratchet_stoploss(h, self._client(), dry_run=True) is None
+
+    def test_trailing_raise_within_same_level_does_not_alert(self):
+        c = self._client()
+        h = self._make(avg_buy=1000, current=2000, stoploss=1600, ratchet_level="TRAIL")
+        with patch("agents.target_updater._create_alert") as alert:
+            result = _maybe_ratchet_stoploss(h, c, dry_run=True)
+        assert result["new_sl"] == 1700.0
+        alert.assert_not_called()
 
 
 # ─── _maybe_extend_target ─────────────────────────────────────────────────────
@@ -448,3 +470,44 @@ def test_reads_the_key_warren_bot_actually_emits():
     from agents.target_updater import _intrinsic
     assert _intrinsic({"intrinsic_value_per_share": 2522.44}) == 2522.44
     assert _intrinsic({}) == 0.0 and _intrinsic(None) == 0.0
+
+
+# ── exit_signal (2026-11-11) ─────────────────────────────────────────────────
+from agents.target_updater import exit_signal  # noqa: E402
+
+
+def _h(**kw):
+    base = {"avg_buy": 100.0, "current_price": 120.0, "stoploss_price": 90.0,
+            "target_price": 150.0, "stoploss_ratchet_level": "ORIGINAL",
+            "protect_gains_flag": False, "buy_date": "2026-10-01"}
+    base.update(kw)
+    return base
+
+
+def test_exit_when_price_at_or_below_stop_even_after_ratchet():
+    sig, why = exit_signal(_h(current_price=110.0, stoploss_price=120.0, stoploss_ratchet_level="LOCK_20"))
+    assert sig == "EXIT" and "+20% locked-in stop" in why
+
+
+def test_book_partial_past_target_and_above_fair_value():
+    sig, why = exit_signal(_h(current_price=160.0), fair_value=120.0)
+    assert sig == "BOOK_PARTIAL" and "fair value" in why
+
+
+def test_book_partial_when_steam_flagged():
+    assert exit_signal(_h(current_price=160.0, protect_gains_flag=True))[0] == "BOOK_PARTIAL"
+
+
+def test_trail_past_target_with_fair_value_above():
+    assert exit_signal(_h(current_price=160.0), fair_value=200.0)[0] == "TRAIL"
+    assert exit_signal(_h(current_price=160.0))[0] == "TRAIL"   # fair value unknown
+
+
+def test_review_for_laggard_and_hold_otherwise():
+    assert exit_signal(_h(current_price=85.0, stoploss_price=70.0, buy_date="2026-01-01"))[0] == "REVIEW"
+    assert exit_signal(_h())[0] == "HOLD"
+
+
+def test_exit_takes_priority_over_target():
+    # Stop above target can happen after a trailing raise — stop wins.
+    assert exit_signal(_h(current_price=150.0, stoploss_price=155.0, target_price=140.0))[0] == "EXIT"

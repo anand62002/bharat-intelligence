@@ -8,6 +8,10 @@ Three independent mechanisms
 1. STOPLOSS RATCHET  (runs for every OPEN holding)
    ≥ +25% gain from avg_buy  →  raise SL to breakeven  (BREAKEVEN level)
    ≥ +40% gain from avg_buy  →  raise SL to lock in 20% gain  (LOCK_20 level)
+   ≥ +40% gain, and 15% below price is above the +20% lock  →  TRAIL level:
+       SL follows 15% below the price, re-evaluated daily, so it trails the
+       highest close. Before 2026-11-11 the stop topped out at +20%: YATHARTH
+       at +81% still had its stop at +20%.
    Rule: ratchet is one-way — SL only moves up, never down.
    Triggers an INFO alert once per ratchet level.
 
@@ -28,6 +32,12 @@ Prerequisites
 ─────────────
 Run db/migrations/add_target_tracking_columns.sql before deploying.
 
+4. EXIT SIGNAL  (pure function, computed live by GET /api/portfolio)
+   exit_signal(holding, fair_value) → EXIT | BOOK_PARTIAL | TRAIL | REVIEW | HOLD
+   One marker per holding with a plain-English reason. Advisory only — the
+   system never sells. fair_value comes from warren_bot_cache, which this job
+   refreshes for every holding it re-analyses.
+
 Entry point
 ───────────
 run_target_updates(dry_run=False) → dict  — called from worker.py
@@ -46,6 +56,7 @@ log = logging.getLogger(__name__)
 _RATCHET_BREAKEVEN_PCT  = 25.0   # gain% needed to move SL to breakeven
 _RATCHET_LOCK_PCT       = 40.0   # gain% needed to lock in 20% gain
 _LOCK_GAIN_FLOOR        = 0.20   # fraction of avg_buy locked as minimum profit
+_TRAIL_PCT              = 0.15   # above +40%, SL trails this far below price
 
 _TARGET_REVIEW_PROGRESS = 0.80   # 80% of entry→target distance triggers review
 _TARGET_EXT_CAP_X       = 2.0    # can't extend more than 2× original range above target
@@ -141,6 +152,7 @@ def _warren_analyse(symbol: str) -> Optional[dict]:
         if result.get("error"):
             log.debug("warren_bot(%s) returned error: %s", symbol, result["error"])
             return None
+        _cache_warren(symbol, result)
         return result
     except Exception as e:
         log.warning("warren_bot(%s) failed: %s", symbol, e)
@@ -163,6 +175,78 @@ def _intrinsic(warren_result: Optional[dict]) -> float:
         return float(r.get("intrinsic_value_per_share") or r.get("intrinsic_value") or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _cache_warren(symbol: str, result: dict) -> None:
+    """
+    Persist to warren_bot_cache so GET /api/portfolio can show the holding's
+    fair value and exit marker without re-running warren_bot per request.
+    Best-effort — never raises.
+    """
+    client = _supabase()
+    if not client:
+        return
+    try:
+        import json
+        clean = json.loads(json.dumps(result, default=str))
+        client.table("warren_bot_cache").upsert(
+            {"symbol": symbol.upper(), "result": clean,
+             "cached_at": datetime.utcnow().isoformat() + "+00:00"},
+            on_conflict="symbol",
+        ).execute()
+    except Exception as e:
+        log.debug("warren_bot_cache write skipped for %s: %s", symbol, e)
+
+
+# ── Mechanism 4: Exit signal ──────────────────────────────────────────────────
+EXIT, BOOK_PARTIAL, TRAIL, REVIEW, HOLD = "EXIT", "BOOK_PARTIAL", "TRAIL", "REVIEW", "HOLD"
+
+
+def exit_signal(holding: dict, fair_value: Optional[float] = None) -> tuple[str, str]:
+    """
+    One advisory marker per holding, in priority order, with its reason:
+
+      EXIT          price at/below the stoploss (incl. a ratcheted stop — the
+                    locked-in gain has been given back)
+      BOOK_PARTIAL  past target AND (steam flagged OR price above DCF fair value)
+                    — the original thesis is fully priced in
+      TRAIL         past target, fair value still above price (or unknown) —
+                    let it run on the trailing stop
+      REVIEW        held 60+ days and 10%+ below cost (laggard)
+      HOLD          none of the above
+
+    Pure function — the API calls it on every request with live prices.
+    """
+    avg = float(holding.get("avg_buy") or 0)
+    px  = float(holding.get("current_price") or avg or 0)
+    sl  = float(holding.get("stoploss_price") or 0)
+    tgt = float(holding.get("target_price") or 0)
+    if px <= 0 or avg <= 0:
+        return HOLD, "no price"
+    gain = (px / avg - 1) * 100
+
+    if sl and px <= sl:
+        level = holding.get("stoploss_ratchet_level") or "ORIGINAL"
+        what = {"LOCK_20": "the +20% locked-in stop", "BREAKEVEN": "the breakeven stop",
+                "TRAIL": "the trailing stop"}.get(level, "the stoploss")
+        return EXIT, f"₹{px:,.2f} is at/below {what} ₹{sl:,.2f} ({gain:+.1f}% vs cost)"
+
+    if tgt and px >= tgt:
+        if holding.get("protect_gains_flag"):
+            return BOOK_PARTIAL, (f"past target ₹{tgt:,.2f} and overheated (RSI > 72 with stretched "
+                                  f"valuation) — {gain:+.1f}% vs cost")
+        if fair_value and px > fair_value:
+            return BOOK_PARTIAL, (f"past target ₹{tgt:,.2f} and above DCF fair value ₹{fair_value:,.0f} "
+                                  f"by {(px / fair_value - 1) * 100:.0f}% — {gain:+.1f}% vs cost")
+        fv = f"fair value ₹{fair_value:,.0f} still above price" if fair_value else "no DCF fair value available"
+        return TRAIL, f"past target ₹{tgt:,.2f}, {fv} — riding the stop at ₹{sl:,.2f}"
+
+    if _is_laggard(holding):
+        return REVIEW, f"held 60+ days at {gain:+.1f}% vs cost — check whether the thesis still holds"
+
+    if tgt and sl:
+        return HOLD, f"{(tgt / px - 1) * 100:.0f}% to target, {(1 - sl / px) * 100:.0f}% above stop"
+    return HOLD, "within plan"
 
 
 # ── Steam detection ────────────────────────────────────────────────────────────
@@ -264,16 +348,22 @@ def _maybe_ratchet_stoploss(holding: dict, client, dry_run: bool) -> Optional[di
     new_level = None
     msg       = None
 
-    if gain_pct >= _RATCHET_LOCK_PCT and ratchet_level != "LOCK_20":
-        # Lock in 20% gain — regardless of previous level
-        candidate_sl = avg_buy * (1 + _LOCK_GAIN_FLOOR)
-        if candidate_sl > stoploss:
+    if gain_pct >= _RATCHET_LOCK_PCT:
+        # Lock in at least +20%, and trail 15% below price once that is higher.
+        lock_sl  = avg_buy * (1 + _LOCK_GAIN_FLOOR)
+        trail_sl = current_price * (1 - _TRAIL_PCT)
+        candidate_sl = max(lock_sl, trail_sl)
+        level = "TRAIL" if trail_sl > lock_sl else "LOCK_20"
+        if candidate_sl > stoploss + 0.005:
             new_sl    = round(candidate_sl, 2)
-            new_level = "LOCK_20"
+            new_level = level
+            locked = (new_sl / avg_buy - 1) * 100
             msg = (
-                f"Stoploss ratcheted to LOCK_20 (+20% gain floor) for {symbol}. "
-                f"Gain is +{gain_pct:.1f}% — SL raised from ₹{stoploss:.0f} → ₹{new_sl:.0f}. "
-                f"Protects at least 20% profit even if the stock pulls back."
+                f"Stoploss raised for {symbol}: ₹{stoploss:.0f} → ₹{new_sl:.0f} "
+                f"(locks in at least +{locked:.0f}%). Gain is +{gain_pct:.1f}%. "
+                + ("The stop now trails 15% below the price and only ever moves up."
+                   if level == "TRAIL" else
+                   "Protects at least 20% profit even if the stock pulls back.")
             )
 
     elif gain_pct >= _RATCHET_BREAKEVEN_PCT and ratchet_level == "ORIGINAL":
@@ -306,14 +396,16 @@ def _maybe_ratchet_stoploss(holding: dict, client, dry_run: bool) -> Optional[di
             log.warning("[%s] Stoploss ratchet DB update failed: %s", symbol, e)
             return None
 
-    _create_alert(
-        client, symbol, holding_id,
-        severity   = "info",
-        alert_type = "STOPLOSS_RATCHET",
-        title      = f"🔒 Stoploss raised to {new_level} — {symbol}",
-        detail     = msg or "",
-        dry_run    = dry_run,
-    )
+    # A trailing stop moves most days — alert only when the level changes.
+    if new_level != ratchet_level:
+        _create_alert(
+            client, symbol, holding_id,
+            severity   = "info",
+            alert_type = "STOPLOSS_RATCHET",
+            title      = f"🔒 Stoploss raised to {new_level} — {symbol}",
+            detail     = msg or "",
+            dry_run    = dry_run,
+        )
 
     return {
         "symbol":     symbol,
