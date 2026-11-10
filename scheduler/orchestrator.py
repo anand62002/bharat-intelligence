@@ -79,7 +79,7 @@ DEFAULT_ACCURACY      = 70.0    # fallback accuracy when agent_performance has n
 # debate across 7 agent signals and produces the published recommendation — so
 # it gets the strongest model. P7-A wanted this for contradiction detection
 # across conflicting agents and better-calibrated confidence.
-CLAUDE_MODEL          = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
+from data.model_config import SYNTHESIS_MODEL as CLAUDE_MODEL  # single source of truth
 # Raised from 2048. The synthesis JSON is large (3 bull points, 3 bear points, a
 # synthesis paragraph, market_constraints, headline and ~12 numeric fields), and
 # on models with adaptive thinking the thinking tokens also count against this

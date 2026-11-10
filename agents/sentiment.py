@@ -44,7 +44,7 @@ AGENT_NAME = "sentiment"
 # ──────────────────────────────────────────────────────────────────────────────
 
 MAX_HAIKU_CALLS = 10          # hard cap per agent run (cost guard)
-HAIKU_MODEL     = "claude-haiku-4-5-20251001"
+from data.model_config import HAIKU_MODEL, HAIKU_THINKING  # single source of truth
 
 # Sources treated as authoritative for regulatory-action danger flag
 AUTHORITATIVE_SOURCES = {
@@ -196,6 +196,18 @@ def _fetch_newsapi(symbol: str, hours: int = 48) -> list[dict]:
 # Claude Haiku scoring
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _body_text(body: dict) -> str:
+    """First non-empty text block of a raw-HTTP Messages response.
+
+    content[0] is not guaranteed to be text — a model that thinks returns a
+    `thinking` block first. Mirrors data.llm_utils.first_text for dict bodies.
+    """
+    for block in body.get("content") or []:
+        if block.get("type") == "text" and block.get("text"):
+            return block["text"]
+    return ""
+
+
 def _call_haiku(headline: str, symbol: str) -> dict:
     """
     Score a single headline with Claude Haiku.
@@ -210,6 +222,7 @@ def _call_haiku(headline: str, symbol: str) -> dict:
     payload = json.dumps({
         "model": HAIKU_MODEL,
         "max_tokens": 120,
+        "thinking": HAIKU_THINKING,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
 
@@ -231,7 +244,7 @@ def _call_haiku(headline: str, symbol: str) -> dict:
     except URLError as exc:
         raise RuntimeError(f"Haiku network error: {exc.reason}") from exc
 
-    raw_text = body["content"][0]["text"].strip()
+    raw_text = _body_text(body).strip()
     # Strip accidental markdown fences
     raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
     raw_text = re.sub(r"\n?```$", "", raw_text).strip()
@@ -309,6 +322,7 @@ def _batch_classify_headlines(headlines: list[dict], symbol: str) -> list[dict]:
     payload = json.dumps({
         "model": HAIKU_MODEL,
         "max_tokens": max(200, len(headlines) * 60),
+        "thinking": HAIKU_THINKING,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
 
@@ -325,7 +339,7 @@ def _batch_classify_headlines(headlines: list[dict], symbol: str) -> list[dict]:
     try:
         with urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode())
-        raw_text = body["content"][0]["text"].strip()
+        raw_text = _body_text(body).strip()
         raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
         raw_text = re.sub(r"\n?```$", "", raw_text).strip()
         items = json.loads(raw_text)

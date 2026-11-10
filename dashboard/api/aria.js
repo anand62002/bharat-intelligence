@@ -1,5 +1,13 @@
 const https = require("https");
 
+// ARIA's model is chosen HERE, server-side — never by the browser. This mirrors
+// HAIKU_MODEL in data/model_config.py (the Python single source of truth);
+// Vercel functions can't import Python, so keep the two in sync.
+// Haiku 5.5 thinks by default, which would put a `thinking` block first and
+// spend ARIA's 1000-token budget — chat replies don't need it, so it's off.
+const ARIA_MODEL = "claude-haiku-5-5";
+const ARIA_THINKING = { type: "disabled" };
+
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -10,7 +18,16 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
   }
 
-  const body = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+  let payload;
+  try {
+    payload = typeof req.body === "string" ? JSON.parse(req.body) : { ...(req.body || {}) };
+  } catch (e) {
+    return res.status(400).json({ error: "Invalid JSON body" });
+  }
+  // Override whatever the client sent — the model is not a client decision.
+  payload.model = ARIA_MODEL;
+  payload.thinking = ARIA_THINKING;
+  const body = JSON.stringify(payload);
 
   return new Promise((resolve) => {
     const options = {

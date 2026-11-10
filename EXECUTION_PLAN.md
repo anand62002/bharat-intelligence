@@ -1,6 +1,6 @@
 # Bharat Intelligence — Investment-Grade Execution Plan
 ### Target: 6.0 → 8.8 / 10 System Robustness
-*Last updated: 2026-08-14*
+*Last updated: 2026-11-10*
 
 > **Standing rules (apply after every build):**
 > 1. Update `CLAUDE.md` — new files, tables, endpoints, env vars, resolved issues
@@ -107,6 +107,16 @@
 | P8-A | **ATR-14 Volatility Stoploss** — `agents/technical.py` computes `atr_14/atr_stoploss/atr_stoploss_pct`; synthesis prompt enforces 2×ATR floor via `{atr_stoploss}` placeholder; orchestrator injects from technical result. Replaces arbitrary 15% flat stoploss. 6 tests added. | ✅ DONE | 2026-07-22 |
 | P8-B | **ARIA On-Demand Analyse Command** — `POST /api/analyse` endpoint runs full 10-agent pipeline (dry_run=True, 180s timeout) for any symbol on demand. ARIA detects "analyse SYMBOL" intent → confirmation flow → `<run_analyse>` tag → dashboard calls endpoint + shows result inline. 10 tests added. | ✅ DONE | 2026-07-22 |
 | OPS-3 | **Weekly Health Audit** — `scripts/weekly_audit.py` with 9 checks (kappa, daily_runs, alpha_live, trendlyne, discovery, RAG, agent_performance, forward_poller, outcome_seeder). Sunday 07:45 IST worker job (`job_weekly_audit()`). 14 tests added. Exit code 1 on FAIL. | ✅ DONE | 2026-07-22 |
+
+### Session 2026-11-10 — Model deprecation sweep
+| ID | Item | Status | Date |
+|---|---|---|---|
+| OPS-4 | **`gpt-4o-mini` → `gpt-6-luna`** — OpenAI deprecated gpt-4o-mini 2026-10-14, shutdown **2027-01-14**. Migrated the GPT validation judge and the RAG classifier; request shape changed to `max_completion_tokens`, `temperature` removed (both 400 on gpt-6-luna). | ✅ DONE | 2026-11-10 |
+| OPS-5 | **`claude-haiku-4-5` → `claude-haiku-5-5`** — Haiku 4.5 past its guaranteed-until date (2026-10-15). All Haiku calls send `thinking: {"type": "disabled"}` (Haiku 5.5 thinks by default and would spend the small token budgets); raw-HTTP sites no longer assume `content[0]` is text. | ✅ DONE | 2026-11-10 |
+| OPS-6 | **Single model registry `data/model_config.py`** — no model env vars on Railway, so code defaults are production; every model ID now lives in one file (plus `aria.js`'s mirrored ARIA constant, test-enforced). ARIA model chosen server-side, not by the browser. | ✅ DONE | 2026-11-10 |
+| OPS-7 | **GPT judge → Haiku fallback actually implemented** — previously claimed in a docstring but absent; an OpenAI failure dropped the vote and depressed kappa. | ✅ DONE | 2026-11-10 |
+
+> Next deprecations to watch: `claude-sonnet-4-6` (judge + research agent) guaranteed until 2027-02-17; `claude-opus-5-5` until 2027-09-22. Re-check https://platform.claude.com/docs/en/about-claude/model-deprecations and https://developers.openai.com/api/docs/deprecations during the weekly OPS-2 audit.
 
 ### Session 2026-08-14 — ARIA /analyse failure (two root causes)
 | ID | Item | Status | Date |

@@ -58,7 +58,7 @@ from data.llm_utils import first_text  # model-agnostic response text extraction
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 FACT_CHECK_PROMPT_PATH  = _ROOT / "prompts" / "fact_check.txt"
-CLAUDE_HAIKU_MODEL      = os.getenv("CLAUDE_HAIKU_MODEL", "claude-haiku-4-5")
+from data.model_config import HAIKU_MODEL as CLAUDE_HAIKU_MODEL, HAIKU_THINKING  # single source of truth
 HAIKU_MAX_TOKENS        = 400   # raised from 300 — prevents truncation on longer reasons
 MAX_CLAIMS_PER_REC      = 8
 MIN_CLAIMS_FOR_CHECK    = 3     # skip rec if we can't extract at least this many
@@ -525,6 +525,7 @@ def _verify_claim(
         response = ant_client.messages.create(
             model      = CLAUDE_HAIKU_MODEL,
             max_tokens = HAIKU_MAX_TOKENS,
+            thinking   = HAIKU_THINKING,
             messages   = [{"role": "user", "content": prompt}],
         )
         raw_text = first_text(response).strip()

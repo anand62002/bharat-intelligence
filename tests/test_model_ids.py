@@ -28,11 +28,17 @@ RETIRED = [
     "claude-2",
 ]
 
-# Current, verified against client.models.list() on 2026-09-10. Newest first.
+# OpenAI models deprecated with a shutdown date — must not appear in live code.
+# gpt-4o-mini: deprecated 2026-10-14, shutdown 2027-01-14 (-> gpt-6-luna).
+RETIRED_OPENAI = ["gpt-4o-mini", "gpt-4o", "gpt-4.1"]
+
+# Current, verified against client.models.list() on 2026-09-10; claude-haiku-5-5
+# added 2026-11-10 (verified via client.models.retrieve). Newest first.
 # Re-run that call before editing this set — a cached list goes stale fast:
 # the one this project was working from in May 2026 topped out at Opus 4.8 and
 # had missed six later releases by September.
 CURRENT = {
+    "claude-haiku-5-5",
     "claude-sonnet-5-5",
     "claude-opus-5-5",
     "claude-fable-5-1",
@@ -116,3 +122,100 @@ def test_research_agent_does_not_share_the_orchestrator_env_var():
     )
     assert research_agent.SONNET_MODEL in CURRENT
     assert orchestrator.CLAUDE_MODEL in CURRENT
+
+
+# ── Single source of truth (2026-11-10) ───────────────────────────────────────
+# No model env vars are set on Railway, so the defaults in data/model_config.py
+# ARE production. A model ID hardcoded anywhere else is a copy that the next
+# deprecation sweep can miss — which is exactly how Haiku ended up pinned in
+# four modules with a dated suffix.
+
+# The only files allowed to contain a model ID literal. aria.js is a Vercel
+# function and cannot import Python, so it carries a mirrored constant.
+_REGISTRY = _ROOT / "data" / "model_config.py"
+_ARIA_JS  = _ROOT / "dashboard" / "api" / "aria.js"
+_MODEL_LITERAL = re.compile(r"[\"']((?:claude|gpt)-[a-z0-9.\-]+)[\"']")
+
+
+def _all_code_files():
+    files = _code_files()
+    files.extend(f for f in (_ROOT / "db").glob("*.py"))
+    files.append(_ROOT / "worker.py")
+    return [f for f in files if f.exists()]
+
+
+def test_model_ids_live_only_in_the_registry():
+    stray = []
+    for f in _all_code_files():
+        if f in (_REGISTRY, _ARIA_JS):
+            continue
+        for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("//"):
+                continue
+            for m in _MODEL_LITERAL.finditer(line):
+                stray.append(f"{f.relative_to(_ROOT)}:{i} -> {m.group(1)}")
+    assert not stray, (
+        "model ID hardcoded outside data/model_config.py — import it from the "
+        f"registry instead: {stray}"
+    )
+
+
+@pytest.mark.parametrize("retired", RETIRED_OPENAI)
+def test_no_deprecated_openai_models(retired):
+    hits = []
+    for f in _all_code_files():
+        for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("//"):
+                continue
+            if re.search(rf"[\"']{re.escape(retired)}[\"']", line):
+                hits.append(f"{f.relative_to(_ROOT)}:{i}")
+    assert not hits, f"deprecated OpenAI model {retired!r} still referenced: {hits}"
+
+
+def test_registry_defaults_are_current(monkeypatch):
+    """The DEFAULTS (what Railway runs with no env vars) must all be current."""
+    import importlib
+    for var in ("CLAUDE_MODEL", "JUDGE_MODEL_SONNET", "JUDGE_MODEL_OPUS",
+                "RESEARCH_AGENT_MODEL", "CLAUDE_HAIKU_MODEL", "JUDGE_MODEL_GPT"):
+        monkeypatch.delenv(var, raising=False)
+    from data import model_config
+    mc = importlib.reload(model_config)
+    for name in ("SYNTHESIS_MODEL", "JUDGE_MODEL_SONNET", "JUDGE_MODEL_OPUS",
+                 "RESEARCH_MODEL", "HAIKU_MODEL"):
+        assert getattr(mc, name) in CURRENT, f"{name}={getattr(mc, name)!r} not current"
+    assert mc.OPENAI_CHAT_MODEL not in RETIRED_OPENAI
+    importlib.reload(model_config)
+
+
+def test_aria_js_mirrors_the_registry_haiku_model():
+    from data.model_config import HAIKU_MODEL
+    src = _ARIA_JS.read_text(encoding="utf-8")
+    m = re.search(r'const ARIA_MODEL = "([^"]+)"', src)
+    assert m, "ARIA_MODEL constant not found in dashboard/api/aria.js"
+    assert m.group(1) == HAIKU_MODEL, (
+        f"aria.js ARIA_MODEL={m.group(1)!r} drifted from registry HAIKU_MODEL={HAIKU_MODEL!r}"
+    )
+    # The browser must not choose the model — aria.js overrides it.
+    assert "payload.model = ARIA_MODEL" in src
+    assert 'model:"claude' not in (_ROOT / "dashboard" / "src" / "App.jsx").read_text(encoding="utf-8")
+
+
+def test_every_haiku_call_disables_thinking():
+    """
+    Haiku 5.5 thinks by default: a thinking block arrives before the text and
+    spends the small (40-800) max_tokens budgets these calls use. Every module
+    that calls HAIKU_MODEL must pass HAIKU_THINKING alongside it.
+    """
+    missing = []
+    for f in _all_code_files():
+        if f == _REGISTRY:
+            continue
+        src = f.read_text(encoding="utf-8", errors="replace")
+        n_calls = len(re.findall(
+            r'model\s*[=:]\s*(?:CLAUDE_)?HAIKU_MODEL|"model":\s*HAIKU_MODEL', src))
+        n_think = len(re.findall(r'thinking"?\s*[=:]\s*HAIKU_THINKING', src))
+        if n_think < n_calls:
+            missing.append(f"{f.relative_to(_ROOT)} ({n_calls} calls, {n_think} with thinking off)")
+    assert not missing, f"Haiku calls without HAIKU_THINKING: {missing}"

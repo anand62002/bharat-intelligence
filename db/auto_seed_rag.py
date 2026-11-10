@@ -2,7 +2,7 @@
 db/auto_seed_rag.py — Monthly RAG corpus auto-refresh
 ======================================================
 Fetches recent India macro + market events from free sources (Google News RSS),
-classifies them via OpenAI gpt-4o-mini (or a keyword fallback when no key),
+classifies them via the OpenAI chat model in data/model_config.py (or a keyword fallback),
 generates text-embedding-3-small embeddings, and appends novel events to the
 historical_events table in Supabase.
 
@@ -14,7 +14,7 @@ Sources
 
 Classification
 --------------
-  Primary  : gpt-4o-mini structured JSON (when OPENAI_API_KEY is set)
+  Primary  : OpenAI chat model structured JSON (when OPENAI_API_KEY is set)
   Fallback : keyword-rule classifier (always available, no API cost)
 
   Each article is scored for relevance before any LLM call is made.
@@ -67,7 +67,7 @@ log = logging.getLogger(__name__)
 # ─── Model constants ──────────────────────────────────────────────────────────
 _EMBED_MODEL       = "text-embedding-3-small"
 _EMBED_DIM         = 1536
-_CHAT_MODEL        = "gpt-4o-mini"
+from data.model_config import OPENAI_CHAT_MODEL as _CHAT_MODEL  # single source of truth
 _RATE_LIMIT_DELAY  = 0.3   # seconds between OpenAI calls
 
 # ─── Relevance pre-filter keywords ────────────────────────────────────────────
@@ -437,7 +437,7 @@ def _fetch_all_articles(queries: list[str], days: int) -> list[dict]:
 # ─── OpenAI helpers ───────────────────────────────────────────────────────────
 
 def _classify_llm(title: str, snippet: str, api_key: str) -> Optional[dict]:
-    """Classify article using gpt-4o-mini. Returns dict or None on failure."""
+    """Classify article using the OpenAI chat model. Returns dict or None on failure."""
     prompt = _CLASSIFY_PROMPT.format(
         title=title[:200],
         snippet=snippet[:400],
@@ -447,8 +447,8 @@ def _classify_llm(title: str, snippet: str, api_key: str) -> Optional[dict]:
     payload = json.dumps({
         "model": _CHAT_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": 256,
+        # gpt-6-luna rejects `max_tokens` and non-default temperature (400).
+        "max_completion_tokens": 256,
     }).encode()
     req = Request(
         "https://api.openai.com/v1/chat/completions",
@@ -462,7 +462,7 @@ def _classify_llm(title: str, snippet: str, api_key: str) -> Optional[dict]:
     try:
         with urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read().decode())
-        raw = data["choices"][0]["message"]["content"].strip()
+        raw = (data["choices"][0]["message"].get("content") or "").strip()
         # Strip markdown code fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)

@@ -343,7 +343,7 @@ class TestCallHaiku:
     def _mock_urlopen(self, response_dict: dict):
         """Return a context-manager mock that yields a fake HTTP response."""
         body = json.dumps({
-            "content": [{"text": json.dumps(response_dict)}]
+            "content": [{"type": "text", "text": json.dumps(response_dict)}]
         }).encode()
         mock_resp = MagicMock()
         mock_resp.read.return_value = body
@@ -373,7 +373,7 @@ class TestCallHaiku:
         """Haiku sometimes wraps JSON in ```json ... ``` — must be stripped."""
         inner = json.dumps({"sentiment": "neutral", "score": 50, "key_claim": "test"})
         body = json.dumps({
-            "content": [{"text": f"```json\n{inner}\n```"}]
+            "content": [{"type": "text", "text": f"```json\n{inner}\n```"}]
         }).encode()
         mock_resp = MagicMock()
         mock_resp.read.return_value = body

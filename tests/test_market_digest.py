@@ -41,7 +41,7 @@ from agents.market_digest import (
 def _mock_haiku_response(payload: dict) -> MagicMock:
     """Return a mock urlopen context-manager that yields a Haiku-like response."""
     body = json.dumps({
-        "content": [{"text": json.dumps(payload)}]
+        "content": [{"type": "text", "text": json.dumps(payload)}]
     }).encode()
     mock_resp = MagicMock()
     mock_resp.read.return_value = body
@@ -274,7 +274,7 @@ class TestHaikuCall:
         """When Haiku returns malformed JSON, fallback digest is used."""
         bad_resp = MagicMock()
         bad_resp.read.return_value = json.dumps({
-            "content": [{"text": "NOT JSON {{{{"}]
+            "content": [{"type": "text", "text": "NOT JSON {{{{"}]
         }).encode()
         bad_resp.__enter__ = lambda s: s
         bad_resp.__exit__ = MagicMock(return_value=False)

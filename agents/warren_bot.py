@@ -33,6 +33,7 @@ _dcv = DataCompletenessValidator()
 
 log = logging.getLogger(__name__)
 from data.llm_utils import first_text  # model-agnostic response text extraction
+from data.model_config import HAIKU_MODEL, HAIKU_THINKING  # single source of truth for model IDs
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -724,8 +725,9 @@ def _generate_commentary(
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=HAIKU_MODEL,
             max_tokens=300,
+            thinking=HAIKU_THINKING,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = first_text(msg).strip()

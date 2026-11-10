@@ -59,6 +59,7 @@ if str(_ROOT) not in sys.path:
 
 log = logging.getLogger(__name__)
 from data.llm_utils import first_text  # model-agnostic response text extraction
+from data.model_config import HAIKU_MODEL, HAIKU_THINKING  # single source of truth for model IDs
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 MAX_SAMPLE_RECS          = 20
@@ -750,8 +751,9 @@ def _llm_reconcile_contradiction(
         import anthropic
         client_llm = anthropic.Anthropic(api_key=api_key)
         resp = client_llm.messages.create(
-            model="claude-haiku-4-5",
+            model=HAIKU_MODEL,
             max_tokens=150,
+            thinking=HAIKU_THINKING,
             messages=[{"role": "user", "content": prompt}],
         )
         text = first_text(resp).strip()

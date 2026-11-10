@@ -53,7 +53,7 @@ if _ROOT not in sys.path:
 log = logging.getLogger(__name__)
 
 DIGEST_TYPES  = ("MORNING", "CLOSING")
-HAIKU_MODEL   = "claude-haiku-4-5-20251001"
+from data.model_config import HAIKU_MODEL, HAIKU_THINKING  # single source of truth
 MAX_HEADLINES = 20   # fed to the prompt; more = richer but slower
 MAX_PROMPT_HEADLINES = 18  # hard cap on what goes into the LLM prompt
 
@@ -201,6 +201,7 @@ def _call_haiku_digest(prompt: str) -> dict:
     payload = json.dumps({
         "model": HAIKU_MODEL,
         "max_tokens": 800,
+        "thinking": HAIKU_THINKING,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
 
@@ -222,7 +223,13 @@ def _call_haiku_digest(prompt: str) -> dict:
     except URLError as exc:
         raise RuntimeError(f"Haiku network error: {exc.reason}") from exc
 
-    raw_text = body["content"][0]["text"].strip()
+    # content[0] may be a thinking block on models that think — take the first
+    # text block instead.
+    raw_text = next(
+        (b.get("text", "") for b in body.get("content") or []
+         if b.get("type") == "text" and b.get("text")),
+        "",
+    ).strip()
     # Strip accidental markdown fences
     raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
     raw_text = re.sub(r"\n?```$", "", raw_text).strip()

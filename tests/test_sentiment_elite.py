@@ -100,7 +100,7 @@ class TestEventClassConstants:
 
 class TestBatchClassifyHeadlines:
     def _haiku_body(self, classifications: list[dict]) -> dict:
-        return {"content": [{"text": json.dumps(classifications)}]}
+        return {"content": [{"type": "text", "text": json.dumps(classifications)}]}
 
     def test_batch_classify_returns_list_same_length(self):
         headlines = [_mk_headline(f"Headline {i}") for i in range(3)]
@@ -162,7 +162,7 @@ class TestBatchClassifyHeadlines:
 
     def test_haiku_json_error_falls_back(self):
         bad_resp = MagicMock()
-        bad_resp.read.return_value = b'{"content": [{"text": "NOT JSON"}]}'
+        bad_resp.read.return_value = b'{"content": [{"type": "text", "text": "NOT JSON"}]}'
         bad_resp.__enter__ = lambda s: s
         bad_resp.__exit__ = MagicMock(return_value=False)
         with (

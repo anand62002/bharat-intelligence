@@ -1,16 +1,17 @@
 """
 scheduler/synthesis_validator.py — Pre-publication Agreement-Gated Validation
 ==============================================================================
-Three independent LLM judges (GPT-4o-mini, Claude Sonnet, Claude Opus) score a
+Three independent LLM judges (GPT, Claude Sonnet, Claude Opus) score a
 synthesised recommendation across 5 rubrics before it is published to the database.
 
 Judge diversity (P1-C):
-  Judge 1 — GPT-4o-mini   (OpenAI)    — independent provider, different training
+  Judge 1 — GPT           (OpenAI)    — independent provider, different training
   Judge 2 — Claude Sonnet (Anthropic) — primary synthesis model
   Judge 3 — Claude Opus   (Anthropic) — highest-quality Anthropic judge
 
 Using three Claude variants was a known gap (correlated sampling — all three could
-agree on the same hallucination).  GPT-4o-mini as judge 1 breaks this correlation.
+agree on the same hallucination).  A GPT judge breaks this correlation.
+Model IDs live in data/model_config.py.
 
 A quality-weighted inter-rater kappa is computed per dimension and in aggregate:
 
@@ -60,14 +61,21 @@ from typing import Any, Optional
 log = logging.getLogger(__name__)
 from data.llm_utils import first_text  # model-agnostic response text extraction
 
-# ── Model identifiers (overridable via env vars) ──────────────────────────────
-# Judge 1: GPT-4o-mini — independent provider (requires OPENAI_API_KEY)
-#   Falls back to claude-haiku if OPENAI_API_KEY is not set.
+# ── Model identifiers — defined in data/model_config.py ───────────────────────
+# Judge 1: GPT (gpt-6-luna) — independent provider (requires OPENAI_API_KEY).
+#   If the GPT call fails for ANY reason (key unset, model retired, 4xx, timeout)
+#   the judge is re-run on Claude Haiku so the panel stays at 3 votes — see
+#   _call_judge. Migrated from gpt-4o-mini (shutdown 2027-01-14) on 2026-11-10.
 # Judge 2: Claude Sonnet — mid-tier Anthropic
 # Judge 3: Claude Opus   — top-tier Anthropic
+from data.model_config import (  # single source of truth for model IDs
+    HAIKU_MODEL, HAIKU_THINKING, JUDGE_MODEL_OPUS, JUDGE_MODEL_SONNET,
+    OPENAI_CHAT_MODEL, is_openai_model,
+)
+
 JUDGE_MODELS: dict[str, str] = {
-    "gpt":    os.getenv("JUDGE_MODEL_GPT",    "gpt-4o-mini"),
-    "sonnet": os.getenv("JUDGE_MODEL_SONNET", "claude-sonnet-4-6"),
+    "gpt":    OPENAI_CHAT_MODEL,
+    "sonnet": JUDGE_MODEL_SONNET,
     # Upgraded 2026-09-10: claude-opus-4-8 -> claude-opus-5-5. The judge panel
     # is the lever on aggregate kappa (observed 0.359 against a 0.30 threshold,
     # with 4 of 5 rubrics failing individually), and P7-B identifies judge
@@ -75,7 +83,7 @@ JUDGE_MODELS: dict[str, str] = {
     # NOTE: changing this shifts the kappa DISTRIBUTION, and kappa gates
     # publishing via KAPPA_SUPPRESS. Watch the suppression rate for a few days
     # before recalibrating the threshold.
-    "opus":   os.getenv("JUDGE_MODEL_OPUS",   "claude-opus-5-5"),
+    "opus":   JUDGE_MODEL_OPUS,
 }
 
 # Was 150, which silently truncated Opus. A truncated response fails
@@ -92,7 +100,7 @@ JUDGE_TIMEOUT    = 45    # seconds per judge call
 
 def _is_openai_model(model_id: str) -> bool:
     """True when the model should be called via OpenAI SDK (not Anthropic)."""
-    return model_id.startswith(("gpt-", "o1-", "o3-", "o4-"))
+    return is_openai_model(model_id)
 
 # ── Kappa gate thresholds ─────────────────────────────────────────────────────
 # Lowered from 0.40 → 0.30 (Jul 2026): empirical production data showed degraded
@@ -463,6 +471,9 @@ async def _call_anthropic_judge(
                 model      = model_id,
                 max_tokens = JUDGE_MAX_TOKENS,
                 messages   = [{"role": "user", "content": prompt}],
+                # Only the Haiku fallback turns thinking off — {"type":"disabled"}
+                # is a 400 on Opus 5.5, so the Sonnet/Opus judges send nothing.
+                **({"thinking": HAIKU_THINKING} if model_id == HAIKU_MODEL else {}),
             ),
             timeout=JUDGE_TIMEOUT,
         )
@@ -508,13 +519,14 @@ async def _call_openai_judge(
             asyncio.to_thread(
                 client.chat.completions.create,
                 model      = model_id,
-                max_tokens = JUDGE_MAX_TOKENS,
+                # gpt-6-luna rejects `max_tokens` and any non-default
+                # temperature (400) — verified 2026-11-10.
+                max_completion_tokens = JUDGE_MAX_TOKENS,
                 messages   = [{"role": "user", "content": prompt}],
-                temperature= 0.1,   # near-deterministic for scoring consistency
             ),
             timeout=JUDGE_TIMEOUT,
         )
-        text = response.choices[0].message.content.strip()
+        text = (response.choices[0].message.content or "").strip()
         m = re.search(r"\{.*?\}", text, re.DOTALL)
         raw_json = m.group(0) if m else text
         data      = json.loads(raw_json)
@@ -543,7 +555,19 @@ async def _call_judge(
     Returns (score: int 1-5, rationale: str).
     """
     if _is_openai_model(model_id):
-        return await _call_openai_judge(judge_name, model_id, rubric_name, prompt)
+        try:
+            return await _call_openai_judge(judge_name, model_id, rubric_name, prompt)
+        except Exception as exc:
+            # Keep the panel at 3 votes: one missing judge applies the
+            # single-judge reliability penalty and depresses kappa. Haiku is a
+            # weaker stand-in for provider diversity, but a vote beats none.
+            log.warning(
+                "%s/%s: OpenAI judge %s failed (%s) — falling back to %s",
+                judge_name, rubric_name, model_id, exc, HAIKU_MODEL,
+            )
+            return await _call_anthropic_judge(
+                judge_name, HAIKU_MODEL, rubric_name, prompt, ant_client,
+            )
     return await _call_anthropic_judge(judge_name, model_id, rubric_name, prompt, ant_client)
 
 
