@@ -61,6 +61,12 @@ const apiFetch = (path, opts = {}) =>
     return r.json();
   });
 
+/** First non-empty text block of an ARIA (Anthropic Messages) response.
+ *  content[0] is not guaranteed to be text — a model that thinks returns a
+ *  `thinking` block first. */
+const ariaText = (data) =>
+  (data?.content || []).find(b => b?.type === "text" && b.text)?.text || "";
+
 // ─── CRITICAL THRESHOLDS ─────────────────────────────────────────────────────
 // Discovery: flag if upsidePct >= 100 AND upsideConfidence >= 70
 // Portfolio danger: flag if dangerDropPct >= 70 AND dangerConfidence >= 65 within 2-3 months
@@ -1164,7 +1170,7 @@ function DiscoveryRecsTable({universe}){
   const PAGE=30;
   const [page,setPage]=useState(0);
   const [collapsed,setCollapsed]=useState(false);
-  const sorted=[...universe].sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  const sorted=[...universe].sort((a,b)=>(b.createdAt||"").localeCompare(a.createdAt||""));
   const total=sorted.length;
   const pages=Math.ceil(total/PAGE);
   const rows=sorted.slice(page*PAGE,(page+1)*PAGE);
@@ -1358,7 +1364,7 @@ function DiscoveryRunsPanel({runs,apiLoaded}){
 }
 
 // ─── GOVERNANCE RESEARCH AGENT TAB ───────────────────────────────────────────
-function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded, liveAttribution}){
+export function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded, liveAttribution}){
   const _feed   = Array.isArray(_rf) ? _rf : [];
   // Agent debate log entries live inside each research proposal's debate_log JSONB field.
   // We extract and flatten them from the live feed — no separate mock array needed.
@@ -1437,6 +1443,14 @@ function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded, liveAt
               <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:10,marginBottom:10}}>
                 <div style={{fontSize:10,fontWeight:700,color:C.textDim,marginBottom:4}}>Summary</div>
                 <div style={{fontSize:11,color:C.textDim,lineHeight:1.65}}>{paper.summary}</div>
+                {(paper.authors?.length>0||paper.venue||paper.publishedAt)&&(
+                  <div style={{fontSize:9,color:C.muted,marginTop:6}}>
+                    {[paper.authors?.slice(0,3).join(", ")+(paper.authors?.length>3?" et al.":""),paper.venue,paper.publishedAt?.slice(0,10)].filter(Boolean).join(" · ")}
+                  </div>
+                )}
+                {paper.relevanceReason&&(
+                  <div style={{fontSize:10,color:C.textDim,marginTop:6}}><span style={{color:C.accent,fontWeight:700}}>Why relevant: </span>{paper.relevanceReason}</div>
+                )}
               </div>
 
               <div style={{background:C.purple+"08",border:`1px solid ${C.purple}33`,borderRadius:7,padding:10,marginBottom:10}}>
@@ -1453,7 +1467,25 @@ function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded, liveAt
                     <div style={{fontSize:9,color:C.muted,marginBottom:3}}>Cost Impact</div>
                     <Tag color={paper.costImpact.includes("Free")||paper.costImpact.includes("Saves")?C.green:C.accent}>{paper.costImpact}</Tag>
                   </div>
+                  {paper.fileToChange&&(
+                    <div>
+                      <div style={{fontSize:9,color:C.muted,marginBottom:3}}>File to Change</div>
+                      <span style={{fontSize:10,color:C.text,fontFamily:"JetBrains Mono"}}>{paper.fileToChange}</span>
+                    </div>
+                  )}
+                  {paper.effortHours!=null&&(
+                    <div>
+                      <div style={{fontSize:9,color:C.muted,marginBottom:3}}>Effort</div>
+                      <span style={{fontSize:10,color:C.text}}>{`~${paper.effortHours}h`}</span>
+                    </div>
+                  )}
+                  {paper.requiresPaidData&&(
+                    <div style={{alignSelf:"flex-end"}}><Tag color={C.red} small>Requires paid data</Tag></div>
+                  )}
                 </div>
+                {paper.expectedImprovement&&(
+                  <div style={{fontSize:10,color:C.textDim,marginTop:7}}><span style={{color:C.green,fontWeight:700}}>Expected improvement: </span>{paper.expectedImprovement}</div>
+                )}
               </div>
 
               {/* Agent votes */}
@@ -2110,12 +2142,12 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
     try{
       const history=messages.slice(-14).map(m=>({role:m.role,content:m.text}));
       const ariaCall=(msgs)=>fetch("/api/aria",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({model:"claude-haiku-4-5",max_tokens:1000,system:SYSTEM,messages:msgs})});
+        body:JSON.stringify({max_tokens:1000,system:SYSTEM,messages:msgs})});  // model is set server-side in api/aria.js
 
       // ── First pass ────────────────────────────────────────────────────────
       const res=await ariaCall([...history,{role:"user",content:txt}]);
       const data=await res.json();
-      let raw=data.content?.[0]?.text||"Error.";
+      let raw=ariaText(data)||"Error.";
 
       // ── Warren Bot on-demand fetch ────────────────────────────────────────
       // ARIA outputs <fetch_warren_bot>SYMBOL</fetch_warren_bot> when it wants
@@ -2155,7 +2187,7 @@ FORMAT: 150-250 words normally. Use **bold** for key numbers. Output <portfolio_
           {role:"user",content:`${wbPayload}\n\nNow give me the full structured plain-English analysis as per Role 7.`},
         ]);
         const data2=await res2.json();
-        raw=data2.content?.[0]?.text||raw;
+        raw=ariaText(data2)||raw;
       }
 
       // ── Confirm-analyse tag: resolve symbol in background, store for run step ─

@@ -132,6 +132,11 @@ Stock analysis/
 │   │                           #   Called from orchestrator synthesise_node() before _apply_consensus_gate()
 │   │                           #   block_on_leak=False by default — logs only; set True for strict backtest mode
 │   ├── research_agent.py       # Daily AI paper scanner (arXiv, SS, HuggingFace)
+│   ├── proposal_tags.py        # Rule-based (no LLM) tag + type for research proposals:
+│   │                           #   classify_tag() → Architecture|Signal Quality|Governance|Performance
+│   │                           #   classify_type() → whitepaper|article (from source/url)
+│   │                           # Written into metadata by _save_proposal(); _transform_research()
+│   │                           #   reuses it for rows saved before the fields existed
 │   └── github_manager.py       # Opens GitHub PRs for approved research proposals
 │
 ├── scheduler/                  # APScheduler daily pipeline
@@ -773,7 +778,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 ## Interface & DB Audit Checklist (OPS-2 — run weekly)
 
-> **Recurring maintenance task.** Run every Sunday before market open (or after any major build session). Catches mismatches before they cause silent failures in production. Last full audit: 2026-08-03 (all 6 checks clean — API routes, yfinance patterns, Supabase NULL handling, worker imports, migration fallbacks; found 2 `_transform_*()` coverage gaps, 1 fixed same session — see 2026-08-03 session in git history). Previous audit: 2026-05-20 (found 3 bugs — see P5-D/E audit fix in git history).
+> **Recurring maintenance task.** Run every Sunday before market open (or after any major build session). Catches mismatches before they cause silent failures in production. Last full audit: 2026-11-10 (5 of 6 clean; the one gap — `_transform_research()` dropping every `research_proposals.metadata` field (authors, venue, published, expected_improvement, file_to_change, implementation_effort_hours, requires_paid_data, relevance_reason) — fixed same day: passed through as camelCase, rendered in the Governance research detail panel, covered by `tests/test_transform_research.py`). Follow-up: the `tag`/`type` placeholders ("Research"/"whitepaper" on every card) replaced by `governance/proposal_tags.py`; first dashboard tests added (`dashboard/src/App.test.jsx`, run with `cd dashboard && CI=true npx react-scripts test --watchAll=false`), which caught a `DiscoveryRecsTable` crash on recs without `createdAt` (offline/mock mode white-screened the app) — fixed. Previous audit: 2026-08-03 (all 6 checks clean — API routes, yfinance patterns, Supabase NULL handling, worker imports, migration fallbacks; found 2 `_transform_*()` coverage gaps, 1 fixed same session — see 2026-08-03 session in git history). Previous audit: 2026-05-20 (found 3 bugs — see P5-D/E audit fix in git history).
 
 ### What to check
 

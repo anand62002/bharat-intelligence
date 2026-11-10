@@ -987,7 +987,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P9-C** | MCP server suite — Supabase, Kite, Telegram, Firecrawl, yfinance | Code | None | XL | ⬜ TODO |
 | **P9-D** | Specialist sub-agents — 10 analysis agents rewritten as Agent SDK tools | Code | None | XL | ⬜ TODO |
 | **P9-E** | Migration + parallel-run validation — v1 vs v2 signal comparison | Code | None | L | ⬜ TODO |
-| **OPS-2** | Weekly interface + DB audit — run checklist every Sunday 09:00 IST (routes vs dashboard, column names vs code writes, worker imports vs exports, yfinance/Supabase API patterns) | Ops | None | XS | 🔄 Recurring |
+| **OPS-2** | Weekly interface + DB audit — run checklist every Sunday 09:00 IST (routes vs dashboard, column names vs code writes, worker imports vs exports, yfinance/Supabase API patterns). Last run 2026-11-10: 1 gap (research metadata + tag/type placeholders not transformed) — fixed same day; dashboard Jest smoke tests added | Ops | None | XS | 🔄 Recurring |
 | **Always** | CLAUDE.md + EXECUTION_PLAN.md update | Doc | None | XS | 🔄 Recurring |
 
 *Effort: XS=<1hr · S=1-3hr · M=3-6hr · L=6-12hr · XL=12-24hr*

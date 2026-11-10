@@ -59,11 +59,13 @@ from fastapi.security.api_key import APIKeyHeader
 from supabase import Client, create_client
 
 from agents.rationale import build_rationale as _build_rationale
+from governance.proposal_tags import VALID_TAGS, classify_tag, classify_type
 
 load_dotenv()
 
 log = logging.getLogger(__name__)
 from data.llm_utils import first_text  # model-agnostic response text extraction
+from data.model_config import HAIKU_MODEL, HAIKU_THINKING  # single source of truth for model IDs
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -280,8 +282,9 @@ def _llm_normalise_to_ticker(query: str) -> str | None:
         import anthropic as _ant
         client = _ant.Anthropic(api_key=api_key)
         msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=HAIKU_MODEL,
             max_tokens=40,
+            thinking=HAIKU_THINKING,
             messages=[{
                 "role": "user",
                 "content": (
@@ -795,9 +798,17 @@ def _transform_research(row: dict) -> dict:
     meta    = row.get("metadata") or {}
     created = str(row.get("created_at") or "")
 
+    # Rows saved before research_agent wrote tag/type are classified on the
+    # fly with the same rules, so old and new proposals colour identically.
+    tag = meta.get("tag")
+    if tag not in VALID_TAGS:
+        tag = classify_tag(meta.get("file_to_change"), row.get("impacted_agents"),
+                           row.get("proposed_change"), row.get("title"))
+    ptype = meta.get("type") or classify_type(row.get("source"), row.get("url"))
+
     return {
         "id":             row["id"],
-        "type":           meta.get("type")  or "whitepaper",
+        "type":           ptype,
         "date":           created[:10],
         "source":         row.get("source") or "",
         "title":          row.get("title")  or "",
@@ -812,8 +823,18 @@ def _transform_research(row: dict) -> dict:
         "debateLog":      debate_log,
         "prUrl":          row.get("pr_url"),
         "url":            row.get("url"),
-        "tag":            meta.get("tag") or "Research",
+        "tag":            tag,
         "createdAt":      created,
+        # Paper + proposal detail written by research_agent._save_proposal()
+        # into metadata (rows saved before that column existed have none).
+        "authors":             meta.get("authors") or [],
+        "venue":               meta.get("venue") or "",
+        "publishedAt":         meta.get("published") or "",
+        "relevanceReason":     meta.get("relevance_reason") or "",
+        "expectedImprovement": meta.get("expected_improvement") or "",
+        "fileToChange":        meta.get("file_to_change") or "",
+        "effortHours":         meta.get("implementation_effort_hours"),
+        "requiresPaidData":    bool(meta.get("requires_paid_data")),
     }
 
 
@@ -1742,7 +1763,7 @@ async def get_system_health(
       - Screener.in: whether Railway IP was recently blocked (inferred from daily_run errors)
       - Breeze Connect: whether session token is configured + not expired
       - Anthropic API: whether ANTHROPIC_API_KEY is set
-      - OpenAI (GPT-4o-mini judge): whether OPENAI_API_KEY is set
+      - OpenAI (GPT validation judge): whether OPENAI_API_KEY is set
       - Trendlyne F&O: whether session cookies are configured
     """
     checks: list[dict] = []
@@ -1939,14 +1960,14 @@ async def get_system_health(
             "Set ANTHROPIC_API_KEY in Railway env vars (backend) AND Vercel env vars (ARIA serverless)"
         ))
 
-    # ── OpenAI API (GPT-4o-mini judge) ────────────────────────────────────────
+    # ── OpenAI API (GPT validation judge) ─────────────────────────────────────
     openai_key = os.getenv("OPENAI_API_KEY", "")
     if openai_key:
         checks.append(_ok("OpenAI API", "OPENAI_API_KEY configured ✓"))
     else:
         checks.append(_warn(
             "OpenAI API",
-            "OPENAI_API_KEY not set — GPT-4o-mini validation judge disabled (Claude-only validation)",
+            "OPENAI_API_KEY not set — GPT validation judge runs on Claude Haiku instead (no provider diversity)",
             "Set OPENAI_API_KEY in Railway env vars for model-diversity in synthesis validation"
         ))
 

@@ -64,18 +64,18 @@ if str(_ROOT) not in sys.path:
 
 log = logging.getLogger(__name__)
 from data.llm_utils import first_text  # model-agnostic response text extraction
+from governance.proposal_tags import classify_tag, classify_type
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-HAIKU_MODEL         = os.getenv("CLAUDE_HAIKU_MODEL", "claude-haiku-4-5")
-# claude-sonnet-4-5 is deprecated — migrated to its direct successor 2026-09-10.
-# Reads its OWN env var: this previously shared CLAUDE_MODEL with the
-# orchestrator but with a *different* default, so the two silently drifted apart
-# (synthesis on 4-6, research still on the retired 4-5) and setting CLAUDE_MODEL
-# to tune synthesis would have changed the research agent as a side effect.
-SONNET_MODEL        = os.getenv("RESEARCH_AGENT_MODEL", "claude-sonnet-4-6")
+# Model IDs live in data/model_config.py. RESEARCH_MODEL reads its OWN env var
+# (RESEARCH_AGENT_MODEL), never the orchestrator's CLAUDE_MODEL — the two used to
+# share one with different defaults and drifted apart silently.
+from data.model_config import (  # single source of truth
+    HAIKU_MODEL, HAIKU_THINKING, RESEARCH_MODEL as SONNET_MODEL,
+)
 HAIKU_MAX_TOKENS    = 512
 SONNET_MAX_TOKENS   = 1024
 RELEVANCE_THRESHOLD = 75    # papers scoring >= this get a Sonnet proposal
@@ -833,6 +833,7 @@ def _score_relevance(paper: ResearchPaper, client) -> int:
         msg = client.messages.create(
             model      = HAIKU_MODEL,
             max_tokens = HAIKU_MAX_TOKENS,
+            thinking   = HAIKU_THINKING,
             system     = _RELEVANCE_SYSTEM,
             messages   = [{"role": "user", "content": prompt}],
         )
@@ -972,6 +973,7 @@ def _debate_one_agent(
         msg = client.messages.create(
             model      = HAIKU_MODEL,
             max_tokens = HAIKU_MAX_TOKENS,
+            thinking   = HAIKU_THINKING,
             system     = persona,
             messages   = [{"role": "user", "content": prompt}],
         )
@@ -1073,6 +1075,12 @@ def _save_proposal(
             "implementation_effort_hours": proposal.get("implementation_effort_hours"),
             "requires_paid_data":    proposal.get("requires_paid_data", False),
             "relevance_reason":      paper.relevance_reason,
+            # Dashboard card colour + label (governance/proposal_tags.py)
+            "tag":  classify_tag(
+                proposal.get("file_to_change"), proposal.get("impacted_agents"),
+                proposal.get("proposed_change"), paper.title,
+            ),
+            "type": classify_type(paper.source, paper.url),
         },
     }
 
