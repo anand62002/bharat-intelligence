@@ -2985,7 +2985,7 @@ function TopCallsPanel({ outcomes }) {
 function BacktestPanel({ backtestData, apiLoaded }) {
   const [split, setSplit] = useState("TEST");
   const SPLITS = ["TEST","TRAIN","FULL"];
-  const SPLIT_LABEL = { TEST:"Out-of-sample (2023–2024)", TRAIN:"In-sample (2021–2022)", FULL:"Full period" };
+  const SPLIT_LABEL = { TEST:"Out-of-sample (2023–2024)", TRAIN:"In-sample (2020–2022)", FULL:"Full period (2020–2024)" };
 
   const rows = Array.isArray(backtestData?.results) ? backtestData.results : [];
   const splitRows = rows.filter(r => r.split_type === split);
@@ -3607,7 +3607,7 @@ export default function App(){
       apiFetch("/api/performance/calibration")  // P6-A: confidence calibration
         .then(d=>{ if(d) setCalibrationData(d); })
         .catch(()=>{}),
-      apiFetch("/api/backtest/summary?split=TEST&limit=12")  // P6-B: backtest TEST split
+      apiFetch("/api/backtest/summary?split=ALL&limit=12")  // P6-B: all splits — TRAIN/FULL toggles were empty when only TEST was loaded
         .then(d=>{ if(d) setBacktestData(d); })
         .catch(()=>{}),
       apiFetch("/api/market/digest")  // P6-C: Morning Brief + Closing Digest

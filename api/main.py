@@ -3041,8 +3041,8 @@ async def get_forward_estimates_endpoint(
 
 @app.get("/api/backtest/summary", tags=["performance"])
 async def get_backtest_summary(
-    split:   str  = Query("TEST", description="TRAIN | TEST | FULL — TEST is the out-of-sample period"),
-    limit:   int  = Query(5, description="Number of most-recent monthly runs to return"),
+    split:   str  = Query("TEST", description="TRAIN | TEST | FULL | ALL — TEST is the out-of-sample period"),
+    limit:   int  = Query(5, description="Number of most-recent monthly runs to return (per split)"),
     _:       None = Depends(require_api_key),
 ):
     """
@@ -3051,24 +3051,31 @@ async def get_backtest_summary(
     split=TEST (2023–2024 out-of-sample) is the most meaningful metric for
     evaluating whether the system's signal logic generates genuine alpha.
 
+    split=ALL returns all three splits (limit applies per split) — the dashboard
+    uses it so its TEST/TRAIN/FULL toggle can switch without refetching. It used
+    to load only TEST, so TRAIN and FULL always looked empty.
+
     Run automatically by worker.py on the 1st of each month at 07:45 IST.
     Trigger manually: python -m agents.backtester --dry-run (test without saving)
     """
     if not _supabase:
         raise HTTPException(status_code=503, detail="Database not configured")
+    splits = ["TEST", "TRAIN", "FULL"] if split.upper() == "ALL" else [split.upper()]
     try:
-        rows = (
-            _supabase.table("backtest_results")
-            .select(
-                "run_date, universe, period_start, period_end, split_type, "
-                "total_signals, hit_rate_90d, avg_alpha_90d, avg_alpha_180d, "
-                "sharpe_ratio, max_drawdown, win_loss_ratio, created_at"
-            )
-            .eq("split_type", split.upper())
-            .order("run_date", desc=True)
-            .limit(limit)
-            .execute()
-        ).data or []
+        rows: list[dict] = []
+        for sp in splits:
+            rows += (
+                _supabase.table("backtest_results")
+                .select(
+                    "run_date, universe, period_start, period_end, split_type, "
+                    "total_signals, hit_rate_90d, avg_alpha_90d, avg_alpha_180d, "
+                    "sharpe_ratio, max_drawdown, win_loss_ratio, created_at"
+                )
+                .eq("split_type", sp)
+                .order("run_date", desc=True)
+                .limit(limit)
+                .execute()
+            ).data or []
         return {"split": split.upper(), "count": len(rows), "results": rows}
     except Exception as exc:
         log.error("backtest/summary error: %s", exc)
