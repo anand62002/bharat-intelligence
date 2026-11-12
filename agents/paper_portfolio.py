@@ -646,6 +646,97 @@ def update_open_positions(client, dry_run: bool = True) -> dict:
     }
 
 
+def _cost(p: dict) -> float:
+    """
+    Capital actually deployed in a position: entry_price × quantity. quantity is
+    floor(allocation / price), so this is ≤ allocation_inr — dividing by the
+    nominal allocation would understate returns. Falls back to the allocation
+    for rows that predate entry_price / quantity.
+    """
+    c = (_safe_float(p.get("entry_price")) or 0) * (_safe_float(p.get("quantity")) or 0)
+    return c if c > 0 else (_safe_float(p.get("allocation_inr")) or 0)
+
+
+_PNL_COLS = ("status,entry_price,quantity,allocation_inr,current_value,unrealized_pnl,"
+             "realized_pnl,alpha_pct,entry_date,exit_date,nifty_entry,nifty_exit")
+
+
+def _all_positions(client) -> list[dict]:
+    """Every position, paginated past PostgREST's 1,000-row default cap."""
+    rows: list[dict] = []
+    off = 0
+    while True:
+        page = (client.table("paper_portfolio_positions").select(_PNL_COLS)
+                .order("entry_date").range(off, off + 999).execute().data or [])
+        rows += page
+        if len(page) < 1000:
+            return rows
+        off += 1000
+
+
+def compute_pnl_metrics(positions: list[dict], nifty_now: Optional[float],
+                        as_of: Optional[date] = None) -> dict:
+    """
+    Portfolio P&L as of `as_of` (default today) — one definition for the daily
+    snapshot, the API summary and the history backfill.
+
+      total_pnl_pct       (realised + unrealised) / ALL capital ever deployed
+      unrealized_pnl_pct  open P&L / open cost basis
+      nifty_return_pct    the SAME rupees put into the Nifty 50 on each
+                          position's entry date and taken out on its exit date
+                          (or held to `as_of` if still open)
+      alpha_pct           total_pnl_pct − nifty_return_pct, over the positions
+                          that have Nifty prices recorded
+
+    Before 2026-11-12 total_pnl_pct was unrealised P&L / open capital, so it left
+    out every realised loss: the snapshot read +5.42% while total P&L was
+    −₹31,899. Alpha subtracted the Nifty's return since the very first position,
+    which compares a basket of 90-day trades with a single buy-and-hold.
+
+    Positions count from their entry date; one closed after `as_of` counts as
+    open on that date.
+    """
+    as_of = as_of or date.today()
+    live = [p for p in positions if p.get("status") in ("OPEN", "CLOSED")
+            and str(p.get("entry_date") or "")[:10] <= as_of.isoformat()]
+
+    def closed_by(p):
+        return p.get("status") == "CLOSED" and str(p.get("exit_date") or "9999")[:10] <= as_of.isoformat()
+
+    deployed   = sum(_cost(p) for p in live)
+    open_cost  = sum(_cost(p) for p in live if not closed_by(p))
+    unrealized = sum(_safe_float(p.get("unrealized_pnl")) or 0 for p in live if not closed_by(p))
+    realized   = sum(_safe_float(p.get("realized_pnl")) or 0 for p in live if closed_by(p))
+    total      = unrealized + realized
+
+    # Benchmark on the positions that have Nifty prices at both ends.
+    bench = matched_cost = matched_pnl = 0.0
+    for p in live:
+        n0 = _safe_float(p.get("nifty_entry"))
+        n1 = _safe_float(p.get("nifty_exit")) if closed_by(p) else nifty_now
+        if not n0 or not n1:
+            continue
+        cost = _cost(p)
+        matched_cost += cost
+        bench += cost * (n1 / n0 - 1)
+        matched_pnl += (_safe_float(p.get("realized_pnl")) or 0) if closed_by(p) \
+            else (_safe_float(p.get("unrealized_pnl")) or 0)
+
+    nifty_ret = bench / matched_cost * 100 if matched_cost else None
+    alpha = (matched_pnl / matched_cost * 100 - nifty_ret) if matched_cost else None
+    return {
+        "deployed_capital":   round(deployed, 2),
+        "open_cost":          round(open_cost, 2),
+        "unrealized_pnl":     round(unrealized, 2),
+        "realized_pnl":       round(realized, 2),
+        "total_pnl":          round(total, 2),
+        "total_pnl_pct":      round(total / deployed * 100, 2) if deployed else 0.0,
+        "unrealized_pnl_pct": round(unrealized / open_cost * 100, 2) if open_cost else 0.0,
+        "nifty_return_pct":   round(nifty_ret, 2) if nifty_ret is not None else None,
+        "alpha_pct":          round(alpha, 2) if alpha is not None else None,
+    }
+
+
 def save_daily_snapshot(client, dry_run: bool = True) -> dict:
     """
     Compute portfolio-level metrics and upsert today's snapshot row.
@@ -656,13 +747,7 @@ def save_daily_snapshot(client, dry_run: bool = True) -> dict:
     today = date.today()
 
     try:
-        positions = (
-            client.table("paper_portfolio_positions")
-            .select("status,allocation_inr,entry_price,quantity,current_value,"
-                    "unrealized_pnl,realized_pnl,alpha_pct")
-            .execute()
-            .data or []
-        )
+        positions = _all_positions(client)
     except Exception as exc:
         log.error("Failed to fetch positions for snapshot: %s", exc)
         return {}
@@ -670,44 +755,15 @@ def save_daily_snapshot(client, dry_run: bool = True) -> dict:
     open_positions   = [p for p in positions if p.get("status") == "OPEN"]
     closed_positions = [p for p in positions if p.get("status") == "CLOSED"]
 
-    # Cost basis, NOT the nominal allocation. quantity is floor(allocation/price),
-    # so actual capital deployed is always <= allocation_inr (e.g. a Rs 5,000
-    # allocation on a Rs 1,800 share buys 2 shares = Rs 3,600). Dividing P&L by
-    # the nominal figure understated every return by the undeployed remainder.
-    total_invested = sum(
-        (_safe_float(p.get("entry_price")) or 0) * (_safe_float(p.get("quantity")) or 0)
-        for p in open_positions
-    )
-    if total_invested <= 0:      # fallback for rows predating entry_price/quantity
-        total_invested = sum(_safe_float(p.get("allocation_inr")) or 0 for p in open_positions)
-    total_cur_value = sum(_safe_float(p.get("current_value"))  or 0 for p in open_positions)
-    unrealized_pnl  = sum(_safe_float(p.get("unrealized_pnl")) or 0 for p in open_positions)
-    realized_pnl    = sum(_safe_float(p.get("realized_pnl"))   or 0 for p in closed_positions)
-    total_pnl       = unrealized_pnl + realized_pnl
-    total_pnl_pct   = (unrealized_pnl / total_invested * 100) if total_invested > 0 else 0.0
-
-    # Benchmark: today's Nifty value
-    nifty_value       = _fetch_current_price(NIFTY_SYMBOL)
-    nifty_return_pct  = None
-    alpha_pct         = None
-
-    # Compute Nifty return since first ever position
-    try:
-        first_pos = (
-            client.table("paper_portfolio_positions")
-            .select("entry_date,nifty_entry")
-            .order("entry_date", desc=False)
-            .limit(1)
-            .execute()
-            .data or []
-        )
-        if first_pos and nifty_value:
-            nifty_entry_val = _safe_float(first_pos[0].get("nifty_entry"))
-            if nifty_entry_val and nifty_entry_val > 0:
-                nifty_return_pct = ((nifty_value / nifty_entry_val) - 1) * 100
-                alpha_pct = total_pnl_pct - nifty_return_pct
-    except Exception:
-        pass
+    nifty_value = _fetch_current_price(NIFTY_SYMBOL)
+    m = compute_pnl_metrics(positions, nifty_value, today)
+    total_invested   = m["open_cost"]            # capital currently at work
+    total_cur_value  = sum(_safe_float(p.get("current_value")) or 0 for p in open_positions)
+    total_pnl        = m["total_pnl"]
+    total_pnl_pct    = m["total_pnl_pct"]
+    alpha_pct        = m["alpha_pct"]
+    nifty_return_pct = m["nifty_return_pct"]
+    unrealized_pnl, realized_pnl = m["unrealized_pnl"], m["realized_pnl"]
 
     snapshot = {
         "snapshot_date":       str(today),
@@ -776,6 +832,14 @@ def get_portfolio_summary(client) -> dict:
     except Exception:
         closed_positions = []
 
+    # Live P&L with the same definition as the snapshot (needs ALL positions,
+    # not just the 200 most recent closed ones listed above).
+    live_metrics: dict = {}
+    try:
+        live_metrics = compute_pnl_metrics(_all_positions(client), _fetch_current_price(NIFTY_SYMBOL))
+    except Exception as exc:
+        log.warning("live paper P&L metrics unavailable: %s", exc)
+
     try:
         latest_snapshot = (
             client.table("paper_portfolio_snapshots")
@@ -799,7 +863,9 @@ def get_portfolio_summary(client) -> dict:
         "open_positions":     open_positions,
         "closed_count":       len(closed_positions),
         "trade_history":      closed_positions,
-        "summary":            latest_snapshot,
+        # Snapshot row, overlaid with live metrics (incl. unrealized_pnl_pct and
+        # deployed_capital, which the snapshot table has no column for).
+        "summary":            {**latest_snapshot, **live_metrics},
         "win_rate":           win_rate,
         "avg_alpha_closed":   avg_alpha,
         "closed_count_total": len(closed_positions),
@@ -854,7 +920,8 @@ def _print_report() -> None:
     print(f"  Closed positions      : {summary['closed_count']}")
     if snap:
         print(f"  Total invested        : ₹{snap.get('total_invested', 0):,.0f}")
-        print(f"  Unrealized P&L        : ₹{snap.get('unrealized_pnl', 0):,.0f}  ({snap.get('total_pnl_pct', 0):.1f}%)")
+        print(f"  Unrealized P&L        : ₹{snap.get('unrealized_pnl', 0):,.0f}")
+        print(f"  Total P&L             : ₹{snap.get('total_pnl', 0):,.0f}  ({snap.get('total_pnl_pct', 0):.1f}% of capital deployed)")
         print(f"  Realized P&L          : ₹{snap.get('realized_pnl', 0):,.0f}")
         nrp = snap.get("nifty_return_pct")
         alp = snap.get("alpha_pct")

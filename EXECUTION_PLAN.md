@@ -118,6 +118,7 @@
 | BF-32 | **Target extension never ran** — wrong warren_bot key (`intrinsic_value` vs `intrinsic_value_per_share`). Fixed + contract test. | ✅ DONE | 2026-11-11 |
 | P8-D | **Exit marker + trailing stop** — EXIT / BOOK PARTIAL / REVIEW / TRAIL / HOLD per holding on the Portfolio tab; stop trails 15% below price above +40% gain. | ✅ DONE | 2026-11-11 |
 | P8-E | **Long-horizon multibagger track** — `agents/multibagger_screener.py` + `agents/long_horizon_book.py`, `GET /api/long_horizon`, Portfolio-tab panel (`dashboard/src/LongHorizonPanel.jsx`). ₹10k/pick; ₹50k conviction tier locked until ≥20 one-year outcomes with ≥60% beating Nifty. Migration `create_long_horizon.sql` applied. | ✅ DONE | 2026-11-11 |
+| BF-33 | **Paper P&L % hid realised losses** — total_pnl_pct = (realised+unrealised)/all capital deployed; alpha vs the same trades in Nifty; 179 snapshots recomputed. | ✅ DONE | 2026-11-12 |
 | P8-C | **Paper portfolio conviction sizing** — every position is ₹5k HALF; `total_pnl_pct` excludes realised losses. Awaiting decision on a high-conviction tier (see session notes). | ⬜ PENDING | — |
 
 ### Session 2026-11-10 — Model deprecation sweep

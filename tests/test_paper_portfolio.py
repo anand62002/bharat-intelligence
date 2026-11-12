@@ -390,3 +390,57 @@ class TestComputeAgentAttribution:
             tech = next((a for a in result if a["agent_name"] == "technical"), None)
             if tech:
                 assert tech["bullish_count"] == 0
+
+
+# ── compute_pnl_metrics (2026-11-12) ─────────────────────────────────────────
+# total_pnl_pct used to be UNREALISED P&L / open capital, so it left out every
+# realised loss (+5.42% displayed while total P&L was −₹31,899).
+from agents.paper_portfolio import compute_pnl_metrics  # noqa: E402
+
+
+def _pos(status, cost, pnl, entry="2026-06-01", exit_=None, n0=20000.0, n1=None):
+    p = {"status": status, "entry_price": cost / 10, "quantity": 10, "entry_date": entry,
+         "nifty_entry": n0}
+    if status == "OPEN":
+        p["unrealized_pnl"] = pnl
+    else:
+        p.update(realized_pnl=pnl, exit_date=exit_, nifty_exit=n1)
+    return p
+
+
+def test_total_pnl_includes_realised_losses():
+    positions = [
+        _pos("CLOSED", 10_000, -3_000, exit_="2026-08-01", n1=20000.0),
+        _pos("OPEN", 10_000, 1_000),
+    ]
+    m = compute_pnl_metrics(positions, nifty_now=20000.0)
+    assert m["total_pnl"] == -2_000
+    assert m["total_pnl_pct"] == -10.0          # −2,000 / 20,000 deployed
+    assert m["unrealized_pnl_pct"] == 10.0      # open book alone
+    assert m["deployed_capital"] == 20_000
+
+
+def test_alpha_is_against_the_same_trades_in_nifty():
+    # Position made +10% while the Nifty rose 5% over the same window.
+    positions = [_pos("CLOSED", 10_000, 1_000, exit_="2026-09-01", n0=20000.0, n1=21000.0)]
+    m = compute_pnl_metrics(positions, nifty_now=25000.0)   # later Nifty moves don't count
+    assert m["nifty_return_pct"] == 5.0
+    assert m["alpha_pct"] == 5.0
+
+
+def test_as_of_ignores_future_entries_and_treats_later_exits_as_open():
+    positions = [
+        _pos("CLOSED", 10_000, -1_000, entry="2026-06-01", exit_="2026-09-01", n1=20000.0),
+        _pos("OPEN", 10_000, 500, entry="2026-10-01"),
+    ]
+    from datetime import date
+    m = compute_pnl_metrics(positions, nifty_now=20000.0, as_of=date(2026, 7, 1))
+    assert m["deployed_capital"] == 10_000      # second position not entered yet
+    assert m["realized_pnl"] == 0               # exit is after as_of → still open then
+
+
+def test_skipped_positions_and_missing_nifty_are_excluded():
+    positions = [_pos("OPEN", 10_000, 100, n0=None), {"status": "SKIPPED", "allocation_inr": 5000}]
+    m = compute_pnl_metrics(positions, nifty_now=20000.0)
+    assert m["deployed_capital"] == 10_000
+    assert m["nifty_return_pct"] is None and m["alpha_pct"] is None

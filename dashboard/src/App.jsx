@@ -2526,7 +2526,7 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
           <span style={{fontSize:8,color:C.muted}}>auto-follows BUY signals · validates system before live trading</span>
         </div>
         <div style={{display:"flex",gap:12,alignItems:"center"}}>
-          {pnlPct!=null&&<span style={{fontSize:9,fontWeight:700,color:pnlCol(pnlPct),fontFamily:"JetBrains Mono"}}>{fmt(pnlPct)} unrealized</span>}
+          {pnlPct!=null&&<span style={{fontSize:9,fontWeight:700,color:pnlCol(pnlPct),fontFamily:"JetBrains Mono"}}>{fmt(pnlPct)} total</span>}
           {alpha!=null&&<span style={{fontSize:9,color:pnlCol(alpha),fontFamily:"JetBrains Mono"}}>alpha {fmt(alpha)}</span>}
           {data?.win_rate!=null&&<span style={{fontSize:9,color:C.muted}}>{data.win_rate.toFixed(0)}% win rate</span>}
           <span style={{fontSize:9,color:C.muted}}>{expanded?"▲":"▼"}</span>
@@ -2543,10 +2543,13 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
 
           {/* Summary stats row */}
           {snap.total_invested>0&&(
-            <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,marginBottom:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:8,marginBottom:12}}>
               {[
                 ["Invested",`₹${(snap.total_invested||0).toLocaleString("en-IN",{maximumFractionDigits:0})}`,C.text],
-                ["Unrealized P&L",fmt(pnlPct),pnlCol(pnlPct)],
+                // total_pnl_pct = realised + unrealised over ALL capital deployed
+                // (it used to be unrealised / open capital and hid realised losses)
+                ["Total P&L",`${fmt(pnlPct)} · ₹${Math.round(snap.total_pnl||0).toLocaleString("en-IN")}`,pnlCol(pnlPct)],
+                ["Open positions",fmt(snap.unrealized_pnl_pct??null),pnlCol(snap.unrealized_pnl_pct)],
                 ["Realized P&L",`₹${(snap.realized_pnl||0).toLocaleString("en-IN",{maximumFractionDigits:0})}`,pnlCol(snap.realized_pnl)],
                 ["vs Nifty (alpha)",fmt(alpha),pnlCol(alpha)],
                 ["Win Rate",data?.win_rate!=null?`${data.win_rate.toFixed(0)}%`:"—",data?.win_rate>=50?C.green:C.red],
