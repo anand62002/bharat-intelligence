@@ -188,12 +188,14 @@ def section_open_findings(client) -> str:
     runs = client.table("daily_runs").select("symbols_processed").order("run_date", desc=True).limit(14).execute().data or []
     processed = [int(r["symbols_processed"] or 0) for r in runs]
     return "\n".join([
-        f"1. **The daily portfolio pipeline publishes nothing.** All non-discovery recommendation rows ever "
-        f"saved: {sum(by_action.values())} ({dict(by_action)}), earliest {first}. "
-        f"`daily_runs` still reports status=success, errors=0, while processing "
-        f"{min(processed, default=0)}–{max(processed, default=0)} symbols/day against ~24 holdings. "
-        "Root cause not yet investigated — the judge panel's kappa gate, the fact-checker's withhold "
-        "rule, the earnings guard, and per-symbol exceptions are all candidates.",
+        f"1. **The daily portfolio pipeline published nothing from at least 2026-09-04 to 2026-11-12** "
+        f"(non-discovery rows: {dict(by_action)}). Root cause, fixed 2026-11-12: production "
+        "`recommendations` lacks `danger_drop_pct` (schema drift from db/schema.sql), so every "
+        "published-rec insert failed with PGRST204; only SUPPRESSED rows (a separate insert) landed. "
+        "Compounded by: judges seeing only the first 300 chars of the synthesis, Opus judges truncated "
+        "at 500 tokens, and the orchestrator's daily_runs insert failing on a missing column — so "
+        f"daily_runs ({min(processed, default=0)}–{max(processed, default=0)} symbols/day, errors=0) "
+        "was written by the discovery screener only. Verify after deploy: non-SUPPRESSED rows appear.",
         "2. **Validation evidence disagrees with live evidence.** The technical-only backtest beats Nifty "
         "~62–66% of the time; live discovery calls beat it ~46–50%. Survivorship bias explains part of the gap.",
     ])

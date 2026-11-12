@@ -1878,16 +1878,15 @@ def _log_daily_run(
         client = create_client(url, key)
 
         # ── daily_runs: aggregate pipeline log ───────────────────────────────
-        # Only write columns that exist in the DB schema:
-        #   run_date, symbols_processed, errors (INTEGER), duration_seconds
+        # Tagged pipeline='discovery' so it is never mistaken for the 06:00
+        # portfolio pipeline's run (it was the only writer for months).
         # The rich coverage/discovery detail goes into discovery_runs (below).
-        # Do NOT write 'agents_run' — that column does not exist in daily_runs.
-        client.table("daily_runs").insert({
-            "run_date":          today_str,
-            "symbols_processed": symbols_processed,
-            "errors":            0,
-            "duration_seconds":  duration,
-        }).execute()
+        from data.run_log import log_daily_run
+        log_daily_run(
+            client, "discovery",
+            symbols_processed=symbols_processed, errors=0, duration_seconds=duration,
+            status="OK", run_date=run_date or date.today(),
+        )
     except Exception as exc:
         log.warning("daily_runs log failed: %s", exc)
 

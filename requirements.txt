@@ -6,7 +6,7 @@ lxml>=5.2.0
 supabase==2.10.0
 python-dotenv>=1.0.0
 openai>=1.0.0
-anthropic>=0.25.0
+anthropic>=0.95.0   # output_config (effort) on judge + synthesis calls
 langgraph>=0.2.0
 apscheduler>=3.10.0
 # ── API server ─────────────────────────────────────────────────────────────────

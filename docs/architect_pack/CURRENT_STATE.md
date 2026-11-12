@@ -4,7 +4,7 @@
 
 ## OPEN findings (not yet fixed)
 
-1. **The daily portfolio pipeline publishes nothing.** All non-discovery recommendation rows ever saved: 15 ({'SUPPRESSED': 15}), earliest 2026-09-04. `daily_runs` still reports status=success, errors=0, while processing 3–13 symbols/day against ~24 holdings. Root cause not yet investigated — the judge panel's kappa gate, the fact-checker's withhold rule, the earnings guard, and per-symbol exceptions are all candidates.
+1. **The daily portfolio pipeline published nothing from at least 2026-09-04 to 2026-11-12** (non-discovery rows: {'SUPPRESSED': 15}). Root cause, fixed 2026-11-12: production `recommendations` lacks `danger_drop_pct` (schema drift from db/schema.sql), so every published-rec insert failed with PGRST204; only SUPPRESSED rows (a separate insert) landed. Compounded by: judges seeing only the first 300 chars of the synthesis, Opus judges truncated at 500 tokens, and the orchestrator's daily_runs insert failing on a missing column — so daily_runs (3–13 symbols/day, errors=0) was written by the discovery screener only. Verify after deploy: non-SUPPRESSED rows appear.
 2. **Validation evidence disagrees with live evidence.** The technical-only backtest beats Nifty ~62–66% of the time; live discovery calls beat it ~46–50%. Survivorship bias explains part of the gap.
 
 ## Models in production
@@ -102,7 +102,7 @@ These were found and fixed in Nov 2026 sessions. Each is a *pattern* the archite
 | `agents/call_calibration.py` | 193 | agents/call_calibration.py — turn a discovery signal score into an honest, |
 | `agents/commodities.py` | 625 | agents/commodities.py — Commodities Agent |
 | `agents/discovery_rescorer.py` | 361 | agents/discovery_rescorer.py — daily re-check of every live discovery call. |
-| `agents/discovery_screener.py` | 2008 | agents/discovery_screener.py — Proactive Discovery Screener |
+| `agents/discovery_screener.py` | 2007 | agents/discovery_screener.py — Proactive Discovery Screener |
 | `agents/earnings_guard.py` | 116 | agents/earnings_guard.py — Pre-Earnings Risk Guard |
 | `agents/fundamental.py` | 1855 | agents/fundamental.py — Fundamental Analysis Agent |
 | `agents/governance_screener.py` | 286 | agents/governance_screener.py — Corporate Governance Red Flag Screener |
@@ -127,11 +127,11 @@ These were found and fixed in Nov 2026 sessions. Each is a *pattern* the archite
 | `agents/technical.py` | 856 | agents/technical.py — Technical Analysis Agent |
 | `agents/valuation_scenarios.py` | 576 | agents/valuation_scenarios.py — Valuation Sensitivity Analysis |
 | `agents/warren_bot.py` | 1211 | agents/warren_bot.py — Business Quality Assessment Agent |
-| `scheduler/orchestrator.py` | 2178 | scheduler/orchestrator.py — Bharat Intelligence Daily Orchestrator |
+| `scheduler/orchestrator.py` | 2227 | scheduler/orchestrator.py — Bharat Intelligence Daily Orchestrator |
 | `scheduler/performance_tracker.py` | 655 | scheduler/performance_tracker.py — Bharat Intelligence: Daily Performance Tracker |
 | `scheduler/portfolio_monitor.py` | 1287 | scheduler/portfolio_monitor.py — Bharat Intelligence Portfolio Monitor |
 | `scheduler/sector_pe_tracker.py` | 526 | scheduler/sector_pe_tracker.py — Daily Sector PE Snapshot Tracker |
-| `scheduler/synthesis_validator.py` | 861 | scheduler/synthesis_validator.py — Pre-publication Agreement-Gated Validation |
+| `scheduler/synthesis_validator.py` | 894 | scheduler/synthesis_validator.py — Pre-publication Agreement-Gated Validation |
 | `governance/fact_checker.py` | 998 | governance/fact_checker.py — Bharat Intelligence Governance: Fact Checker |
 | `governance/github_manager.py` | 644 | governance/github_manager.py — Bharat Intelligence: GitHub Automation Manager |
 | `governance/hallucination_detector.py` | 1593 | governance/hallucination_detector.py — Bharat Intelligence Governance: Hallucination Detector |
@@ -151,10 +151,11 @@ These were found and fixed in Nov 2026 sessions. Each is a *pattern* the archite
 | `data/options_fetcher.py` | 724 | data/options_fetcher.py — Option Chain Fetcher (Trendlyne + Breeze + NSE + Fallback) |
 | `data/proxy_session.py` | 162 | data/proxy_session.py — Outbound HTTP proxy abstraction |
 | `data/run_cache.py` | 354 | data/run_cache.py — P7-H: intra-run memoisation for expensive remote fetches |
+| `data/run_log.py` | 69 | data/run_log.py — one writer for the daily_runs table. |
 | `data/symbol_map.py` | 348 | data/symbol_map.py — NSE Symbol Resolution & Normalisation |
 | `data/trendlyne_analyst_fetcher.py` | 1005 | data/trendlyne_analyst_fetcher.py |
 | `data/trendlyne_fetcher.py` | 1033 | data/trendlyne_fetcher.py |
 | `data/trendlyne_fno_fetcher.py` | 539 | data/trendlyne_fno_fetcher.py |
 | `api/main.py` | 3520 | api/main.py — Bharat Intelligence FastAPI Backend |
 
-Dashboard: `dashboard/src/App.jsx` 4178 lines (single-file SPA) + `LongHorizonPanel.jsx`. Tests: 62 files.
+Dashboard: `dashboard/src/App.jsx` 4178 lines (single-file SPA) + `LongHorizonPanel.jsx`. Tests: 63 files.

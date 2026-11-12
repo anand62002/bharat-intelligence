@@ -53,7 +53,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -94,8 +93,35 @@ JUDGE_MODELS: dict[str, str] = {
 # and those two rubrics scored 0.281 and 0.250 — the lowest of the five.
 # The rationale is clipped to 200 chars downstream, so this is pure headroom;
 # max_tokens is a ceiling, not a target, and costs nothing unless generated.
-JUDGE_MAX_TOKENS = int(os.getenv("JUDGE_MAX_TOKENS", 500))
-JUDGE_TIMEOUT    = 45    # seconds per judge call
+#
+# Raised again 500 → 2000 on 2026-11-12. claude-opus-5-5 always thinks (it
+# cannot be disabled) and thinking tokens count against max_tokens, so at 500
+# the Opus judge was still being cut off mid-rationale — the same
+# "Unterminated string … column 27" signature, column 27 being where the
+# rationale starts in {"score": N, "rationale": "…. Claude judges now also run
+# at effort=low (_JUDGE_EFFORT): scoring one rubric needs little deliberation.
+JUDGE_MAX_TOKENS = int(os.getenv("JUDGE_MAX_TOKENS", 2000))
+JUDGE_TIMEOUT    = 60    # seconds per judge call (was 45 — Opus thinks first)
+_JUDGE_EFFORT    = {"effort": "low"}
+
+
+class JudgeTruncated(RuntimeError):
+    """The judge hit max_tokens before finishing its JSON — its vote would be lost."""
+
+
+def _parse_judge_json(text: str) -> dict:
+    """
+    Parse the judge's {"score", "rationale"} object.
+
+    Decodes from the first '{' with json.JSONDecoder.raw_decode, so a '}' inside
+    the rationale or trailing prose after the object cannot cut it short (the
+    old non-greedy brace-matching regex stopped at the FIRST closing brace).
+    """
+    start = text.find("{")
+    if start == -1:
+        raise json.JSONDecodeError("no JSON object in judge reply", text, 0)
+    obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    return obj
 
 
 def _is_openai_model(model_id: str) -> bool:
@@ -393,19 +419,23 @@ def _synthesis_fields(symbol: str, sd: dict) -> dict[str, str]:
     Extract string-safe fields from synthesis_data for .format() interpolation
     into the judge prompt.  All None values are replaced with 'N/A'.
     """
-    def _s(v: Any, default: str = "N/A") -> str:
+    def _s(v: Any, default: str = "N/A", cap: int = 300) -> str:
         if v is None:
             return default
         if isinstance(v, list):
-            return "; ".join(str(x) for x in v)[:300]
-        return str(v)[:300]
+            return "; ".join(str(x) for x in v)[:cap]
+        return str(v)[:cap]
 
-    # Inline the market_constraints note into synthesis_text so the judge
-    # prompt includes it when scoring the constraint_awareness rubric.
-    raw_synthesis = _s(sd.get("synthesis"), "Not provided")
+    # Judges must see the WHOLE synthesis. Every field used to be cut to 300
+    # characters, so judges scored a ~300-word synthesis from its first ~50
+    # words — anything about constraints or risks further in was invisible,
+    # and constraint_awareness / risk_disclosure scored 1 across the board.
+    raw_synthesis = _s(sd.get("synthesis"), "Not provided", cap=3000)
     mc_note       = sd.get("market_constraints")
     if mc_note:
-        synthesis_with_constraints = f"{raw_synthesis}  [Market constraints: {_s(mc_note)}]"
+        synthesis_with_constraints = (
+            f"{raw_synthesis}  [Market constraints: {_s(mc_note, cap=1500)}]"
+        )
     else:
         synthesis_with_constraints = raw_synthesis
 
@@ -414,8 +444,8 @@ def _synthesis_fields(symbol: str, sd: dict) -> dict[str, str]:
         "action":         _s(sd.get("action")),
         "confidence":     _s(sd.get("confidence")),
         "headline":       _s(sd.get("headline"), ""),
-        "bull_case":      _s(sd.get("bull_case"),    "Not provided"),
-        "bear_case":      _s(sd.get("bear_case"),    "Not provided"),
+        "bull_case":      _s(sd.get("bull_case"),    "Not provided", cap=1200),
+        "bear_case":      _s(sd.get("bear_case"),    "Not provided", cap=1200),
         "synthesis_text": synthesis_with_constraints,
         "entry_low":      _s(sd.get("entry_low")),
         "entry_high":     _s(sd.get("entry_high")),
@@ -471,22 +501,27 @@ async def _call_anthropic_judge(
                 model      = model_id,
                 max_tokens = JUDGE_MAX_TOKENS,
                 messages   = [{"role": "user", "content": prompt}],
-                # Only the Haiku fallback turns thinking off — {"type":"disabled"}
-                # is a 400 on Opus 5.5, so the Sonnet/Opus judges send nothing.
-                **({"thinking": HAIKU_THINKING} if model_id == HAIKU_MODEL else {}),
+                # Haiku: thinking off. Sonnet/Opus: {"type":"disabled"} is a 400
+                # on Opus 5.5, so depth is limited with effort instead.
+                **({"thinking": HAIKU_THINKING} if model_id == HAIKU_MODEL
+                   else {"output_config": _JUDGE_EFFORT}),
             ),
             timeout=JUDGE_TIMEOUT,
         )
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise JudgeTruncated(
+                f"{judge_name}/{rubric_name} truncated at max_tokens={JUDGE_MAX_TOKENS}"
+            )
         text = first_text(response).strip()
-        m = re.search(r"\{.*?\}", text, re.DOTALL)
-        raw_json = m.group(0) if m else text
-        data      = json.loads(raw_json)
+        data      = _parse_judge_json(text)
         score     = max(1, min(5, int(data.get("score", 3))))
         rationale = str(data.get("rationale", ""))[:200]
         return score, rationale
 
     except asyncio.TimeoutError:
         raise RuntimeError(f"{judge_name}/{rubric_name} timed out after {JUDGE_TIMEOUT}s")
+    except JudgeTruncated:
+        raise
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"{judge_name}/{rubric_name} returned non-JSON: {exc}")
     except Exception as exc:
@@ -527,9 +562,7 @@ async def _call_openai_judge(
             timeout=JUDGE_TIMEOUT,
         )
         text = (response.choices[0].message.content or "").strip()
-        m = re.search(r"\{.*?\}", text, re.DOTALL)
-        raw_json = m.group(0) if m else text
-        data      = json.loads(raw_json)
+        data      = _parse_judge_json(text)
         score     = max(1, min(5, int(data.get("score", 3))))
         rationale = str(data.get("rationale", ""))[:200]
         return score, rationale

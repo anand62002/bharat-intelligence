@@ -34,7 +34,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict
 
 from dotenv import load_dotenv
 
@@ -87,7 +87,14 @@ from data.model_config import SYNTHESIS_MODEL as CLAUDE_MODEL  # single source o
 # symbol is dropped from the run. The same 150-token ceiling was already
 # discarding ~every Opus judge reply before it was raised. A ceiling costs
 # nothing unless generated.
-CLAUDE_MAX_TOKENS     = int(os.getenv("CLAUDE_MAX_TOKENS", 4096))
+#
+# 4096 → 16000 on 2026-11-12: claude-opus-5-5 always thinks and its thinking
+# shares this ceiling. A truncated reply used to fall through to
+# _fallback_synthesis() silently — an empty template ("Claude synthesis
+# unavailable") that the judge panel then rightly SUPPRESSED, so the portfolio
+# pipeline published nothing for months. 16000 stays under the SDK's
+# non-streaming timeout guidance.
+CLAUDE_MAX_TOKENS     = int(os.getenv("CLAUDE_MAX_TOKENS", 16000))
 SYNTHESIS_PROMPT_PATH = _ROOT / "prompts" / "orchestrator_synthesis.txt"
 SEMANTIC_LAYER_PATH   = _ROOT / "docs"    / "semantic_layer.md"
 
@@ -1130,7 +1137,7 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 if _digest_context:
                     prompt = _digest_context + prompt
 
-                log.info("[%s] Calling Claude Sonnet for synthesis...", symbol)
+                log.info("[%s] Calling %s for synthesis...", symbol, CLAUDE_MODEL)
                 # Retry up to 3 times on 529 Overloaded / 529-like transient errors.
                 # Backoff: 15s → 45s → give up (use fallback synthesis).
                 _synthesis_raw: str | None = None
@@ -1162,6 +1169,15 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                             system=_system if _system else anthropic.NOT_GIVEN,
                             messages=[{"role": "user", "content": prompt}],
                         )
+                        if getattr(_resp, "stop_reason", None) == "max_tokens":
+                            # Truncated JSON would fail to parse and silently become
+                            # the fallback template. Name it instead.
+                            raise RuntimeError(
+                                f"synthesis truncated at max_tokens={CLAUDE_MAX_TOKENS} "
+                                f"(raise CLAUDE_MAX_TOKENS)"
+                            )
+                        if getattr(_resp, "stop_reason", None) == "refusal":
+                            raise RuntimeError("synthesis refused by the model (stop_reason=refusal)")
                         _synthesis_raw = first_text(_resp)
                         break
                     except Exception as _api_exc:
@@ -1185,6 +1201,8 @@ async def synthesise_node(state: OrchestratorState) -> dict:
 
                 if _synthesis_raw is None:
                     # All retries exhausted on 529 — use weighted fallback
+                    log.warning("[%s] SYNTHESIS FALLBACK: Anthropic overloaded after 3 attempts", symbol)
+                    errors.append(f"{symbol}: SYNTHESIS_FALLBACK (overloaded: {_last_exc})")
                     synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
                 else:
                     raw_text = _synthesis_raw
@@ -1193,10 +1211,10 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                         log.info("[%s] Claude synthesis parsed OK", symbol)
                     except (ValueError, json.JSONDecodeError, KeyError) as parse_err:
                         log.warning(
-                            "[%s] Claude JSON parse failed (%s) — using fallback",
-                            symbol, parse_err,
+                            "[%s] SYNTHESIS FALLBACK: JSON parse failed (%s) — raw reply starts: %.300s",
+                            symbol, parse_err, raw_text,
                         )
-                        log.debug("[%s] Raw Claude response: %.500s", symbol, raw_text)
+                        errors.append(f"{symbol}: SYNTHESIS_FALLBACK (unparseable JSON: {parse_err})")
                         synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
             else:
                 synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
@@ -1494,6 +1512,38 @@ async def fact_check_node(state: OrchestratorState) -> dict:
         return {}
 
 
+_MISSING_COL = re.compile(r"Could not find the '([^']+)' column")
+
+
+def _insert_tolerating_schema_drift(client, table: str, row: dict, errors: list[str]) -> Any:
+    """
+    Insert, dropping any column the live table lacks and retrying.
+
+    db/schema.sql and the production table drift: `danger_drop_pct` is in the
+    schema file but was never added in production, so EVERY portfolio
+    recommendation insert failed with PGRST204 and the 06:00 pipeline published
+    nothing for months (only SUPPRESSED rows — a separate insert without that
+    column — ever landed). A missing column now costs that one field, loudly,
+    instead of the whole recommendation.
+    """
+    row = dict(row)
+    for _ in range(5):
+        try:
+            return client.table(table).insert(row).execute()
+        except Exception as exc:
+            m = _MISSING_COL.search(str(exc))
+            if not m or m.group(1) not in row:
+                raise
+            col = m.group(1)
+            row.pop(col)
+            log.warning("SCHEMA DRIFT: %s.%s missing in production — saved without it. "
+                        "Apply the migration that adds it (see db/migrations).", table, col)
+            msg = f"SCHEMA_DRIFT: {table}.{col} missing"
+            if msg not in errors:
+                errors.append(msg)
+    return client.table(table).insert(row).execute()
+
+
 async def save_recs_node(state: OrchestratorState) -> dict:
     """
     Persist recommendations to the Supabase recommendations table.
@@ -1647,7 +1697,7 @@ async def save_recs_node(state: OrchestratorState) -> dict:
             if "agent_signals" in row and isinstance(row["agent_signals"], dict):
                 row["agent_signals"] = json.loads(json.dumps(row["agent_signals"]))
 
-            resp = client.table("recommendations").insert(row).execute()
+            resp = _insert_tolerating_schema_drift(client, "recommendations", row, errors)
             if resp.data:
                 rec_id = resp.data[0].get("id")
                 if rec_id:
@@ -1748,36 +1798,41 @@ async def log_run_node(state: OrchestratorState) -> dict:
         n_syms, n_recs, n_err, duration,
     )
 
-    # Detect full-blackout data-degradation days:
-    # when ALL symbols are suppressed and none produced recs, it's almost always
-    # because all external data sources (screener.in + Trendlyne) were down.
-    suppressed_count = sum(1 for e in state["errors"] if "SUPPRESSED" in e)
-    if n_recs == 0 and n_syms > 0 and suppressed_count == n_syms:
+    # Why each symbol did not become a published recommendation. These all
+    # used to be invisible: the run-log insert below failed every day, and the
+    # only daily_runs rows came from the discovery screener with errors=0.
+    errs = state["errors"]
+    n_attempted = len(state.get("symbols") or [])
+    reasons = {
+        "suppressed_by_judges": sum(1 for e in errs if "SUPPRESSED" in e),
+        "synthesis_fallback":   sum(1 for e in errs if "SYNTHESIS_FALLBACK" in e),
+        "synthesis_failed":     sum(1 for e in errs if " synthesis:" in e),
+        "agent_run_failed":     max(0, n_attempted - n_syms),
+    }
+    if n_recs == 0 and n_syms > 0:
         log.critical(
-            "DATA DEGRADATION DAY — all %d symbols SUPPRESSED. "
-            "Likely cause: screener.in + Trendlyne both unreachable from Railway. "
-            "Check: (1) screener.in network access from Railway "
-            "(2) TRENDLYNE_SESSION/TRENDLYNE_CSRF cookies still valid. "
-            "No recommendations written — this is intentional (low-quality data suppressed).",
-            n_syms,
+            "PORTFOLIO PIPELINE PUBLISHED NOTHING — %d symbols analysed, 0 recommendations. "
+            "Reasons: %s. Check the SYNTHESIS FALLBACK / SUPPRESSED warnings above.",
+            n_syms, reasons,
         )
 
     if state["dry_run"]:
-        log.info("[DRY RUN] daily_runs table not updated")
+        log.info("[DRY RUN] daily_runs table not updated — would log reasons %s", reasons)
         return {}
 
     client = _supabase()
     if not client:
         return {}
 
-    # Status: DATA_DEGRADATION when all suppressed (external sources down),
-    # WARNING when some errors, OK when recs produced
-    if n_recs == 0 and suppressed_count == n_syms and n_syms > 0:
-        run_status = "DATA_DEGRADATION"
-    elif n_recs > 0:
+    # OK only when something was actually published.
+    if n_recs > 0 and not errs:
         run_status = "OK"
-    else:
+    elif n_recs > 0:
         run_status = "WARNING"
+    elif n_syms > 0 and reasons["suppressed_by_judges"] == n_syms:
+        run_status = "ALL_SUPPRESSED"
+    else:
+        run_status = "NO_OUTPUT"
 
     # P7-F: data quality summary from synthesise_node
     dq_summary = state.get("data_quality_summary") or {}
@@ -1812,25 +1867,19 @@ async def log_run_node(state: OrchestratorState) -> dict:
         except Exception as _aq_exc:
             log.warning("Could not write data quality alert: %s", _aq_exc)
 
-    try:
-        client.table("daily_runs").insert({
-            "symbols_processed": n_syms,
-            "errors":            n_err,
-            "duration_seconds":  duration,
-            "status":            run_status,
-            "agents_run":        {
-                "data_quality": {
-                    "full":        n_full,
-                    "fallback":    n_fallback,
-                    "estimated":   n_estimated,
-                    "unknown":     n_unknown,
-                    "pct_degraded": pct_degraded,
-                },
-            },
-        }).execute()
-        log.info("daily_runs row logged (status=%s, pct_degraded=%.1f%%)", run_status, pct_degraded)
-    except Exception as exc:
-        log.warning("daily_runs log failed: %s", exc)
+    from data.run_log import log_daily_run
+    if log_daily_run(
+        client, "orchestrator",
+        symbols_processed=n_syms, errors=n_err, duration_seconds=duration, status=run_status,
+        details={
+            "recommendations": n_recs,
+            "reasons": reasons,
+            "errors": [str(e)[:200] for e in errs[:50]],
+            "data_quality": {"full": n_full, "fallback": n_fallback, "estimated": n_estimated,
+                             "unknown": n_unknown, "pct_degraded": pct_degraded},
+        },
+    ):
+        log.info("daily_runs row logged (status=%s, recs=%d, reasons=%s)", run_status, n_recs, reasons)
 
     # ── Completion sentinel ──────────────────────────────────────────────────
     # Intentionally verbose so it survives Railway's 1000-line log-window cap
