@@ -2,7 +2,10 @@
 
 > For technical readers: see the Component Map and Pipeline sections below.
 > For business and finance readers: start with the Executive Summary and Agent Profiles.
-> Last updated: 2026-07-19
+> Last updated: 2026-07-19 — **STALE.** Model choices, validation, confidence and the
+> discovery lifecycle have changed since (see CLAUDE.md git history, Nov 2026). For current
+> facts run `python scripts/build_architect_pack.py`; for the redesign process see
+> `docs/FABLE_ARCHITECT_REVIEW.md`. Read this file for the agents' business intent.
 
 ---
 
