@@ -2935,7 +2935,6 @@ function DataSourceQualityPanel({data}){
       <div style={{fontSize:12.5,fontWeight:700,color:C.text,marginBottom:10}}>Data Source Quality — Last {data.days.length} Runs</div>
       <div style={{display:"flex",gap:3,alignItems:"flex-end",height:60,marginBottom:6}}>
         {days.map((d,i)=>{
-          const total=d.full+d.fallback+d.estimated+d.unknown||1;
           const pctDeg=d.pctDegraded||0;
           const barColor=pctDeg>50?C.red:pctDeg>30?C.accent:C.green;
           return(

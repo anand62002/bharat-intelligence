@@ -319,7 +319,8 @@ Stock analysis/
 │   #                             _symbol_cache: process-lifetime resolution cache
 │
 ├── dashboard/
-│   ├── src/App.jsx             # Entire React SPA (~1900 lines, single file)
+│   ├── src/App.jsx             # Entire React SPA (~4700 lines, single file) — Editorial Research design (2026-11-15)
+│   ├── src/LongHorizonPanel.jsx # P8-E long-horizon panel (self-contained; gets C + apiFetch as props)
 │   ├── src/index.js
 │   ├── api/
 │   │   ├── aria.js             # Vercel serverless fn — proxies to Anthropic API
@@ -422,7 +423,7 @@ Base URL (Railway): `https://bharat-intelligence-two-production.up.railway.app` 
 | GET | `/api/debug/screener` | Diagnostic — raw screener.in fetch status for a symbol |
 | GET | `/api/debug/scraper-health` | Diagnostic — proxy/direct connectivity status (BF-15) |
 | GET | `/api/market/pulse` | Live yfinance prices (NIFTY, SENSEX, GOLD, CRUDE, VIX, FII) — 60s cache |
-| GET | `/api/market/digest` | P6-C: today's market digests — `?digest_type=MORNING\|CLOSING&digest_date=YYYY-MM-DD` — returns `{digests, date, count}` with camelCase keys |
+| GET | `/api/market/digest` | P6-C: today's market digests — `?digest_type=MORNING\|CLOSING&digest_date=YYYY-MM-DD` — returns `{digests, date, count}` with camelCase keys | Before 2026-11-15 any call *with* a parameter returned HTTP 500 (`Optional` used in the signature but never imported).
 | GET | `/api/market/regime` | Latest `market_regime` row(s) — `?days=N` |
 | GET | `/api/earnings/upcoming` | Upcoming earnings dates for portfolio + recently-screened symbols |
 | GET | `/api/news/{symbol}` | Google News RSS headlines for a symbol/topic (DB-7 live news panel) |
@@ -505,22 +506,40 @@ Discovery is **no longer part of the LangGraph pipeline** (moved out in the P6 s
 
 ## React dashboard (`dashboard/src/App.jsx`)
 
-**Single file ~1900 lines.** Key sections:
+**Single file ~4700 lines.** Key sections:
 
 | Lines (approx) | Section |
 |---|---|
-| 1–150 | Constants: mock data — used as offline fallbacks only when `API_URL` is unset |
-| 150–200 | API config: `IS_LIVE`, `API_URL`, `API_KEY`, `apiFetch()` helper |
-| 200–430 | Small UI components: MarketTicker, AlertBanner, EmptyState, etc. |
-| 430–920 | ResearchDiscoveryTab + DiscoveryRunsPanel (new) |
-| 920–1060 | PortfolioTab component |
-| 1060–1230 | GovernanceResearchTab component |
-| 1230–1350 | Charts and sub-components |
-| 1350–1520 | ARIAPanel component (AI chat) |
-| 1520–2250 | LivePerformancePanel (P5-E), AgentAttributionPanel (P5-A) |
-| 2250–2450 | ConfidenceCalibrationChart (P6-A), TopCallsPanel (P6-A), BacktestPanel (P6-B) |
-| 2450–2800 | PerformanceTab component — LivePerf + accuracy + calibration + top calls + attribution + backtest |
-| 2800–end  | App() root component — state, useEffect, routing |
+| 1–60 | `C` palette (Editorial Research), `SERIF`/`SANS`/`MONO`, global CSS (`FONT_STYLE`) |
+| 60–440 | API config (`IS_LIVE`, `apiFetch`), mock fallbacks, `EXIT_META`, `computePortfolioAlerts`, atoms (`Tag`, `Bar`, `EmptyState`) |
+| 440–745 | `ValuationScenariosPanel`, `WarrenBotPanel` |
+| 745–900 | Editorial primitives: `ICON_PATHS`/`Icon`, `EdTag`, `edBtn`, `edChip`, `edSelect`, `edH3`, `edBox`, `useNarrow`, formatters (`inr`, `signedPct`, `fmtDate`, `cleanSym`) |
+| 900–1070 | Shared detail sections (`AgentSignals`, `CatalystsRisks`, `DetailNote`, `LevelsBar`), `DiscoveryCard`, `DiscoveryDetail` |
+| 1070–1370 | Portfolio Recs: `HOLDING_TICKER_ALIASES`, `holdingsByTicker`, `splitSummary`, `RecCard`, `RecDetail`, `RecsTab` |
+| 1370–1770 | `ResearchDiscoveryTab`, `DiscoveryRecsTable`, `DiscoveryRunsPanel` |
+| 1770–2010 | `GovernanceResearchTab` |
+| 2010–2575 | `OptionsSignalPanel`, `PortfolioRiskPanel`, Portfolio: `BrokenSymbolsBanner`, `DangerCard`, `AddHoldingForm`, `HoldingDetail`, `PortfolioTab` |
+| 2575–3025 | `ARIAPanel`, `DataSourceQualityPanel`, `SystemHealthPanel` |
+| 3025–3440 | `PaperPortfolioPanel`, `MarketTab` |
+| 3440–4075 | Performance panels (calibration, top calls, backtest, attribution, live) + `PerformanceTab` |
+| 4075–end | `App()` — state, data loading, `addOrAverageHolding`, app shell (masthead, tabs / phone bottom bar, ARIA) |
+
+**Design system — Editorial Research (2026-11-15).** Chosen from a Claude Design canvas (directions A Terminal / B Fintech / C Editorial; C picked).
+- **Colour:** only via `C` (light paper ground, ink text, one saffron-rust accent `#b4441a`; green/red darkened for 4.5:1 contrast). Every value is a 6-digit hex because call sites append alpha (`C.green+"14"`). Text on solid fills uses `C.onFill`. Don't add new hex literals.
+- **Type:** `SERIF` (Source Serif 4) for page titles, stock symbols, theses; `SANS` (Inter) for UI; `MONO` (JetBrains Mono) for numbers. Minimum text ~10.5px.
+- **No emoji in UI.** Use `Icon` (line icons from `ICON_PATHS`) and text tags (`EdTag` tone = buy/sell/hold/warn/info/mute/crit). `✦` stays as ARIA's mark; ✓/⚠ are allowed as text symbols.
+- **Meaning never by colour alone:** ▲/▼/■ on changes, words on tags.
+- **Breakpoints (`useNarrow`):** < 900px → Discovery / Recs / Gov Research become list → detail → Back; < 760px → phone shell (compact masthead, ticker on its own row, **bottom bar** Discover/Recs/Portfolio/Market/More, full-screen ARIA) and Portfolio's 3-column table.
+- **Phone verification:** screenshots from the in-app browser pane crop the right edge of an emulated phone. Verify layout by measuring element right edges at 375px and 320px (ignoring elements inside an `overflow-x:auto` scroller) — the shell root is `overflow:hidden`, so overflow is clipped silently, not scrolled.
+- **Collapsible headers** are real buttons or `role="button"` + `tabIndex` + Enter/Space handler. Fixed multi-column grids must wrap (`auto-fit`) or sit in an `overflowX:auto` box with a `minWidth`.
+- **Build gate:** `CI=true npx react-scripts build` treats lint warnings as errors — keep it compiling (unused components/vars fail it).
+
+**Tab behaviour worth knowing:**
+- Discovery/Recs detail panels are `position:sticky` inside the main scroller (no nested scroll box).
+- Recs "My holdings" matches rec symbols (`.NS`/`.BO`) to holdings via `holdingsByTicker()` + `HOLDING_TICKER_ALIASES` — a third copy of the brand aliases, needed only because `/api/portfolio` returns `yfSymbol: null`. Remove it if the API starts returning yfSymbol.
+- Recs: upside is shown only when the call has a target; "⚠ …" lines in the synthesis summary render as notes.
+- Portfolio "Add holding" form → `addOrAverageHolding()`: new symbol → `handlePortfolioUpdate({action:"add"})`; held symbol → averaged in (qty + weighted avg) and `current_price` is sent too, because the backend update path otherwise resets it to the new average.
+- Market brief: if today has no digest, `MarketTab` walks back ≤7 days via `?digest_date=` and labels it. The search is guarded by a ref (a state guard re-ran the effect and cancelled it; the mounted flag is re-armed for StrictMode).
 
 **IS_LIVE pattern:**
 ```javascript
@@ -542,7 +561,7 @@ const [apiLoaded, setApiLoaded] = useState(!IS_LIVE);
 - Collapsible panel at bottom of Discovery tab
 - Fetches `GET /api/discovery/runs`
 - Shows per-day accordion: total screened / passed / promoted
-- Expanded day: symbol pills colour-coded (⚡ promoted, ✓ passed, dim = screened only)
+- Expanded day: symbol pills colour-coded (⚡ promoted, ✓ passed, dim = screened only); header is keyboard-toggleable
 - Coverage stats mini-bar: universe size, cycle day, monthly passes
 
 **ARIA portfolio action flow:**
@@ -748,6 +767,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 | Commit | Change |
 |---|---|
+| (2026-11-15 — dashboard redesign) | **Editorial Research redesign of the whole dashboard** (`ux-revamp`, merged). Direction picked from a Claude Design canvas with three working prototypes. New `C` palette + serif/sans/mono type + line icons (no emoji) + shared primitives (`EdTag`, `edBtn`, `Icon`, `useNarrow`, `AgentSignals`, `LevelsBar`…). **Discovery, Portfolio Recs, Portfolio, Market rebuilt** as list+detail / table+expand layouts with filters, search, sort, loading/empty/no-match states; Performance, Gov Research, Governance restyled. **Phone shell** (<760px): bottom tab bar + More sheet, ticker row, full-screen ARIA — found by measuring at 375/320px that the ARIA button sat off-screen, the ticker was 0px wide and tabs were 863px wide. Bugs fixed on the way: Recs "My holdings" never matched (symbol suffix + brand aliases); Portfolio's "Add holding" only opened ARIA (now a validated form that averages into existing positions); below-stop holdings read "+28.5% away"; alert prices printed raw floats; GIFT NIFTY "flat" shown as a red ▼; weekend Market tab had no brief (now falls back to the latest); `/api/market/digest` 500 on any parameter (`Optional` not imported in `api/main.py`). Unused `RiskGauge`/`ConfidenceGauge`/`CriticalDangerBanner`/`MarketDigestPanel` removed; `CI=true` build now clean. |
 | (2026-11-12 — portfolio pipeline outage) | **The 06:00 portfolio pipeline had published nothing since ≥2026-09-04.** Root cause: production `recommendations` has no `danger_drop_pct` (in db/schema.sql, never migrated) → every published-rec insert in `save_recs_node` failed with PGRST204; only SUPPRESSED rows (separate insert omitting it) landed. Invisible because the orchestrator's `daily_runs` insert also failed (non-existent `agents_run` column) — every daily_runs row was the discovery screener's, errors hard-coded 0. Compounding: `_synthesis_fields()` cut the synthesis to 300 chars for the judges (constraint_awareness/risk_disclosure scored 1 everywhere); Opus 5.5 judges (always thinking) truncated at 500 tokens ("Unterminated string … column 27") so votes were dropped; truncated/failed syntheses silently became the fallback template. Fixes: `_insert_tolerating_schema_drift()` (drops a missing column, retries, records `SCHEMA_DRIFT`); `db/migrations/add_danger_drop_pct_column.sql`; judges see the full synthesis, run at `effort: low`, `JUDGE_MAX_TOKENS` 2000, robust `raw_decode` parse, `JudgeTruncated` named; `CLAUDE_MAX_TOKENS` 16000, max_tokens/refusal raised explicitly, every fallback logged + counted as `SYNTHESIS_FALLBACK`; new `data/run_log.py` — one daily_runs writer tagged by `pipeline`, honest status (OK/WARNING/ALL_SUPPRESSED/NO_OUTPUT) with per-reason counts in `details` (`db/migrations/add_daily_runs_pipeline.sql`; falls back to base columns until applied). Verified: TITAN synthesis + live judges κ 0.161 → 0.519 (QUALIFIED, publishes); live probe insert succeeds with drift reported. |
 | (2026-11-12 — architecture review kit) | **Fable architect-review process.** `docs/FABLE_ARCHITECT_REVIEW.md` replaces the stale July `FABLE5_REDESIGN_PROMPT.md`: Stage A evidence pack (`scripts/build_architect_pack.py` → `docs/architect_pack/CURRENT_STATE.md`, generated from code + live DB, aggregates only), Stage B Fable 5.1 review in Claude Code Plan mode → `docs/architecture/{REVIEW,TARGET_ARCHITECTURE,ADR-*}.md` + `workplan.yaml`, Stage C execution via the `/execute-wp WP-NNN` project command (`.claude/commands/execute-wp.md`: branch per WP, tests, acceptance table, PR, never merges/migrates; STATUS in `docs/architecture/STATUS.md`), Stage D monthly re-plan. The pack surfaced an OPEN finding: **every non-discovery recommendation since 2026-09-04 is SUPPRESSED (15 rows total) while `daily_runs` reports success** — root cause not yet investigated. `docs/ARCHITECTURE.md` marked stale. |
 | (2026-11-12) | **Paper-portfolio P&L fixed.** `total_pnl_pct` was unrealised P&L / open capital, so it hid every realised loss (+6.41% shown vs −1.76% actual on ₹16.9 L deployed); alpha compared it with the Nifty since the first-ever position. New `compute_pnl_metrics()` used by the snapshot and `GET /api/paper/portfolio` (adds `unrealized_pnl_pct`, `deployed_capital`); alpha is now against the same trades in the Nifty. `scripts/backfill_paper_pnl.py` filled 95 missing `nifty_entry`/`nifty_exit` values and recomputed 179 snapshots (backup in `logs/`). Dashboard panel shows Total P&L (₹ and %) and Open positions separately. |
