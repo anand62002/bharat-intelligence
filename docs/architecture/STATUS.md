@@ -7,7 +7,7 @@ Plan: `workplan.yaml` · Review: `REVIEW.md` · Target: `TARGET_ARCHITECTURE.md`
 
 | WP | State | PR | Date | Note |
 |---|---|---|---|---|
-| WP-001 | IN_PROGRESS | — (branch `wp/WP-001-verify-pipeline-publish`, local) | 2026-11-15 | `scripts/verify_pipeline_publish.py` added. 2026-11-13 and 2026-11-14 → PUBLISHED, 24/24 holdings each, 0 suppressed, 0 errors (output below). Awaiting owner OK to push |
+| WP-001 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-15 | `scripts/verify_pipeline_publish.py` added. 2026-11-13 and 2026-11-14 → PUBLISHED, 24/24 holdings each, 0 suppressed, 0 errors (output below) |
 | WP-002 | MERGED | — | 2026-11-15 | Verified by read: `recommendations.danger_drop_pct` exists in production (written 2026-11-14) and `daily_runs.pipeline/details` exist; no SCHEMA_DRIFT in run errors |
 | WP-003 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-15 | Equal weights via `data/decision_config.py`; regime multipliers off; discovery weights routed through config; outcome_tracker writes %. NEEDS-PROD: worker log shows `Agent weights: equal (7 × 0.1429)`; watch discovery pass counts for a week |
 | WP-004 | TODO | — | — | Persist score, gate result and source on outcome rows (backfill run is manual) |
