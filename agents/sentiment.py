@@ -200,8 +200,11 @@ def _body_text(body: dict) -> str:
     """First non-empty text block of a raw-HTTP Messages response.
 
     content[0] is not guaranteed to be text — a model that thinks returns a
-    `thinking` block first. Mirrors data.llm_utils.first_text for dict bodies.
+    `thinking` block first. Mirrors data.llm_utils.first_text for dict bodies,
+    including token accounting for the job ledger (WP-005).
     """
+    from data.llm_utils import record_usage
+    record_usage(body)
     for block in body.get("content") or []:
         if block.get("type") == "text" and block.get("text"):
             return block["text"]

@@ -75,50 +75,69 @@ except ImportError:
 # Job wrappers
 # =============================================================================
 
-def job_orchestrator() -> None:
-    """06:00 IST — main agent pipeline."""
+# Every job_* below is wrapped in data.run_log.tracked_job (WP-005, ADR-005):
+# one daily_runs row per run (pipeline=<job name>), status OK / WARNING /
+# FAILED, the returned dict under details.output, LLM tokens under
+# details.llm_usage. Jobs therefore let exceptions propagate (the decorator
+# logs them at ERROR and never re-raises) and RETURN their result dict — its
+# "count" becomes symbols_processed and a non-empty "errors" makes it WARNING.
+# Secondary steps inside a job keep their own try and report into "errors" so
+# one failed sub-step cannot hide the main step's result.
+from data.run_log import tracked_job  # noqa: E402
+
+
+def _service_client():
+    import os
+    from supabase import create_client
+    return create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_KEY", ""))
+
+
+@tracked_job("orchestrator", logs_own_row=True)
+def job_orchestrator() -> dict:
+    """06:00 IST — main agent pipeline. Writes its own daily_runs row (scheduler/orchestrator.py)."""
     log.info("=" * 60)
     log.info("  JOB START: Daily Orchestrator (06:00 IST)")
     log.info("=" * 60)
-    try:
-        from scheduler.orchestrator import run_pipeline
-        final = asyncio.run(run_pipeline(dry_run=False))
-        errs  = final.get("errors", [])
-        recs  = len(final.get("recommendations", []))
-        syms  = final.get("symbols_processed", 0)
-        log.info("Orchestrator done — symbols=%d  recs=%d  errors=%d", syms, recs, len(errs))
-        if errs:
-            for e in errs:
-                log.warning("  orchestrator error: %s", e)
-    except Exception as exc:
-        log.error("Orchestrator job failed: %s", exc, exc_info=True)
+    from scheduler.orchestrator import run_pipeline
+    final = asyncio.run(run_pipeline(dry_run=False))
+    errs  = final.get("errors", [])
+    recs  = len(final.get("recommendations", []))
+    syms  = final.get("symbols_processed", 0)
+    log.info("Orchestrator done — symbols=%d  recs=%d  errors=%d", syms, recs, len(errs))
+    for e in errs:
+        log.warning("  orchestrator error: %s", e)
+    return {"count": syms, "recommendations": recs, "errors": [str(e) for e in errs]}
 
 
-def job_performance_tracker() -> None:
+@tracked_job("performance_tracker")
+def job_performance_tracker():
     """07:00 IST — audit agent accuracy."""
     log.info("=" * 60)
     log.info("  JOB START: Performance Tracker (07:00 IST)")
     log.info("=" * 60)
-    try:
-        from scheduler.performance_tracker import run as pt_run
-        pt_run()
-        log.info("Performance tracker done")
-    except Exception as exc:
-        log.error("Performance tracker job failed: %s", exc, exc_info=True)
+    from scheduler.performance_tracker import run as pt_run
+    result = pt_run()
+    log.info("Performance tracker done")
+    return result
 
 
-def job_research_agent() -> None:
+@tracked_job("research_agent")
+def job_research_agent() -> dict:
     """07:30 IST — AI paper scanner."""
     log.info("=" * 60)
     log.info("  JOB START: Research Agent (07:30 IST)")
     log.info("=" * 60)
+    out: dict = {"count": 0, "errors": []}
+    scan_exc: Exception | None = None
     try:
         from governance.research_agent import run as ra_run
         result = ra_run(dry_run=False)
         saved = result.get("saved", 0) if isinstance(result, dict) else "?"
         log.info("Research agent done — proposals saved: %s", saved)
-    except Exception as exc:
-        log.error("Research agent job failed: %s", exc, exc_info=True)
+        out.update(count=saved if isinstance(saved, int) else 0, scan=result)
+    except Exception as exc:     # held: the gates below still run, then re-raised
+        log.error("Research agent scan failed: %s", exc, exc_info=True)
+        scan_exc = exc
 
     # Close the loop: until now the agent produced proposals and debates daily
     # and nothing ever consumed the vote, so everything sat at 'pending'.
@@ -136,8 +155,11 @@ def job_research_agent() -> None:
             log.info("  PR opened: %s", url)
         for err in gate.get("errors", []):
             log.warning("  auto-approval error: %s", err)
+        out["auto_approve"] = gate
+        out["errors"] += [f"auto_approve: {e}" for e in gate.get("errors", [])]
     except Exception as exc:
         log.error("Auto-approval gate failed: %s", exc, exc_info=True)
+        out["errors"].append(f"auto_approve: {exc}")
 
     # Auto-merge, gated on GOVERNANCE_AUTO_MERGE=true. Stricter than auto-PR:
     # unanimous vote AND fully green CI. Merges PRs opened on EARLIER runs,
@@ -155,13 +177,33 @@ def job_research_agent() -> None:
                 log.info("  MERGED PR #%s", n)
             for err in mg.get("errors", []):
                 log.warning("  auto-merge error: %s", err)
+            out["auto_merge"] = mg
+            out["errors"] += [f"auto_merge: {e}" for e in mg.get("errors", [])]
         else:
             log.info("Auto-merge disabled (GOVERNANCE_AUTO_MERGE not set)")
     except Exception as exc:
         log.error("Auto-merge failed: %s", exc, exc_info=True)
+        out["errors"].append(f"auto_merge: {exc}")
+    if scan_exc is not None:
+        raise scan_exc          # ledger records FAILED for the main step
+    return out
 
 
-def job_market_digest_morning() -> None:
+def _run_digest(kind: str) -> dict:
+    from agents.market_digest import generate_digest, save_digest
+    digest = generate_digest(kind)
+    row_id = save_digest(digest)
+    log.info(
+        "%s digest generated — mood=%s headlines=%d id=%s",
+        kind.title(), digest.get("market_mood"), digest.get("headline_count", 0), row_id,
+    )
+    return {"count": digest.get("headline_count", 0), "market_mood": digest.get("market_mood"),
+            "nifty_signal": digest.get("nifty_signal"), "row_id": row_id,
+            "errors": [] if row_id else ["digest not saved"]}
+
+
+@tracked_job("market_digest_morning")
+def job_market_digest_morning() -> dict:
     """05:30 IST — generate Morning Brief for Indian equity market (P6-C).
 
     Runs BEFORE the orchestrator (06:00 IST) so the digest's market_mood,
@@ -171,147 +213,130 @@ def job_market_digest_morning() -> None:
     log.info("-" * 50)
     log.info("  JOB START: Market Digest Morning Brief (05:30 IST)")
     log.info("-" * 50)
-    try:
-        from agents.market_digest import generate_digest, save_digest
-        digest = generate_digest("MORNING")
-        row_id = save_digest(digest)
-        log.info(
-            "Morning Brief generated — mood=%s headlines=%d id=%s",
-            digest.get("market_mood"), digest.get("headline_count", 0), row_id,
-        )
-    except Exception as exc:
-        log.error("Market digest morning job failed: %s", exc, exc_info=True)
+    return _run_digest("MORNING")
 
 
-def job_market_digest_closing() -> None:
+@tracked_job("market_digest_closing")
+def job_market_digest_closing() -> dict:
     """16:20 IST — generate Closing Digest for Indian equity market (P6-C)."""
     log.info("-" * 50)
     log.info("  JOB START: Market Digest Closing (16:20 IST)")
     log.info("-" * 50)
-    try:
-        from agents.market_digest import generate_digest, save_digest
-        digest = generate_digest("CLOSING")
-        row_id = save_digest(digest)
-        log.info(
-            "Closing Digest generated — mood=%s headlines=%d id=%s",
-            digest.get("market_mood"), digest.get("headline_count", 0), row_id,
-        )
-    except Exception as exc:
-        log.error("Market digest closing job failed: %s", exc, exc_info=True)
+    return _run_digest("CLOSING")
 
 
-def job_earnings_calendar() -> None:
+@tracked_job("earnings_calendar")
+def job_earnings_calendar() -> dict:
     """08:00 IST — refresh earnings calendar for portfolio + recently-screened symbols (P3-C-P2)."""
     log.info("-" * 50)
     log.info("  JOB START: Earnings Calendar (08:00 IST)")
     log.info("-" * 50)
-    try:
-        import os
-        from supabase import create_client
-        client = create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_KEY", ""))
+    client = _service_client()
+    errors: list[str] = []
 
-        # --- Source 1: Open portfolio holdings ---
-        portfolio_rows = (
-            client.table("portfolio_holdings")
-            .select("symbol")
-            .eq("status", "OPEN")
+    # --- Source 1: Open portfolio holdings ---
+    portfolio_rows = (
+        client.table("portfolio_holdings")
+        .select("symbol")
+        .eq("status", "OPEN")
+        .execute()
+        .data or []
+    )
+    portfolio_symbols = {r["symbol"] for r in portfolio_rows}
+
+    # --- Source 2: Recently-screened symbols (last 3 days of discovery_runs) ---
+    # P3-C-P2: expand coverage beyond portfolio to symbols the screener just touched.
+    # We include symbols that 'passed' the pre-screen (higher quality filter) over
+    # the last 3 days so the earnings guard can block a stock before it enters
+    # a full agent pipeline run the next day.
+    discovery_symbols: set[str] = set()
+    try:
+        from datetime import date, timedelta
+        cutoff = str(date.today() - timedelta(days=3))
+        disc_rows = (
+            client.table("discovery_runs")
+            .select("passed_symbols")
+            .gte("run_date", cutoff)
             .execute()
             .data or []
         )
-        portfolio_symbols = {r["symbol"] for r in portfolio_rows}
-
-        # --- Source 2: Recently-screened symbols (last 3 days of discovery_runs) ---
-        # P3-C-P2: expand coverage beyond portfolio to symbols the screener just touched.
-        # We include symbols that 'passed' the pre-screen (higher quality filter) over
-        # the last 3 days so the earnings guard can block a stock before it enters
-        # a full agent pipeline run the next day.
-        discovery_symbols: set[str] = set()
-        try:
-            from datetime import date, timedelta
-            cutoff = str(date.today() - timedelta(days=3))
-            disc_rows = (
-                client.table("discovery_runs")
-                .select("passed_symbols")
-                .gte("run_date", cutoff)
-                .execute()
-                .data or []
+        for row in disc_rows:
+            passed = row.get("passed_symbols") or []
+            if isinstance(passed, list):
+                discovery_symbols.update(s for s in passed if isinstance(s, str))
+        if discovery_symbols:
+            log.info(
+                "Earnings calendar: found %d recently-screened symbols from last 3 days",
+                len(discovery_symbols),
             )
-            for row in disc_rows:
-                passed = row.get("passed_symbols") or []
-                if isinstance(passed, list):
-                    discovery_symbols.update(s for s in passed if isinstance(s, str))
-            if discovery_symbols:
-                log.info(
-                    "Earnings calendar: found %d recently-screened symbols from last 3 days",
-                    len(discovery_symbols),
-                )
-        except Exception as exc:
-            log.warning("Could not fetch recently-screened symbols: %s", exc)
-
-        # Merge; portfolio holdings take priority (already in set)
-        all_symbols = sorted(portfolio_symbols | discovery_symbols)
-        if not all_symbols:
-            log.info("No symbols to refresh — skipping earnings calendar")
-            return
-
-        log.info(
-            "Earnings calendar refresh: %d total symbols (%d portfolio + %d discovery)",
-            len(all_symbols),
-            len(portfolio_symbols),
-            len(discovery_symbols - portfolio_symbols),
-        )
-
-        from data.earnings_fetcher import fetch_upcoming_earnings, upsert_earnings_calendar
-        # Use wider look-ahead for screened symbols (60d) so upcoming earnings
-        # are available even if the stock is processed next cycle week
-        records = fetch_upcoming_earnings(all_symbols, days_ahead=60)
-        n = upsert_earnings_calendar(records)
-        log.info(
-            "Earnings calendar done — %d records upserted for %d symbols",
-            n, len(all_symbols),
-        )
     except Exception as exc:
-        log.error("Earnings calendar job failed: %s", exc, exc_info=True)
+        log.warning("Could not fetch recently-screened symbols: %s", exc)
+        errors.append(f"discovery_runs: {exc}")
+
+    # Merge; portfolio holdings take priority (already in set)
+    all_symbols = sorted(portfolio_symbols | discovery_symbols)
+    if not all_symbols:
+        log.info("No symbols to refresh — skipping earnings calendar")
+        return {"count": 0, "upserted": 0, "errors": errors}
+
+    log.info(
+        "Earnings calendar refresh: %d total symbols (%d portfolio + %d discovery)",
+        len(all_symbols),
+        len(portfolio_symbols),
+        len(discovery_symbols - portfolio_symbols),
+    )
+
+    from data.earnings_fetcher import fetch_upcoming_earnings, upsert_earnings_calendar
+    # Use wider look-ahead for screened symbols (60d) so upcoming earnings
+    # are available even if the stock is processed next cycle week
+    records = fetch_upcoming_earnings(all_symbols, days_ahead=60)
+    n = upsert_earnings_calendar(records)
+    log.info(
+        "Earnings calendar done — %d records upserted for %d symbols",
+        n, len(all_symbols),
+    )
+    return {"count": len(all_symbols), "upserted": n, "errors": errors}
 
 
-def job_regime_detector() -> None:
+@tracked_job("regime_detector")
+def job_regime_detector() -> dict:
     """06:30 IST — detect market regime before orchestrator runs."""
     log.info("-" * 50)
     log.info("  JOB START: Regime Detector (06:30 IST)")
     log.info("-" * 50)
-    try:
-        from agents.regime_detector import detect_regime
-        result = detect_regime(dry_run=False)
-        log.info(
-            "Regime: %s (confidence=%d%%) — nifty=%s vix=%s fii=%s",
-            result.get("regime"), result.get("confidence", 0),
-            result.get("nifty_trend"), result.get("vix_state"), result.get("fii_trend"),
-        )
-    except Exception as exc:
-        log.error("Regime detector job failed: %s", exc, exc_info=True)
+    from agents.regime_detector import detect_regime
+    result = detect_regime(dry_run=False)
+    log.info(
+        "Regime: %s (confidence=%d%%) — nifty=%s vix=%s fii=%s",
+        result.get("regime"), result.get("confidence", 0),
+        result.get("nifty_trend"), result.get("vix_state"), result.get("fii_trend"),
+    )
+    return {"count": 1 if result.get("regime") else 0, **result}
 
 
-def job_rec_outcome_seeder() -> None:
+@tracked_job("rec_outcome_seeder")
+def job_rec_outcome_seeder() -> dict:
     """06:55 IST — seed PENDING outcome rows for any new recommendations (P5-C)."""
     log.info("-" * 50)
     log.info("  JOB: Rec Outcome Seeder (06:55 IST)")
     log.info("-" * 50)
-    try:
-        from agents.rec_outcome_seeder import run_seeder
-        result = run_seeder(dry_run=False, resolve_past=False)
-        log.info(
-            "Seeder done — seeded=%d skipped=%d errors=%d",
-            result.get("seeded", 0), result.get("skipped", 0), len(result.get("errors", [])),
-        )
-    except Exception as exc:
-        log.error("Rec outcome seeder job failed: %s", exc, exc_info=True)
+    from agents.rec_outcome_seeder import run_seeder
+    result = run_seeder(dry_run=False, resolve_past=False)
+    log.info(
+        "Seeder done — seeded=%d skipped=%d errors=%d",
+        result.get("seeded", 0), result.get("skipped", 0), len(result.get("errors", [])),
+    )
+    return {"count": result.get("seeded", 0), **result}
 
 
-def job_outcome_tracker() -> None:
+@tracked_job("outcome_tracker")
+def job_outcome_tracker() -> dict:
     """18:30 IST — resolve pending recommendation outcomes at 90/180/365d horizons + sentiment validation."""
     log.info("=" * 60)
     log.info("  JOB START: Outcome Tracker (18:30 IST)")
     log.info("=" * 60)
+    out: dict = {"count": 0, "errors": []}
+    track_exc: Exception | None = None
     try:
         from agents.outcome_tracker import run_outcome_tracking
         result = run_outcome_tracking(dry_run=False)
@@ -321,11 +346,13 @@ def job_outcome_tracker() -> None:
             result.get("hits", 0), result.get("misses", 0),
             f"{result['avg_alpha_90d']:.2%}" if result.get("avg_alpha_90d") is not None else "N/A",
         )
-        if result.get("errors"):
-            for e in result["errors"]:
-                log.warning("  outcome tracker error: %s", e)
-    except Exception as exc:
-        log.error("Outcome tracker job failed: %s", exc, exc_info=True)
+        for e in result.get("errors") or []:
+            log.warning("  outcome tracker error: %s", e)
+        out = {"count": result.get("updated", 0), **result}
+        out["errors"] = list(result.get("errors") or [])
+    except Exception as exc:     # held: sentiment validation still runs, then re-raised
+        log.error("Outcome tracker failed: %s", exc, exc_info=True)
+        track_exc = exc
 
     # ── P6-D-8: Sentiment signal validation ───────────────────────────────────
     try:
@@ -337,59 +364,62 @@ def job_outcome_tracker() -> None:
             f"{sv['accuracy_30d']:.1f}%" if sv.get("accuracy_30d") is not None else "N/A",
             sv.get("degrading", False),
         )
+        out["sentiment_validation"] = sv
     except Exception as exc:
         log.warning("Sentiment validation job failed (non-critical): %s", exc)
+        out["errors"].append(f"sentiment_validation: {exc}")
+    if track_exc is not None:
+        raise track_exc         # ledger records FAILED for the main step
+    return out
 
 
-def job_target_updater() -> None:
+@tracked_job("target_updater")
+def job_target_updater() -> dict:
     """17:00 IST — P7-A: dynamic stoploss ratchet + target extension + laggard review."""
     log.info("-" * 50)
     log.info("  JOB START: Target Updater (17:00 IST)")
     log.info("-" * 50)
-    try:
-        from agents.target_updater import run_target_updates
-        result = run_target_updates(dry_run=False)
-        log.info(
-            "Target updater done — holdings=%d  ratchets=%d  extended=%d  protect=%d  reviews=%d  errors=%d",
-            result.get("total_holdings", 0),
-            len(result.get("stoploss_ratchets", [])),
-            len(result.get("targets_extended", [])),
-            len(result.get("protect_gains", [])),
-            len(result.get("laggard_reviews", [])),
-            len(result.get("errors", [])),
-        )
-        for r in result.get("stoploss_ratchets", []):
-            log.info("  🔒 SL ratchet %s: %s → ₹%.0f (%s)", r["symbol"], r.get("level"), r.get("new_sl", 0), r.get("level"))
-        for r in result.get("targets_extended", []):
-            log.info("  📈 Target raised %s: ₹%.0f → ₹%.0f (#%d)", r["symbol"], r.get("old_target", 0), r.get("new_target", 0), r.get("revision", 0))
-        for r in result.get("protect_gains", []):
-            log.info("  🛡 Protect gains %s: %s", r["symbol"], r.get("reason", ""))
-        for r in result.get("laggard_reviews", []):
-            log.info("  ⚠ Laggard review %s: signal=%s gain=%.1f%%", r["symbol"], r.get("signal"), r.get("gain_pct", 0))
-    except Exception as exc:
-        log.error("Target updater job failed: %s", exc, exc_info=True)
+    from agents.target_updater import run_target_updates
+    result = run_target_updates(dry_run=False)
+    log.info(
+        "Target updater done — holdings=%d  ratchets=%d  extended=%d  protect=%d  reviews=%d  errors=%d",
+        result.get("total_holdings", 0),
+        len(result.get("stoploss_ratchets", [])),
+        len(result.get("targets_extended", [])),
+        len(result.get("protect_gains", [])),
+        len(result.get("laggard_reviews", [])),
+        len(result.get("errors", [])),
+    )
+    for r in result.get("stoploss_ratchets", []):
+        log.info("  🔒 SL ratchet %s: %s → ₹%.0f (%s)", r["symbol"], r.get("level"), r.get("new_sl", 0), r.get("level"))
+    for r in result.get("targets_extended", []):
+        log.info("  📈 Target raised %s: ₹%.0f → ₹%.0f (#%d)", r["symbol"], r.get("old_target", 0), r.get("new_target", 0), r.get("revision", 0))
+    for r in result.get("protect_gains", []):
+        log.info("  🛡 Protect gains %s: %s", r["symbol"], r.get("reason", ""))
+    for r in result.get("laggard_reviews", []):
+        log.info("  ⚠ Laggard review %s: signal=%s gain=%.1f%%", r["symbol"], r.get("signal"), r.get("gain_pct", 0))
+    return {"count": result.get("total_holdings", 0), **result}
 
 
-def job_forward_poller() -> None:
+@tracked_job("forward_poller")
+def job_forward_poller() -> dict:
     """16:30 IST — P5-D: update live price snapshot for all pending recs + resolve t+30 milestone."""
     log.info("-" * 50)
     log.info("  JOB START: Forward Outcome Poller (16:30 IST)")
-    try:
-        from agents.outcome_tracker import run_forward_polling
-        result = run_forward_polling(dry_run=False)
-        log.info(
-            "Forward poller done — polled=%d live_updated=%d t30_resolved=%d errors=%d",
-            result.get("polled", 0), result.get("live_updated", 0),
-            result.get("t30_resolved", 0), len(result.get("errors", [])),
-        )
-        if result.get("errors"):
-            for e in result["errors"]:
-                log.warning("  forward poller error: %s", e)
-    except Exception as exc:
-        log.error("Forward poller job failed: %s", exc, exc_info=True)
+    from agents.outcome_tracker import run_forward_polling
+    result = run_forward_polling(dry_run=False)
+    log.info(
+        "Forward poller done — polled=%d live_updated=%d t30_resolved=%d errors=%d",
+        result.get("polled", 0), result.get("live_updated", 0),
+        result.get("t30_resolved", 0), len(result.get("errors", [])),
+    )
+    for e in result.get("errors") or []:
+        log.warning("  forward poller error: %s", e)
+    return {"count": result.get("live_updated", 0), **result}
 
 
-def job_discovery_rescorer() -> None:
+@tracked_job("discovery_rescorer")
+def job_discovery_rescorer() -> dict:
     """
     16:45 IST — re-check every live discovery call: collapse duplicates, close
     calls that hit stoploss/target, re-run fundamental + technical to confirm or
@@ -397,202 +427,191 @@ def job_discovery_rescorer() -> None:
     """
     log.info("-" * 50)
     log.info("  JOB START: Discovery Re-check (16:45 IST)")
-    try:
-        from agents.discovery_rescorer import run_rescore
-        s = run_rescore(dry_run=False)
-        log.info(
-            "Discovery re-check done — symbols=%d superseded=%d active=%d weakened=%d "
-            "stopped=%d target=%d errors=%d",
-            s["symbols"], s["superseded"], s["ACTIVE"], s["WEAKENED"],
-            s["STOPPED_OUT"], s["TARGET_HIT"], len(s["errors"]),
-        )
-        for e in s["errors"][:10]:
-            log.warning("  discovery re-check error: %s", e)
-    except Exception as exc:
-        log.error("Discovery re-check job failed: %s", exc, exc_info=True)
+    from agents.discovery_rescorer import run_rescore
+    s = run_rescore(dry_run=False)
+    log.info(
+        "Discovery re-check done — symbols=%d superseded=%d active=%d weakened=%d "
+        "stopped=%d target=%d errors=%d",
+        s["symbols"], s["superseded"], s["ACTIVE"], s["WEAKENED"],
+        s["STOPPED_OUT"], s["TARGET_HIT"], len(s["errors"]),
+    )
+    for e in s["errors"][:10]:
+        log.warning("  discovery re-check error: %s", e)
+    return {"count": s.get("symbols", 0), **s}
 
 
-def job_multibagger_screen() -> None:
+@tracked_job("multibagger_screen")
+def job_multibagger_screen() -> dict:
     """12:30 IST — P8-E long-horizon screen on today's discovery slice (cached fundamentals)."""
     log.info("-" * 50)
     log.info("  JOB START: Multibagger Screen (12:30 IST)")
-    try:
-        from agents.multibagger_screener import run_screen
-        r = run_screen(dry_run=False)
-        log.info("Multibagger screen done — screened=%d prefilter=%d deep=%d picks=%d errors=%d",
-                 r["screened"], r["prefilter_passed"], r["deep_checked"], len(r["picks"]), len(r["errors"]))
-        for e in r["errors"][:5]:
-            log.warning("  multibagger error: %s", e)
-    except Exception as exc:
-        log.error("Multibagger screen job failed: %s", exc, exc_info=True)
+    from agents.multibagger_screener import run_screen
+    r = run_screen(dry_run=False)
+    log.info("Multibagger screen done — screened=%d prefilter=%d deep=%d picks=%d errors=%d",
+             r["screened"], r["prefilter_passed"], r["deep_checked"], len(r["picks"]), len(r["errors"]))
+    for e in r["errors"][:5]:
+        log.warning("  multibagger error: %s", e)
+    return {"count": r.get("screened", 0), **r}
 
 
-def job_long_horizon_book() -> None:
+@tracked_job("long_horizon_book")
+def job_long_horizon_book() -> dict:
     """16:50 IST — P8-E long-horizon paper book: open, update, close, resolve outcomes."""
     log.info("-" * 50)
     log.info("  JOB START: Long-Horizon Book (16:50 IST)")
-    try:
-        from agents.long_horizon_book import run_book
-        r = run_book(dry_run=False)
-        log.info("Long-horizon book done — opened=%d closed=%d updated=%d resolved=%d errors=%d",
-                 len(r["opened"]), len(r["closed"]), r["updated"], r["resolved"], len(r["errors"]))
-        for e in r["errors"][:5]:
-            log.warning("  long-horizon book error: %s", e)
-    except Exception as exc:
-        log.error("Long-horizon book job failed: %s", exc, exc_info=True)
+    from agents.long_horizon_book import run_book
+    r = run_book(dry_run=False)
+    log.info("Long-horizon book done — opened=%d closed=%d updated=%d resolved=%d errors=%d",
+             len(r["opened"]), len(r["closed"]), r["updated"], r["resolved"], len(r["errors"]))
+    for e in r["errors"][:5]:
+        log.warning("  long-horizon book error: %s", e)
+    return {"count": r.get("updated", 0), **r}
 
 
-def job_multibagger_review() -> None:
+@tracked_job("multibagger_review")
+def job_multibagger_review() -> dict:
     """Sunday 08:00 IST — P8-E: is each active pick's quality still durable?"""
     log.info("-" * 50)
     log.info("  JOB START: Multibagger Review (Sunday 08:00 IST)")
-    try:
-        from agents.multibagger_screener import review_picks
-        r = review_picks(dry_run=False)
-        log.info("Multibagger review done — reviewed=%d broken=%d errors=%d",
-                 r["reviewed"], len(r["broken"]), len(r["errors"]))
-    except Exception as exc:
-        log.error("Multibagger review job failed: %s", exc, exc_info=True)
+    from agents.multibagger_screener import review_picks
+    r = review_picks(dry_run=False)
+    log.info("Multibagger review done — reviewed=%d broken=%d errors=%d",
+             r["reviewed"], len(r["broken"]), len(r["errors"]))
+    return {"count": r.get("reviewed", 0), **r}
 
 
-def job_paper_portfolio_open() -> None:
+@tracked_job("paper_portfolio_open")
+def job_paper_portfolio_open() -> dict:
     """07:05 IST — open paper positions for any new BUY recs (P5-B)."""
     log.info("-" * 50)
     log.info("  JOB START: Paper Portfolio Open (07:05 IST)")
     log.info("-" * 50)
-    try:
-        from agents.paper_portfolio import open_new_positions
-        from supabase import create_client
-        import os
-        client = create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_KEY", ""))
-        result = open_new_positions(client, dry_run=False)
-        log.info(
-            "Paper portfolio open done — opened=%d skipped=%d errors=%d",
-            result.get("opened", 0), result.get("skipped", 0), len(result.get("errors", [])),
-        )
-    except Exception as exc:
-        log.error("Paper portfolio open job failed: %s", exc, exc_info=True)
+    from agents.paper_portfolio import open_new_positions
+    result = open_new_positions(_service_client(), dry_run=False)
+    log.info(
+        "Paper portfolio open done — opened=%d skipped=%d errors=%d",
+        result.get("opened", 0), result.get("skipped", 0), len(result.get("errors", [])),
+    )
+    return {"count": result.get("opened", 0), **result}
 
 
-def job_paper_portfolio_update() -> None:
+@tracked_job("paper_portfolio_update")
+def job_paper_portfolio_update() -> dict:
     """16:15 IST — update open paper positions (price refresh + exit checks) + daily snapshot (P5-B)."""
     log.info("-" * 50)
     log.info("  JOB START: Paper Portfolio Update (16:15 IST)")
     log.info("-" * 50)
-    try:
-        from agents.paper_portfolio import update_open_positions, save_daily_snapshot
-        from supabase import create_client
-        import os
-        client = create_client(os.getenv("SUPABASE_URL", ""), os.getenv("SUPABASE_SERVICE_KEY", ""))
-        upd = update_open_positions(client, dry_run=False)
+    from agents.paper_portfolio import update_open_positions, save_daily_snapshot
+    client = _service_client()
+    upd = update_open_positions(client, dry_run=False)
+    log.info(
+        "Paper portfolio update done — updated=%d closed=%d errors=%d",
+        upd.get("updated", 0), upd.get("closed", 0), len(upd.get("errors", [])),
+    )
+    for cd in upd.get("closed_details", []):
         log.info(
-            "Paper portfolio update done — updated=%d closed=%d errors=%d",
-            upd.get("updated", 0), upd.get("closed", 0), len(upd.get("errors", [])),
+            "  Closed %s (%s): pnl=%.1f%% alpha=%s",
+            cd["symbol"], cd["exit_reason"],
+            cd.get("realized_pnl_pct", 0),
+            f"{cd['alpha_pct']:.1f}%" if cd.get("alpha_pct") is not None else "N/A",
         )
-        for cd in upd.get("closed_details", []):
-            log.info(
-                "  Closed %s (%s): pnl=%.1f%% alpha=%s",
-                cd["symbol"], cd["exit_reason"],
-                cd.get("realized_pnl_pct", 0),
-                f"{cd['alpha_pct']:.1f}%" if cd.get("alpha_pct") is not None else "N/A",
-            )
-        save_daily_snapshot(client, dry_run=False)
-        log.info("Daily snapshot saved")
-    except Exception as exc:
-        log.error("Paper portfolio update job failed: %s", exc, exc_info=True)
+    snap = save_daily_snapshot(client, dry_run=False)
+    log.info("Daily snapshot saved")
+    return {"count": upd.get("updated", 0), **upd, "snapshot": snap}
 
 
-def job_portfolio_risk() -> None:
+@tracked_job("portfolio_risk")
+def job_portfolio_risk() -> dict:
     """16:00 IST — compute portfolio-level risk metrics after market close."""
     log.info("-" * 50)
     log.info("  JOB START: Portfolio Risk (16:00 IST)")
     log.info("-" * 50)
-    try:
-        from agents.portfolio_risk import run_portfolio_risk
-        result = run_portfolio_risk(dry_run=False)
-        log.info(
-            "Portfolio risk done — vol=%.1f%% VaR95=%.2f%% Sharpe=%s HHI=%.3f warnings=%d",
-            result.get("portfolio_vol") or 0,
-            result.get("var_95") or 0,
-            result.get("sharpe"),
-            result.get("hhi") or 0,
-            len(result.get("warnings", [])),
-        )
-        if result.get("warnings"):
-            for w in result["warnings"]:
-                log.warning("  portfolio risk warning: %s", w)
-    except Exception as exc:
-        log.error("Portfolio risk job failed: %s", exc, exc_info=True)
+    from agents.portfolio_risk import run_portfolio_risk
+    result = run_portfolio_risk(dry_run=False)
+    log.info(
+        "Portfolio risk done — vol=%.1f%% VaR95=%.2f%% Sharpe=%s HHI=%.3f warnings=%d",
+        result.get("portfolio_vol") or 0,
+        result.get("var_95") or 0,
+        result.get("sharpe"),
+        result.get("hhi") or 0,
+        len(result.get("warnings", [])),
+    )
+    for w in result.get("warnings") or []:
+        log.warning("  portfolio risk warning: %s", w)
+    # Risk warnings are findings about the portfolio, not job errors.
+    out = {"count": result.get("holdings_count", 0), **result}
+    out["errors"] = [str(result["error"])] if result.get("error") else []
+    return out
 
 
-def job_options_snapshot() -> None:
+@tracked_job("options_snapshot")
+def job_options_snapshot() -> dict:
     """15:45 IST — capture options market snapshot (PCR, max pain, VIX) just before close."""
     log.info("-" * 50)
     log.info("  JOB START: Options Market Snapshot (15:45 IST)")
     log.info("-" * 50)
-    try:
-        from agents.options_sentiment import analyse_options
-        symbols = ["NIFTY", "BANKNIFTY"]
-        for sym in symbols:
+    from agents.options_sentiment import analyse_options
+    out: dict = {"count": 0, "symbols": {}, "errors": []}
+    for sym in ["NIFTY", "BANKNIFTY"]:
+        try:
             r = analyse_options(sym)
-            log.info(
-                "Options[%s] signal=%s score=%s pcr=%s vix=%s source=%s",
-                sym,
-                r.get("signal"),
-                r.get("score"),
-                r.get("pcr"),
-                r.get("india_vix"),
-                r.get("source"),
-            )
-    except Exception as exc:
-        log.error("Options snapshot job failed: %s", exc, exc_info=True)
+        except Exception as exc:
+            log.error("Options[%s] failed: %s", sym, exc, exc_info=True)
+            out["errors"].append(f"{sym}: {exc}")
+            continue
+        log.info(
+            "Options[%s] signal=%s score=%s pcr=%s vix=%s source=%s",
+            sym, r.get("signal"), r.get("score"), r.get("pcr"), r.get("india_vix"), r.get("source"),
+        )
+        out["symbols"][sym] = r
+        out["count"] += 1
+    return out
 
 
-def job_gift_nifty_fetch() -> None:
+@tracked_job("gift_nifty_fetch")
+def job_gift_nifty_fetch() -> dict:
     """08:30 IST — fetch GIFT Nifty pre-market signal (P6-D-7)."""
     log.info("-" * 50)
     log.info("  JOB START: GIFT Nifty Fetch (08:30 IST)")
     log.info("-" * 50)
-    try:
-        from data.gift_nifty_fetcher import get_gift_nifty_signal
-        signal = get_gift_nifty_signal(force_refresh=True)
-        log.info(
-            "GIFT Nifty: %s %s (%.2f pts / %.3f%%) source=%s",
-            signal.get("signal", "?"),
-            signal.get("signal_strength", "?"),
-            signal.get("premium_pts") or 0,
-            signal.get("premium_pct") or 0,
-            signal.get("source", "?"),
-        )
-        log.info("  %s", signal.get("market_note", ""))
-    except Exception as exc:
-        log.error("GIFT Nifty fetch job failed: %s", exc, exc_info=True)
+    from data.gift_nifty_fetcher import get_gift_nifty_signal
+    signal = get_gift_nifty_signal(force_refresh=True)
+    log.info(
+        "GIFT Nifty: %s %s (%.2f pts / %.3f%%) source=%s",
+        signal.get("signal", "?"),
+        signal.get("signal_strength", "?"),
+        signal.get("premium_pts") or 0,
+        signal.get("premium_pct") or 0,
+        signal.get("source", "?"),
+    )
+    log.info("  %s", signal.get("market_note", ""))
+    return {"count": 1 if signal.get("signal") else 0, **signal}
 
 
-def job_breeze_token_refresh() -> None:
+@tracked_job("breeze_token_refresh")
+def job_breeze_token_refresh() -> dict:
     """08:30 IST — refresh ICICI Breeze session token before market open."""
     log.info("-" * 50)
     log.info("  JOB START: Breeze Token Refresh (08:30 IST)")
     log.info("-" * 50)
-    try:
-        from data.breeze_auth import refresh_session
-        result = refresh_session(dry_run=False)
-        mode = result.get("mode", "?")
-        if result.get("success"):
-            log.info(
-                "Breeze token refresh OK — mode=%s hours_remaining=%s",
-                mode, result.get("hours_remaining"),
-            )
-        else:
-            log.warning(
-                "Breeze token refresh FAILED — mode=%s: %s",
-                mode, result.get("message"),
-            )
-    except Exception as exc:
-        log.error("Breeze token refresh job failed: %s", exc, exc_info=True)
+    from data.breeze_auth import refresh_session
+    result = refresh_session(dry_run=False)
+    mode = result.get("mode", "?")
+    if result.get("success"):
+        log.info(
+            "Breeze token refresh OK — mode=%s hours_remaining=%s",
+            mode, result.get("hours_remaining"),
+        )
+        return {"count": 1, **result}
+    log.warning(
+        "Breeze token refresh FAILED — mode=%s: %s",
+        mode, result.get("message"),
+    )
+    return {"count": 0, **result, "errors": [str(result.get("message") or "refresh failed")]}
 
 
-def job_discovery_screener() -> None:
+@tracked_job("discovery", logs_own_row=True)
+def job_discovery_screener() -> dict:
     """10:30 IST — proactive discovery screener (P6 schedule redesign).
 
     Moved from the orchestrator's LangGraph pipeline (was at 06:00 IST) to a
@@ -601,107 +620,106 @@ def job_discovery_screener() -> None:
     - RSI / EMA signals reflect today's opening moves
     - Overnight gap-ups/downs already priced in
     - GIFT Nifty pre-market signal already processed by orchestrator
+
+    Writes its own daily_runs row (pipeline='discovery'); the ledger records
+    only a crash.
     """
     log.info("-" * 50)
     log.info("  JOB START: Discovery Screener (10:30 IST — live prices)")
     log.info("-" * 50)
-    try:
-        from agents.discovery_screener import run_discovery
-        results = run_discovery(save_to_db=True)
+    from agents.discovery_screener import run_discovery
+    results = run_discovery(save_to_db=True)
+    log.info(
+        "Discovery screener done — %d discoveries found",
+        len(results),
+    )
+    for dr in results:
         log.info(
-            "Discovery screener done — %d discoveries found",
-            len(results),
+            "  [%s] %s upside=%.1f%% conf=%.1f",
+            dr.opportunity_tier, dr.symbol, dr.upside_pct, dr.upside_confidence,
         )
-        for dr in results:
-            log.info(
-                "  [%s] %s upside=%.1f%% conf=%.1f",
-                dr.opportunity_tier, dr.symbol, dr.upside_pct, dr.upside_confidence,
-            )
-    except Exception as exc:
-        log.error("Discovery screener job failed: %s", exc, exc_info=True)
+    return {"count": len(results), "symbols": [dr.symbol for dr in results]}
 
 
-def job_portfolio_monitor() -> None:
+@tracked_job("portfolio_monitor")
+def job_portfolio_monitor():
     """Every 2h during market hours — danger / stoploss / target alerts."""
     log.info("-" * 50)
     log.info("  JOB START: Portfolio Monitor")
     log.info("-" * 50)
-    try:
-        from scheduler.portfolio_monitor import run as pm_run
-        pm_run()
-        log.info("Portfolio monitor done")
-    except Exception as exc:
-        log.error("Portfolio monitor job failed: %s", exc, exc_info=True)
+    from scheduler.portfolio_monitor import run as pm_run
+    result = pm_run()
+    log.info("Portfolio monitor done")
+    return result
 
 
-def job_rag_refresh() -> None:
+@tracked_job("rag_refresh")
+def job_rag_refresh() -> dict:
     """1st of every month, 08:15 IST — fetch new India market events and append to RAG corpus."""
     log.info("-" * 50)
     log.info("  JOB START: RAG Corpus Auto-Refresh (08:15 IST, 1st of month)")
     log.info("-" * 50)
-    try:
-        from db.auto_seed_rag import run as rag_run
-        result = rag_run(days=35, max_new=30, dry_run=False)
-        log.info(
-            "RAG refresh done — added=%d skipped_dup=%d skipped_irrel=%d errors=%d articles_checked=%d",
-            result.get("added", 0),
-            result.get("skipped_duplicate", 0),
-            result.get("skipped_irrelevant", 0),
-            result.get("errors", 0),
-            result.get("articles_checked", 0),
-        )
-        if result.get("errors", 0) > 0:
-            log.warning("RAG refresh had %d errors — check logs above", result["errors"])
-    except Exception as exc:
-        log.error("RAG corpus refresh job failed: %s", exc, exc_info=True)
+    from db.auto_seed_rag import run as rag_run
+    result = rag_run(days=35, max_new=30, dry_run=False)
+    log.info(
+        "RAG refresh done — added=%d skipped_dup=%d skipped_irrel=%d errors=%d articles_checked=%d",
+        result.get("added", 0),
+        result.get("skipped_duplicate", 0),
+        result.get("skipped_irrelevant", 0),
+        result.get("errors", 0),
+        result.get("articles_checked", 0),
+    )
+    if result.get("errors", 0) > 0:
+        log.warning("RAG refresh had %d errors — check logs above", result["errors"])
+    return {"count": result.get("added", 0), **result}
 
 
-def job_weekly_audit() -> None:
+@tracked_job("weekly_audit")
+def job_weekly_audit() -> dict:
     """Sunday 07:45 IST — system health audit: kappa, suppression, alpha_live, Trendlyne, discovery."""
     log.info("-" * 50)
     log.info("  JOB START: Weekly Health Audit (Sunday 07:45 IST)")
     log.info("-" * 50)
-    try:
-        from scripts.weekly_audit import run_audit
-        result = run_audit(days=7)
-        status = result.get("overall_status", "?")
-        log.info(
-            "Weekly audit done — status=%s  pass=%d  warn=%d  fail=%d",
-            status,
-            result.get("pass", 0),
-            result.get("warn", 0),
-            result.get("fail", 0),
-        )
-        if result.get("fail", 0) > 0:
-            fails = [k for k, v in result.get("checks", {}).items() if v.get("status") == "FAIL"]
-            log.error("AUDIT FAIL items: %s", fails)
-    except Exception as exc:
-        log.error("Weekly audit job failed: %s", exc, exc_info=True)
+    from scripts.weekly_audit import run_audit
+    result = run_audit(days=7)
+    status = result.get("overall_status", "?")
+    log.info(
+        "Weekly audit done — status=%s  pass=%d  warn=%d  fail=%d",
+        status,
+        result.get("pass", 0),
+        result.get("warn", 0),
+        result.get("fail", 0),
+    )
+    fails: list = []
+    if result.get("fail", 0) > 0:
+        fails = [k for k, v in result.get("checks", {}).items() if v.get("status") == "FAIL"]
+        log.error("AUDIT FAIL items: %s", fails)
+    return {"count": len(result.get("checks", {}) or {}), **result,
+            "errors": [f"audit FAIL: {k}" for k in fails]}
 
 
-def job_backtest() -> None:
+@tracked_job("backtest")
+def job_backtest() -> dict:
     """1st of every month, 07:45 IST — walk-forward backtest on NIFTY 500 quality universe."""
     log.info("=" * 60)
     log.info("  JOB START: Monthly Backtest (07:45 IST, 1st of month)")
     log.info("=" * 60)
-    try:
-        from agents.backtester import run_backtest
-        result = run_backtest(dry_run=False)
-        if "error" in result:
-            log.error("Backtest failed: %s", result["error"])
-        else:
-            t = result["test"]
-            log.info(
-                "Backtest done — symbols=%d TEST: signals=%d hit_rate=%.1f%% "
-                "avg_alpha=%.2f%% sharpe=%s",
-                result["symbols_processed"],
-                t["total_signals"],
-                t["hit_rate_90d"],
-                t["avg_alpha_90d"],
-                t.get("sharpe_ratio"),
-            )
-    except Exception as exc:
-        log.error("Backtest job failed: %s", exc, exc_info=True)
+    from agents.backtester import run_backtest
+    result = run_backtest(dry_run=False)
+    if "error" in result:
+        log.error("Backtest failed: %s", result["error"])
+        return {"count": 0, **result, "errors": [str(result["error"])]}
+    t = result["test"]
+    log.info(
+        "Backtest done — symbols=%d TEST: signals=%d hit_rate=%.1f%% "
+        "avg_alpha=%.2f%% sharpe=%s",
+        result["symbols_processed"],
+        t["total_signals"],
+        t["hit_rate_90d"],
+        t["avg_alpha_90d"],
+        t.get("sharpe_ratio"),
+    )
+    return {"count": result.get("symbols_processed", 0), **result}
 
 
 # =============================================================================

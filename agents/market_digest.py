@@ -223,6 +223,8 @@ def _call_haiku_digest(prompt: str) -> dict:
     except URLError as exc:
         raise RuntimeError(f"Haiku network error: {exc.reason}") from exc
 
+    from data.llm_utils import record_usage
+    record_usage(body)   # WP-005: token accounting for the job ledger
     # content[0] may be a thinking block on models that think — take the first
     # text block instead.
     raw_text = next(
