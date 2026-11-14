@@ -44,6 +44,7 @@ const FONT_STYLE = `
   @keyframes criticalBadge{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.85;transform:scale(1.04)}}
   .aria-glow{box-shadow:-12px 0 32px rgba(28,26,22,.08);}
   .portfolio-alert{animation:glow 2s infinite;}
+  .ed-card:hover{background:#fffdf8!important;}
   .research-card:hover{border-color:#c9c0aa!important;background:#fffdf8;transition:all .15s;}
   .critical-discovery{box-shadow:0 0 0 1px #17703f55;}
   .critical-danger{box-shadow:0 0 0 1px #b4232c66;}
@@ -848,370 +849,512 @@ const BULL_SIGNALS=new Set(["BULLISH","BUY","POSITIVE","STRONG_BUY","BULLISH_ANA
 const BEAR_SIGNALS=new Set(["BEARISH","SELL","NEGATIVE","AVOID","BEARISH_ANALOGUE","STRONG_SELL"]);
 
 // ─── DISCOVERY CARD ───────────────────────────────────────────────────────────
-function DiscoveryCard({stock, selected, onClick, onAddToPortfolio}){
-  const ac = stock.action==="BUY"?C.green:stock.action==="SELL"?C.red:C.accent;
-  const dsColor = stock.discoveryScore>=80?C.green:stock.discoveryScore>=65?C.accent:C.muted;
-  const isCritical = isCriticalDiscovery(stock);
-  const today = new Date().toISOString().slice(0,10);
-  const isStale = stock.validTill && stock.validTill < today;
+// ─── EDITORIAL UI PRIMITIVES ──────────────────────────────────────────────────
+// Shared by the rebuilt tabs (Discovery first). Line icons instead of emoji,
+// tags that carry meaning in text as well as colour, and controls sized for
+// touch (40px+ targets).
+const ICON_PATHS={
+  search:"M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-3.5-3.5",
+  close:"M6 6l12 12M18 6L6 18",
+  back:"M15 18l-6-6 6-6",
+  plus:"M12 5v14M5 12h14",
+  spark:"M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z",
+  info:"M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 8v4M12 16h.01",
+  up:"M7 17L17 7M9 7h8v8",
+  down:"M17 7L7 17M15 17H7V9",
+  chevron:"M9 18l6-6-6-6",
+  run:"M4 20V10M10 20V4M16 20v-7M2 20h20",
+};
+const Icon=({name,size=16,style})=>(
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}
+    strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{flexShrink:0,...style}}>
+    <path d={ICON_PATHS[name]}/>
+  </svg>
+);
+const TAG_TONE={
+  buy:{bg:C.green+"14",fg:C.green}, sell:{bg:C.red+"12",fg:C.red}, hold:{bg:C.orange+"16",fg:C.orange},
+  warn:{bg:C.orange+"16",fg:C.orange}, info:{bg:C.blue+"12",fg:C.blue}, mute:{bg:C.panel,fg:C.textDim},
+  crit:{bg:C.accent,fg:C.onFill},
+};
+const EdTag=({tone="mute",children,title})=>{
+  const t=TAG_TONE[tone]||TAG_TONE.mute;
+  return <span title={title} style={{display:"inline-flex",alignItems:"center",height:20,padding:"0 7px",borderRadius:4,
+    background:t.bg,color:t.fg,fontSize:11,fontWeight:700,letterSpacing:".04em",textTransform:"uppercase",
+    whiteSpace:"nowrap",fontFamily:SANS,cursor:title?"help":undefined}}>{children}</span>;
+};
+const actionTone=a=>BULL_SIGNALS.has(a)?"buy":BEAR_SIGNALS.has(a)?"sell":"hold";
+const edBtn=(variant="default")=>({display:"inline-flex",alignItems:"center",justifyContent:"center",gap:8,minHeight:40,
+  padding:"0 16px",borderRadius:6,fontSize:13.5,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap",fontFamily:SANS,
+  ...(variant==="accent"?{background:C.accent,color:C.onFill,border:`1px solid ${C.accent}`}
+    :variant==="ghost"?{background:"transparent",color:C.textDim,border:"1px solid transparent"}
+    :{background:C.surface,color:C.text,border:`1px solid ${C.borderHi}`})});
+const edChip=on=>({display:"inline-flex",alignItems:"center",gap:7,minHeight:36,padding:"0 13px",borderRadius:999,
+  border:`1px solid ${on?C.accent:C.border}`,background:on?C.accent+"12":C.surface,color:on?C.text:C.textDim,
+  fontSize:13,fontWeight:on?600:500,cursor:"pointer",whiteSpace:"nowrap",fontFamily:SANS});
+const edSelect={fontFamily:SANS,fontSize:13,color:C.text,background:C.surface,border:`1px solid ${C.border}`,
+  borderRadius:6,minHeight:38,padding:"0 10px"};
+const edH3={fontFamily:SERIF,fontSize:19,fontWeight:600,margin:"0 0 12px",color:C.text,display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap"};
+const edBox={border:`1px solid ${C.border}`,borderRadius:6,padding:16,background:C.surface};
+
+/** True below `px` — switches split views to a list → detail → back flow. */
+function useNarrow(px=900){
+  const q=`(max-width:${px}px)`;
+  const read=()=>typeof window!=="undefined"&&typeof window.matchMedia==="function"&&window.matchMedia(q).matches;
+  const [narrow,setNarrow]=useState(read);
+  useEffect(()=>{
+    if(typeof window==="undefined"||typeof window.matchMedia!=="function") return;
+    const mq=window.matchMedia(q), h=e=>setNarrow(e.matches);
+    if(mq.addEventListener) mq.addEventListener("change",h); else mq.addListener(h);
+    setNarrow(mq.matches);
+    return()=>{ if(mq.removeEventListener) mq.removeEventListener("change",h); else mq.removeListener(h); };
+  },[q]);
+  return narrow;
+}
+
+const inr=(n,d)=>{
+  if(n==null||isNaN(n)) return "—";
+  const dp=d??(Math.abs(n)<1000?2:0);
+  return "₹"+Number(n).toLocaleString("en-IN",{minimumFractionDigits:dp,maximumFractionDigits:dp});
+};
+const signedPct=(n,d=1)=>n==null||isNaN(n)?"—":(n>0?"+":n<0?"−":"")+Math.abs(n).toFixed(d)+"%";
+const dirColor=n=>n==null||isNaN(n)||n===0?C.textDim:n>0?C.green:C.red;
+const cleanSym=s=>(s||"").replace(/\.(NS|BO)$/,"");
+const fmtDate=d=>{
+  if(!d) return "";
+  const t=new Date(d.length===10?d+"T00:00:00":d);
+  return isNaN(t)?d:t.toLocaleDateString("en-IN",{day:"numeric",month:"short"});
+};
+const sectorOf=s=>s.sector&&s.sector!=="UNKNOWN"?s.sector:null;
+const nameOf=s=>s.name&&s.name!==s.symbol&&s.name!==cleanSym(s.symbol)?s.name:null;
+const footLine=s=>[
+  s.callDate?`Called ${fmtDate(s.callDate)}`:null,
+  s.daysActive!=null?`${s.daysActive}d active`:null,
+  s.validTill?`valid till ${fmtDate(s.validTill)}`:null,
+].filter(Boolean).join(" · ");
+
+const Metric=({k,v,color,title})=>(
+  <span title={title} style={{display:"flex",flexDirection:"column",gap:1,minWidth:0,cursor:title?"help":undefined}}>
+    <span style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:".05em"}}>{k}</span>
+    <span style={{fontFamily:MONO,fontSize:15,fontWeight:600,color:color||C.text}}>{v}</span>
+  </span>
+);
+
+// ─── DISCOVERY: LIST CARD ─────────────────────────────────────────────────────
+function DiscoveryCard({stock:s,selected,onSelect}){
+  const weak=s.callStatus==="WEAKENED";
+  const sub=[nameOf(s),sectorOf(s)].filter(Boolean).join(" · ");
   return(
-    <div className={`research-card${isCritical?" critical-discovery":""}`} onClick={onClick} style={{
-      background:selected?C.panel:C.surface,
-      border:`1.5px solid ${selected?(isCritical?C.green+"99":C.accent+"66"):(isCritical?C.green+"66":C.border)}`,
-      borderRadius:10,padding:13,cursor:"pointer",marginBottom:9,transition:"all .15s",
-      borderLeft:`3px solid ${isStale?C.muted:(isCritical?C.green:C.cyan)}`,
-      opacity:isStale?0.72:1,
-    }}>
-      {/* Critical badge strip */}
-      {isCritical&&(
-        <div style={{
-          background:`linear-gradient(90deg,${C.green}22,${C.lime}11)`,
-          border:`1px solid ${C.green}44`,borderRadius:5,
-          padding:"4px 9px",marginBottom:8,
-          display:"flex",alignItems:"center",justifyContent:"space-between",
-        }}>
-          <div style={{display:"flex",alignItems:"center",gap:6}}>
-            <span style={{fontSize:12.5,fontWeight:800,color:C.green,animation:"criticalBadge 2s ease-in-out infinite"}}>🚀 CRITICAL OPPORTUNITY</span>
-            <span style={{background:C.green,color:C.onFill,borderRadius:3,padding:"0px 6px",fontSize:12,fontWeight:800}}>+{stock.upsidePct}% to target</span>
-          </div>
-          <span style={{fontSize:11,color:C.green}}>{stock.upsideConfidence}% hit rate · {stock.upsideHorizon}</span>
-        </div>
-      )}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-        <div style={{flex:1}}>
-          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3,flexWrap:"wrap"}}>
-            <span style={{fontSize:19,fontWeight:600,color:C.text,fontFamily:SERIF}}>{stock.symbol}</span>
-            <Tag color={ac}>{stock.action}</Tag>
-            {isCritical
-              ? <Tag color={C.green} small>🚀 CRITICAL</Tag>
-              : <Tag color={C.cyan} small>🔍 NEW IDEA</Tag>
-            }
-            {stock.callStatus==="WEAKENED"&&(
-              <span title={stock.statusReason} style={{cursor:"help"}}><Tag color={C.orange} small>⚠ WEAKENED</Tag></span>
-            )}
-            <span style={{display:"flex",alignItems:"center",gap:3,background:dsColor+"15",border:`1px solid ${dsColor}44`,borderRadius:4,padding:"1px 5px"}}>
-              <span style={{fontSize:11,color:dsColor,fontWeight:700}}>Score {stock.discoveryScore}</span>
-            </span>
-            {stock.govCheck.flags.length>0&&<Tag color={C.accent} small>⚠ flagged</Tag>}
-            {isStale&&<Tag color={C.muted} small>⏱ STALE</Tag>}
-            {stock.liquidityTier==="ILLIQUID"&&<Tag color={C.red} small>🚫 ILLIQUID</Tag>}
-            {stock.liquidityTier==="LOW"&&<Tag color={C.orange} small>⚡ LOW LIQ</Tag>}
-            {stock.suggestedPositionPct!=null&&stock.suggestedPositionPct>0&&(
-              <span style={{background:C.green+"18",color:C.green,border:`1px solid ${C.green}44`,borderRadius:3,padding:"1px 5px",fontSize:11,fontWeight:700}}>
-                📐 {stock.suggestedPositionPct}% alloc
-              </span>
-            )}
-            {/* Conviction streak badge — shown when system found same stock multiple times */}
-            {stock.discoveryCount>1&&(
-              <span title={`Found on: ${(stock.discoveryDates||[]).join(", ")}`}
-                style={{background:C.orange+"22",color:C.orange,border:`1px solid ${C.orange}66`,
-                  borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:800,cursor:"help",
-                  animation:stock.discoveryCount>=3?"criticalBadge 2s ease-in-out infinite":"none"}}>
-                🔁 Found {stock.discoveryCount}×
-              </span>
-            )}
-          </div>
-          <div style={{fontSize:12.5,color:C.textDim,marginBottom:2}}>{stock.name} · {stock.sector}</div>
-          <div style={{fontSize:12,color:isCritical?C.green:C.cyan,lineHeight:1.5}}>💡 {stock.discoveryReason}</div>
-          <div style={{fontSize:11,color:C.muted,marginTop:2}}>{callLine(stock)}{callLine(stock)?" · ":""}valid till {stock.validTill}{stock.lastRescoredAt?` · re-checked ${stock.lastRescoredAt}`:""}{stock.impactCostPct!=null?` · impact ${stock.impactCostPct.toFixed(2)}%`:""}
-            {stock.discoveryCount>1&&<span style={{color:C.orange,marginLeft:4}}>· last confirmed {stock.lastConfirmedAt}</span>}
-          </div>
-        </div>
-        <ConfidenceGauge pct={stock.confidence} title={hitRateTitle(stock)}/>
+    <button onClick={onSelect} aria-pressed={!!selected} className="ed-card" style={{
+      display:"flex",flexDirection:"column",gap:8,width:"100%",textAlign:"left",cursor:"pointer",
+      padding:"16px 12px 15px",border:"none",borderTop:`1px solid ${C.borderHi}`,borderRadius:0,
+      background:selected?C.surface:"transparent",boxShadow:selected?`inset 0 2px 0 ${C.accent}`:"none",
+      color:C.text,fontFamily:SANS}}>
+      <span style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",width:"100%"}}>
+        <span style={{fontFamily:SERIF,fontSize:19,fontWeight:600}}>{cleanSym(s.symbol)}</span>
+        <EdTag tone={actionTone(s.action)}>{s.action}</EdTag>
+        {isCriticalDiscovery(s)&&<EdTag tone="crit">Critical</EdTag>}
+        {weak&&<EdTag tone="warn">Weakened</EdTag>}
+        {s.dataQuality==="ESTIMATED"&&<EdTag tone="info">Estimated</EdTag>}
+        <span style={{marginLeft:"auto",fontFamily:MONO,fontSize:13}}>{inr(s.price)}</span>
+      </span>
+      {sub&&<span style={{fontSize:12.5,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",display:"block",maxWidth:"100%"}}>{sub}</span>}
+      <span style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:8,width:"100%"}}>
+        <Metric k="Upside" v={signedPct(s.upsidePct,0)} color={dirColor(s.upsidePct)}/>
+        <Metric k="Hit rate" v={s.confidence!=null?`${Math.round(s.confidence)}%`:"—"} title={hitRateTitle(s)}/>
+        <Metric k="Since call" v={signedPct(s.returnSinceCallPct)} color={dirColor(s.returnSinceCallPct)}/>
+      </span>
+      {footLine(s)&&<span style={{fontSize:12,color:C.textDim}}>{footLine(s)}</span>}
+    </button>
+  );
+}
+
+// ─── DISCOVERY: PRICE LEVELS BAR ──────────────────────────────────────────────
+function LevelsBar({s}){
+  const stop=s.stoplossNum, tgt=s.targetNum, lo=s.entryLow, hi=s.entryHigh, now=s.price;
+  const vals=[stop,tgt,lo,hi,now].filter(v=>v!=null&&!isNaN(v)&&v>0);
+  if(vals.length<3||!now) return <p style={{margin:0,fontSize:13,color:C.textDim}}>Price levels aren't available for this call yet.</p>;
+  const mn=Math.min(...vals), mx=Math.max(...vals), pad=(mx-mn)*0.08||1, L=mn-pad, H=mx+pad;
+  const pos=v=>`${((v-L)/(H-L)*100).toFixed(2)}%`;
+  const mark=(v,color,label)=>v!=null&&!isNaN(v)&&v>0&&(
+    <span title={`${label} ${inr(v)}`} style={{position:"absolute",top:-7,left:pos(v),width:4,height:24,borderRadius:2,background:color,transform:"translateX(-50%)"}}/>
+  );
+  const legend=[
+    ["Stop-loss",inr(stop),{background:C.red}],
+    ["Entry zone",lo&&hi?`${inr(lo)}–${inr(hi).slice(1)}`:"—",{background:C.accent+"18",border:`1px solid ${C.accent}`}],
+    ["Now",inr(now),{background:C.text}],
+    ["Target",inr(tgt),{background:C.green}],
+  ];
+  return(
+    <div>
+      <div aria-hidden="true" style={{position:"relative",height:10,borderRadius:5,background:C.panel,margin:"14px 6px 18px"}}>
+        {lo&&hi&&<span style={{position:"absolute",top:-1,bottom:-1,left:pos(lo),width:`calc(${pos(hi)} - ${pos(lo)})`,background:C.accent+"18",border:`1px solid ${C.accent}`,borderRadius:5}}/>}
+        {mark(stop,C.red,"Stop-loss")}{mark(now,C.text,"Now")}{mark(tgt,C.green,"Target")}
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:5,marginBottom:8}}>
-        {[["Price",`₹${stock.price.toLocaleString()}`,C.text],["Entry",stock.entry,C.accent],["Target",stock.target,C.green],["Stop",stock.stoploss,C.red]].map(([l,v,col])=>(
-          <div key={l} style={{background:C.bg,borderRadius:4,padding:"4px 7px"}}>
-            <div style={{fontSize:10.5,color:C.muted,textTransform:"uppercase"}}>{l}</div>
-            <div style={{fontSize:11,fontWeight:700,color:col,fontFamily:MONO}}>{v}</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10}}>
+        {legend.map(([k,v,sw])=>(
+          <div key={k} style={{display:"flex",flexDirection:"column",gap:3,fontSize:12,color:C.textDim}}>
+            <span style={{display:"inline-flex",alignItems:"center",gap:6}}><span style={{width:10,height:10,borderRadius:2,display:"inline-block",...sw}}/>{k}</span>
+            <span style={{fontFamily:MONO,fontSize:14,fontWeight:600,color:C.text}}>{v}</span>
           </div>
         ))}
-      </div>
-      {/* Forward estimates mini-row */}
-      {(stock.forwardPe!=null||stock.pegRatio!=null||stock.epsGrowthPct!=null)&&(
-        <div style={{display:"flex",gap:5,marginBottom:7,flexWrap:"wrap"}}>
-          {stock.forwardPe!=null&&(
-            <span style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 7px",fontSize:11,color:C.accent}}>
-              <span style={{color:C.muted}}>Fwd PE </span>{stock.forwardPe.toFixed(1)}x
-            </span>
-          )}
-          {stock.pegRatio!=null&&(
-            <span style={{background:C.panel,border:`1px solid ${stock.pegRatio<1?C.green+"55":stock.pegRatio>2?C.red+"55":C.border}`,borderRadius:4,padding:"2px 7px",fontSize:11,color:stock.pegRatio<1?C.green:stock.pegRatio>2?C.red:C.accent}}>
-              <span style={{color:C.muted}}>PEG </span>{stock.pegRatio.toFixed(2)}
-            </span>
-          )}
-          {stock.epsGrowthPct!=null&&(
-            <span style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 7px",fontSize:11,color:stock.epsGrowthPct>0?C.green:C.red}}>
-              <span style={{color:C.muted}}>EPS gr </span>{stock.epsGrowthPct>0?"+":""}{stock.epsGrowthPct.toFixed(1)}%
-            </span>
-          )}
-        </div>
-      )}
-      {/* Screen triggers */}
-      <div style={{marginBottom:7}}>
-        <div style={{fontSize:11,color:C.muted,marginBottom:3}}>Why it screened today:</div>
-        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-          {stock.screenTriggers.map(t=>(
-            <span key={t} style={{background:C.cyan+"12",border:`1px solid ${C.cyan}33`,borderRadius:3,padding:"1px 6px",fontSize:11,color:C.cyan}}>{t}</span>
-          ))}
-        </div>
-      </div>
-      {/* Agent signal votes row */}
-      {stock.agents&&Object.keys(stock.agents).length>0&&(()=>{
-        const agentEntries=Object.entries(stock.agents).filter(([,v])=>v&&v.signal);
-        const bullish=agentEntries.filter(([,v])=>BULL_SIGNALS.has(v.signal)).length;
-        const bearish=agentEntries.filter(([,v])=>BEAR_SIGNALS.has(v.signal)).length;
-        const neutral=agentEntries.length-bullish-bearish;
-        const sigColor=(sig)=>BULL_SIGNALS.has(sig)?C.green:BEAR_SIGNALS.has(sig)?C.red:C.muted;
-        return(
-          <div style={{marginBottom:7}}>
-            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-              <span style={{fontSize:11,color:C.muted}}>Agent votes:</span>
-              <span style={{fontSize:11,color:C.green,fontWeight:700}}>▲{bullish} bull</span>
-              <span style={{fontSize:11,color:C.red,fontWeight:700}}>▼{bearish} bear</span>
-              {neutral>0&&<span style={{fontSize:11,color:C.muted}}>— {neutral} neutral</span>}
-              {stock.warrenBot?.score!=null&&(
-                <span style={{marginLeft:"auto",background:C.orange+"22",border:`1px solid ${C.orange}66`,borderRadius:4,padding:"1px 6px",fontSize:11,color:C.orange,fontWeight:700}}>
-                  🏆 WB {stock.warrenBot.score}/100
-                </span>
-              )}
-            </div>
-            <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
-              {agentEntries.map(([name,v])=>(
-                <span key={name} title={`${name}: ${v.signal} (score ${v.score??'—'})`}
-                  style={{background:sigColor(v.signal)+"18",border:`1px solid ${sigColor(v.signal)}44`,
-                    borderRadius:3,padding:"1px 5px",fontSize:10.5,color:sigColor(v.signal),cursor:"help"}}>
-                  {name.replace("_"," ")} {v.score!=null?v.score:""}
-                </span>
-              ))}
-            </div>
-          </div>
-        );
-      })()}
-      {/* Confidence bar */}
-      <div style={{marginBottom:8}}>
-        <Bar pct={stock.confidence} color={isCritical?C.green:ac}/>
-      </div>
-      <div style={{display:"flex",gap:6}}>
-        <button onClick={e=>{e.stopPropagation();onAddToPortfolio(stock);}} style={{
-          background:`${C.teal}`,border:"none",
-          borderRadius:5,padding:"5px 10px",color:C.onFill,fontSize:12,fontWeight:700,cursor:"pointer",flex:1}}>
-          + Add to Portfolio
-        </button>
-        <button onClick={e=>{e.stopPropagation();onClick();}} style={{
-          background:isCritical?C.green+"18":C.cyan+"18",border:`1px solid ${isCritical?C.green:C.cyan}44`,
-          borderRadius:5,padding:"5px 10px",color:isCritical?C.green:C.cyan,fontSize:12,fontWeight:700,cursor:"pointer",flex:1}}>
-          Deep Dive →
-        </button>
       </div>
     </div>
   );
 }
 
-// ─── RESEARCH DISCOVERY TAB ───────────────────────────────────────────────────
-function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onOpenARIA, onOpenRunSummary, discoveryUniverse: _du, discoveryRuns: _dr, apiLoaded, valuationCache, setValuationCache}){
-  const _universe = Array.isArray(_du) ? _du : [];
-  const _runs     = Array.isArray(_dr) ? _dr : [];
-  const [selectedId, setSelectedId] = useState(_universe[0]?.id || null);
-  const [filter, setFilter] = useState("All");
-  const selected = _universe.find(s=>s.id===selectedId);
-  const sectors = ["All",...new Set(_universe.map(s=>s.sector))];
-  const criticalStocks = _universe.filter(isCriticalDiscovery).filter((s,i,arr)=>arr.findIndex(x=>x.symbol===s.symbol)===i);
-  // Sort: critical first, then by discoveryCount (conviction), then by discoveryScore; dedup by symbol (keep highest score)
-  const _deduped = [..._universe].sort((a,b)=>b.discoveryScore-a.discoveryScore).filter((s,i,arr)=>arr.findIndex(x=>x.symbol===s.symbol)===i);
-  const sorted = [..._deduped].sort((a,b)=>{
-    const ac=isCriticalDiscovery(a)?1:0, bc=isCriticalDiscovery(b)?1:0;
-    if(ac!==bc) return bc-ac;
-    // Most recently found by the screener first. Sorting by repeat count kept
-    // months-old calls on top and buried today's finds — the "nothing updates"
-    // symptom. (Not lastConfirmedAt: the daily re-check stamps every call.)
-    const recency=(b.lastDiscoveredAt||"").localeCompare(a.lastDiscoveredAt||"");
-    if(recency!==0) return recency;
-    return (b.confidence||0)-(a.confidence||0);
-  });
-  const filtered = filter==="All"?sorted:sorted.filter(s=>s.sector===filter);
-  const icons={technical:"📊",fundamental:"🏭",sentiment:"📰",institutional:"🏛",macro:"🌍",historical:"📜"};
-  const sc=s=>BULL_SIGNALS.has(s)?C.green:BEAR_SIGNALS.has(s)?C.red:(s==="HOLD"||s==="NEUTRAL"?C.accent:C.muted);
-
+// ─── DISCOVERY: DETAIL PANEL ──────────────────────────────────────────────────
+function DiscoveryDetail({s,narrow,isHeld,onBack,onAdd,onAsk,valuationCache,setValuationCache}){
+  const agents=Object.entries(s.agents||{}).filter(([,a])=>a&&a.signal);
+  const bull=agents.filter(([,a])=>BULL_SIGNALS.has(a.signal)).length;
+  const bear=agents.filter(([,a])=>BEAR_SIGNALS.has(a.signal)).length;
+  const notes=[];
+  if(s.callStatus==="WEAKENED") notes.push(["warn",s.statusReason||"The daily re-check weakened this call. It won't be extended unless the agents confirm it again."]);
+  if(s.dataQuality==="ESTIMATED") notes.push(["info","Some fundamentals came from a fallback source, so treat the upside as an estimate."]);
+  if(s.hasTrackRecord===false) notes.push(["info","No track record for this signal band yet, so the hit rate is shown as a neutral 50%."]);
+  const thesis=s.upsideBasis||s.summary||s.discoveryReason;
+  const fwd=[
+    ["Forward PE",s.forwardPe!=null?`${s.forwardPe.toFixed(1)}×`:null],
+    ["PEG",s.pegRatio!=null?s.pegRatio.toFixed(2):null],
+    ["EPS growth",s.epsGrowthPct!=null?signedPct(s.epsGrowthPct):null],
+    ["Impact cost",s.impactCostPct!=null?`${s.impactCostPct.toFixed(2)}%`:null],
+    ["Liquidity",s.liquidityTier||null],
+  ].filter(([,v])=>v!=null);
+  const flags=s.govCheck?.flags||[];
+  const nm=nameOf(s), sec=sectorOf(s);
   return(
-    <div style={{animation:"fadeUp .3s ease"}}>
-      {/* Critical opportunity banner — always first */}
-      <CriticalOpportunityBanner
-        stocks={criticalStocks}
-        onSelect={id=>{setSelectedId(id); setFilter("All");}}
-        onOpenARIA={onOpenARIA}
-      />
+    <article aria-label={`${cleanSym(s.symbol)} detail`} style={{padding:narrow?"16px 4px":"30px 34px",display:"flex",flexDirection:"column",gap:24}}>
+      {narrow&&<button onClick={onBack} style={{...edBtn("ghost"),alignSelf:"flex-start",paddingLeft:6}}><Icon name="back"/>Back to list</button>}
 
-      {/* Header */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
-        <div>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:2}}>
-            <div style={{width:7,height:7,borderRadius:"50%",background:C.cyan,animation:"pulse 2s infinite"}}/>
-            <h1 style={{fontFamily:SERIF,fontSize:28,fontWeight:600,color:C.text,letterSpacing:-.3,lineHeight:1.2,margin:0}}>Research Discovery Engine</h1>
-            <Tag color={C.cyan} small>PROACTIVE SCREENING</Tag>
+      <header style={{display:"flex",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
+        <div style={{minWidth:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <h2 style={{fontFamily:SERIF,fontSize:narrow?28:36,fontWeight:600,margin:0,lineHeight:1.1}}>{cleanSym(s.symbol)}</h2>
+            <EdTag tone={actionTone(s.action)}>{s.action}</EdTag>
+            {isCriticalDiscovery(s)&&<EdTag tone="crit">Critical</EdTag>}
+            {s.callStatus==="WEAKENED"&&<EdTag tone="warn">Weakened</EdTag>}
           </div>
-          <div style={{fontSize:12,color:C.muted}}>Stocks NOT in your portfolio — surfaced daily by the agent network scanning NSE/BSE universe · {_deduped.length} ideas today</div>
+          {(nm||sec)&&<p style={{margin:"4px 0 0",color:C.textDim,fontSize:14}}>{[nm,sec].filter(Boolean).join(" · ")}</p>}
         </div>
-        <div style={{display:"flex",gap:6}}>
-          {onOpenRunSummary&&<button onClick={onOpenRunSummary} style={{background:C.orange+"22",border:`1px solid ${C.orange}44`,borderRadius:7,padding:"6px 12px",color:C.orange,fontSize:12.5,fontWeight:700,cursor:"pointer"}}>📊 What ran today?</button>}
-          <button onClick={()=>onOpenARIA("discovery")} style={{background:C.purple+"22",border:`1px solid ${C.purple}44`,borderRadius:7,padding:"6px 12px",color:C.purple,fontSize:12.5,fontWeight:700,cursor:"pointer"}}>✦ Ask ARIA</button>
+        <div style={{display:"flex",flexDirection:"column",alignItems:narrow?"flex-start":"flex-end",gap:2}}>
+          <span style={{fontFamily:MONO,fontSize:24,fontWeight:600}}>{inr(s.price)}</span>
+          {s.returnSinceCallPct!=null&&<span style={{fontFamily:MONO,fontSize:13,color:dirColor(s.returnSinceCallPct)}}>{signedPct(s.returnSinceCallPct)} since the call{s.callPrice?` at ${inr(s.callPrice)}`:""}</span>}
         </div>
-      </div>
+      </header>
 
-      {/* How it works */}
-      <div style={{background:C.cyan+"08",border:`1px solid ${C.cyan}33`,borderRadius:8,padding:10,marginBottom:14}}>
-        <div style={{fontSize:12.5,fontWeight:700,color:C.cyan,marginBottom:6}}>🔍 How the Discovery Engine Works</div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
-          {[
-            ["Universe Scan","Every morning, Technical + Fundamental agents scan 200+ NSE/BSE stocks across all sectors"],
-            ["Multi-Signal Screen","Stocks passing 4+ simultaneous signals (momentum, FII buying, earnings quality, macro tailwind) make the shortlist"],
-            ["Full Agent Analysis","Each shortlisted stock runs through all 7 agents — same rigour as portfolio stocks"],
-            ["Governance Verified","Governance fact-checks every claim. Only verified, high-conviction ideas reach you"],
-          ].map(([t,d])=>(
-            <div key={t} style={{background:C.bg,borderRadius:6,padding:8}}>
-              <div style={{fontSize:12,fontWeight:700,color:C.cyan,marginBottom:2}}>{t}</div>
-              <div style={{fontSize:11,color:C.textDim,lineHeight:1.5}}>{d}</div>
-            </div>
-          ))}
+      {notes.map(([tone,text],i)=>(
+        <div key={i} role="note" style={{display:"flex",gap:10,alignItems:"flex-start",padding:"12px 14px",borderRadius:6,fontSize:13.5,lineHeight:1.5,
+          background:tone==="warn"?C.orange+"14":C.blue+"10",color:C.text}}>
+          <Icon name="info" style={{color:tone==="warn"?C.orange:C.blue,marginTop:1}}/><span>{text}</span>
         </div>
-      </div>
+      ))}
 
-      {/* Sector filter */}
-      <div style={{display:"flex",gap:5,marginBottom:12,flexWrap:"wrap"}}>
-        {sectors.map(s=>(
-          <button key={s} onClick={()=>setFilter(s)} style={{
-            background:filter===s?C.cyan+"22":C.panel,
-            border:`1px solid ${filter===s?C.cyan+"55":C.border}`,
-            borderRadius:20,padding:"3px 10px",color:filter===s?C.cyan:C.muted,fontSize:12,cursor:"pointer"}}>
-            {s}
-          </button>
+      {thesis&&<p style={{margin:0,fontFamily:SERIF,fontSize:narrow?17:19,lineHeight:1.55,maxWidth:"70ch"}}>{thesis}</p>}
+
+      <div style={{display:"grid",gridTemplateColumns:narrow?"repeat(2,minmax(0,1fr))":"repeat(4,minmax(0,1fr))",gap:10}}>
+        {[
+          ["Upside",signedPct(s.upsidePct,0),dirColor(s.upsidePct),null],
+          ["Hit rate",s.confidence!=null?`${Math.round(s.confidence)}%`:"—",null,hitRateTitle(s)],
+          ["Signal score",s.signalScore!=null?Math.round(s.signalScore):"—",null,"Raw agent score. It drives selection and position size; the hit rate is what that score has historically delivered."],
+          ["Position size",s.positionLabel||(s.suggestedPositionPct?`${s.suggestedPositionPct}%`:"—"),null,null],
+        ].map(([k,v,color,title])=>(
+          <div key={k} title={title||undefined} style={{padding:"12px 14px",borderRadius:6,background:C.panel,cursor:title?"help":undefined,minWidth:0}}>
+            <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:".05em"}}>{k}</div>
+            <div style={{fontFamily:k==="Position size"?SANS:MONO,fontSize:k==="Position size"?14:20,fontWeight:600,marginTop:2,color:color||C.text}}>{v}</div>
+          </div>
         ))}
       </div>
-
-      {/* Empty state — shown when API is live but no discoveries yet */}
-      {IS_LIVE && apiLoaded && _universe.length===0 && (
-        <EmptyState
-          icon="🔍"
-          title="No discovery ideas yet"
-          sub="The discovery screener scans 200+ NSE stocks every morning at 06:00 IST. If no ideas appear, check Governance → Data Source Health to confirm the pipeline ran. To run manually: python -m agents.discovery_screener"
-        />
+      {s.hasTrackRecord!==false&&s.calibrationN!=null&&(
+        <p style={{margin:"-14px 0 0",fontSize:12,color:C.textDim}}>Hit rate = share of {s.calibrationN} past calls in this signal band that beat the Nifty 50 over 90 days.</p>
       )}
 
-      {/* Stale recs notice — when ideas are from previous days */}
-      {IS_LIVE && _universe.length>0 && (()=>{
-        const today = new Date().toISOString().slice(0,10);
-        const latestCreated = _universe.find(s=>s.validTill)?.validTill;
-        if(latestCreated && latestCreated < today){
-          return(
-            <div style={{background:C.accent+"0d",border:`1px solid ${C.accent}33`,borderRadius:6,padding:"6px 12px",marginBottom:10,display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:11,color:C.accent,fontWeight:700}}>⚠</span>
-              <span style={{fontSize:11,color:C.accent}}>
-                Showing ideas from a previous run (most recent valid_till: {latestCreated}).
-                Today's 06:00 IST run may not have completed yet — check the <b>Daily Screened Stocks</b> panel below.
-              </span>
-            </div>
-          );
-        }
-        return null;
-      })()}
+      <section>
+        <h3 style={edH3}>Price levels <span style={{fontFamily:SANS,fontSize:12,color:C.textDim,fontWeight:400}}>{s.upsideHorizon||s.horizon||""}</span></h3>
+        <LevelsBar s={s}/>
+      </section>
 
-      {/* Two-column layout — only shown when there is data */}
-      {_universe.length>0&&<div style={{display:"grid",gridTemplateColumns:"360px 1fr",gap:16}}>
-        {/* Left: cards */}
-        <div>
-          {filtered.map(s=>(
-            <DiscoveryCard key={s.id} stock={s}
-              selected={selectedId===s.id}
-              onClick={()=>setSelectedId(s.id)}
-              onAddToPortfolio={onAddToPortfolio}
-            />
-          ))}
-        </div>
-
-        {/* Right: deep dive */}
-        {selected&&(
-          <div style={{animation:"fadeUp .2s ease"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-              <div>
-                <div style={{fontFamily:SERIF,fontSize:26,fontWeight:600,color:C.text,marginBottom:2}}>{selected.symbol.replace(/\.(NS|BO)$/,"")} — {selected.name&&selected.name!==selected.symbol?selected.name:selected.symbol.replace(/\.(NS|BO)$/,"")}</div>
-                <div style={{fontSize:12,color:C.textDim,lineHeight:1.5,maxWidth:420}}>{selected.discoveryReason}</div>
-              </div>
-              <div style={{display:"flex",gap:6}}>
-                <button onClick={()=>onAddToPortfolio(selected)} style={{background:`${C.teal}`,border:"none",borderRadius:6,padding:"6px 12px",color:C.onFill,fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-                  + Add to Portfolio
-                </button>
-              </div>
-            </div>
-
-            {/* Agent breakdown */}
-            <div style={{fontSize:12,fontWeight:700,color:C.accent,marginBottom:7,textTransform:"uppercase",letterSpacing:1}}>{Object.keys(selected.agents).length}-Agent Analysis</div>
-            <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
-              {Object.entries(selected.agents).map(([k,a])=>(
-                <div key={k} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:9}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
-                    <span style={{fontSize:12,fontWeight:600,color:C.text}}>{icons[k]} {k.charAt(0).toUpperCase()+k.slice(1)}</span>
-                    <div style={{display:"flex",gap:5,alignItems:"center"}}>
-                      <Tag color={sc(a.signal)} small>{a.signal}</Tag>
-                      <span style={{fontSize:11,color:C.muted,fontFamily:MONO}}>{a.score}</span>
-                    </div>
-                  </div>
-                  <div style={{fontSize:12,color:C.textDim,lineHeight:1.5,marginBottom:3}}>{a.detail}</div>
-                  <Bar pct={a.score}/>
+      {agents.length>0&&(
+        <section>
+          <h3 style={edH3}>Agent signals <span style={{fontFamily:SANS,fontSize:12,color:C.textDim,fontWeight:400}}>{bull} bullish · {bear} bearish · {agents.length-bull-bear} neutral</span></h3>
+          <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden",background:C.surface}}>
+            {agents.map(([k,a],i)=>{
+              const tone=actionTone(a.signal), fill=tone==="buy"?C.green:tone==="sell"?C.red:C.orange;
+              return(
+                <div key={k} style={{display:"grid",gridTemplateColumns:narrow?"minmax(0,1fr) auto 32px":"130px 120px minmax(60px,110px) 32px",columnGap:12,rowGap:4,
+                  alignItems:"center",padding:"11px 14px",borderTop:i?`1px solid ${C.border}`:"none",fontSize:13}}>
+                  <span style={{fontWeight:600,textTransform:"capitalize"}}>{k.replace(/_/g," ")}</span>
+                  <span><EdTag tone={tone}>{a.signal.replace(/_/g," ")}</EdTag></span>
+                  {!narrow&&<span aria-hidden="true" style={{height:6,borderRadius:3,background:C.panel,overflow:"hidden",display:"block"}}>
+                    <span style={{display:"block",height:"100%",width:`${Math.max(0,Math.min(100,a.score||0))}%`,background:fill}}/></span>}
+                  <span style={{fontFamily:MONO,textAlign:"right"}}>{a.score??"—"}</span>
+                  {(a.detail||a.reason)&&<span style={{gridColumn:"1/-1",color:C.textDim,fontSize:12.5,lineHeight:1.5}}>{a.detail||a.reason}</span>}
                 </div>
-              ))}
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:narrow?"minmax(0,1fr)":"repeat(2,minmax(0,1fr))",gap:12}}>
+        <div style={edBox}>
+          <h3 style={{...edH3,fontSize:17}}>Catalysts</h3>
+          {(s.catalysts||[]).length?(
+            <ul style={{margin:0,padding:0,listStyle:"none",display:"flex",flexDirection:"column",gap:9}}>
+              {s.catalysts.map(c=><li key={c} style={{display:"flex",gap:9,fontSize:13,lineHeight:1.45}}><Icon name="up" size={15} style={{color:C.green,marginTop:2}}/><span>{c}</span></li>)}
+            </ul>
+          ):<p style={{margin:0,fontSize:13,color:C.textDim}}>No specific catalyst was recorded.</p>}
+        </div>
+        <div style={edBox}>
+          <h3 style={{...edH3,fontSize:17}}>Risks</h3>
+          {(s.risks||[]).length?(
+            <ul style={{margin:0,padding:0,listStyle:"none",display:"flex",flexDirection:"column",gap:9}}>
+              {s.risks.map(r=><li key={r} style={{display:"flex",gap:9,fontSize:13,lineHeight:1.45}}><Icon name="down" size={15} style={{color:C.red,marginTop:2}}/><span>{r}</span></li>)}
+            </ul>
+          ):<p style={{margin:0,fontSize:13,color:C.textDim}}>No agent voted bearish and liquidity is fine. Keep an eye on the stop-loss.</p>}
+        </div>
+      </div>
+
+      {fwd.length>0&&(
+        <section>
+          <h3 style={edH3}>Valuation snapshot</h3>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10}}>
+            {fwd.map(([k,v])=>(
+              <div key={k} style={{borderTop:`1px solid ${C.borderHi}`,paddingTop:8}}>
+                <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:".05em"}}>{k}</div>
+                <div style={{fontFamily:MONO,fontSize:15,fontWeight:600,marginTop:2}}>{v}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {s.warrenBot&&<WarrenBotPanel wb={s.warrenBot}/>}
+      <ValuationScenariosPanel
+        val={valuationCache[s.symbol]}
+        symbol={s.symbol}
+        onFetch={()=>{
+          apiFetch(`/api/valuation/${encodeURIComponent(s.symbol)}`)
+            .then(d=>{if(d&&!d.error)setValuationCache(prev=>({...prev,[s.symbol]:d}));})
+            .catch(()=>{});
+        }}
+      />
+
+      <p style={{margin:0,fontSize:12.5,color:C.textDim,display:"flex",gap:6,alignItems:"center"}}>
+        <GovShield size={14}/>
+        {flags.length?`Governance flagged: ${flags[0]}`:"Governance check passed with no flags."}
+      </p>
+
+      <div style={{display:"flex",gap:10,flexWrap:"wrap",borderTop:`1px solid ${C.border}`,paddingTop:18}}>
+        <button onClick={onAdd} disabled={isHeld} title={isHeld?undefined:"Opens ARIA to record your purchase"}
+          style={{...edBtn("accent"),opacity:isHeld?0.5:1,cursor:isHeld?"not-allowed":"pointer"}}>
+          <Icon name="plus"/>{isHeld?"Already in your portfolio":"Add to portfolio"}
+        </button>
+        <button onClick={onAsk} style={edBtn()}><Icon name="spark"/>Ask ARIA about {cleanSym(s.symbol)}</button>
+      </div>
+    </article>
+  );
+}
+
+// ─── RESEARCH DISCOVERY TAB ───────────────────────────────────────────────────
+const DISCOVERY_PAGE=20;
+const DISCOVERY_SORTS=[
+  ["newest","Newest first"],["upside","Highest upside"],["hit","Highest hit rate"],
+  ["score","Signal score"],["since","Best since call"],
+];
+function ResearchDiscoveryTab({portfolio, onAddToPortfolio, onAskAbout, onOpenARIA, onOpenRunSummary, discoveryUniverse: _du, discoveryRuns: _dr, apiLoaded, valuationCache, setValuationCache}){
+  const universe=Array.isArray(_du)?_du:[];
+  const runs=Array.isArray(_dr)?_dr:[];
+  const narrow=useNarrow(900);
+  const topRef=useRef(null);
+  const [status,setStatus]=useState("all");
+  const [sector,setSector]=useState("all");
+  const [query,setQuery]=useState("");
+  const [sort,setSort]=useState("newest");
+  const [limit,setLimit]=useState(DISCOVERY_PAGE);
+  const [selectedId,setSelectedId]=useState(null);
+  const [detailOpen,setDetailOpen]=useState(false);
+  const [howOpen,setHowOpen]=useState(false);
+
+  // One card per symbol (keep the highest-scoring row if the API ever sends duplicates).
+  const deduped=[...universe].sort((a,b)=>(b.discoveryScore||0)-(a.discoveryScore||0))
+    .filter((s,i,arr)=>arr.findIndex(x=>x.symbol===s.symbol)===i);
+  const heldSyms=new Set((portfolio||[]).filter(h=>h.status!=="exited").map(h=>cleanSym(h.symbol)));
+  const criticalStocks=deduped.filter(isCriticalDiscovery);
+
+  const statusDefs=[
+    ["all","All",()=>true],
+    ...(criticalStocks.length?[["critical","Critical",isCriticalDiscovery]]:[]),
+    ["active","Active",s=>s.callStatus!=="WEAKENED"],
+    ["weakened","Weakened",s=>s.callStatus==="WEAKENED"],
+  ];
+  const statusFn=(statusDefs.find(d=>d[0]===status)||statusDefs[0])[2];
+  const sectors=[...new Set(deduped.map(sectorOf).filter(Boolean))].sort();
+  const q=query.trim().toLowerCase();
+  const matches=s=>!q||[cleanSym(s.symbol),s.name,sectorOf(s)].some(v=>v&&v.toLowerCase().includes(q));
+  const num=v=>v==null||isNaN(v)?-Infinity:v;
+  const sortFns={
+    newest:(a,b)=>(b.lastDiscoveredAt||b.callDate||"").localeCompare(a.lastDiscoveredAt||a.callDate||""),
+    upside:(a,b)=>num(b.upsidePct)-num(a.upsidePct),
+    hit:(a,b)=>num(b.confidence)-num(a.confidence),
+    score:(a,b)=>num(b.signalScore)-num(a.signalScore),
+    since:(a,b)=>num(b.returnSinceCallPct)-num(a.returnSinceCallPct),
+  };
+  const rows=deduped.filter(statusFn).filter(s=>sector==="all"||sectorOf(s)===sector).filter(matches)
+    .sort((a,b)=>(isCriticalDiscovery(b)?1:0)-(isCriticalDiscovery(a)?1:0)||sortFns[sort](a,b));
+  const shown=rows.slice(0,limit);
+  // Desktop always shows a detail: fall back to the first row when the
+  // selection is filtered out. On a phone the detail opens only on tap.
+  const selected=rows.find(s=>s.id===selectedId)||(narrow?null:rows[0])||null;
+  const showDetail=!!selected&&(!narrow||detailOpen);
+  const showList=!narrow||!detailOpen;
+
+  const resetPaging=()=>setLimit(DISCOVERY_PAGE);
+  const pick=s=>{
+    setSelectedId(s.id); setDetailOpen(true);
+    if(narrow&&topRef.current) topRef.current.scrollIntoView({block:"start"});
+  };
+  const clearFilters=()=>{setStatus("all");setSector("all");setQuery("");resetPaging();};
+  const today=new Date().toISOString().slice(0,10);
+  const newest=deduped.reduce((m,s)=>(s.lastDiscoveredAt||"")>m?s.lastDiscoveredAt:m,"");
+  const loading=IS_LIVE&&!apiLoaded&&universe.length===0;
+
+  return(
+    <div ref={topRef} style={{animation:"fadeUp .3s ease",maxWidth:1440,margin:"0 auto",scrollMarginTop:16}}>
+      <CriticalOpportunityBanner stocks={criticalStocks} onSelect={id=>{setSelectedId(id);setStatus("all");setDetailOpen(true);}} onOpenARIA={onOpenARIA}/>
+
+      {showList&&(
+        <header style={{display:"flex",flexDirection:"column",gap:14,marginBottom:18}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",gap:12,flexWrap:"wrap"}}>
+            <div>
+              <h1 style={{fontFamily:SERIF,fontSize:narrow?26:32,fontWeight:600,margin:0,letterSpacing:-.3,lineHeight:1.15}}>Discovery</h1>
+              <p style={{margin:"4px 0 0",fontSize:14,color:C.textDim}}>
+                New ideas from the NSE universe, confirmed by 7 agents{deduped.length?` · ${deduped.length} live calls`:""}
+              </p>
             </div>
-
-            {/* Warren Bot panel */}
-            <WarrenBotPanel wb={selected.warrenBot}/>
-
-            {/* Valuation Scenarios panel */}
-            <ValuationScenariosPanel
-              val={valuationCache[selected.symbol]}
-              symbol={selected.symbol}
-              onFetch={()=>{
-                apiFetch(`/api/valuation/${encodeURIComponent(selected.symbol)}`)
-                  .then(d=>{if(d&&!d.error)setValuationCache(prev=>({...prev,[selected.symbol]:d}));})
-                  .catch(()=>{});
-              }}
-            />
-
-            {/* Risks + Catalysts */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-              <div>
-                <div style={{fontSize:12,fontWeight:700,color:C.red,marginBottom:4}}>⚠ Risks</div>
-                {selected.risks.map(r=><div key={r} style={{fontSize:11,color:C.red,background:C.red+"0f",border:`1px solid ${C.red}22`,borderRadius:3,padding:"2px 6px",marginBottom:3}}>{r}</div>)}
-              </div>
-              <div>
-                <div style={{fontSize:12,fontWeight:700,color:C.green,marginBottom:4}}>🚀 Catalysts</div>
-                {selected.catalysts.map(c=><div key={c} style={{fontSize:11,color:C.green,background:C.green+"0f",border:`1px solid ${C.green}22`,borderRadius:3,padding:"2px 6px",marginBottom:3}}>{c}</div>)}
-              </div>
-            </div>
-
-            {/* Gov check */}
-            <div style={{background:C.blue+"08",border:`1px solid ${C.blue}33`,borderRadius:7,padding:9}}>
-              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:5}}>
-                <GovShield size={12}/><span style={{fontSize:12,fontWeight:700,color:C.blue}}>Governance Check</span>
-                <span style={{fontSize:10.5,color:C.muted,marginLeft:"auto"}}>{selected.govCheck.lastChecked}</span>
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:5}}>
-                {[["Source Quality",`${selected.govCheck.sourceQuality}%`],["Hallucinations",`${selected.govCheck.hallucinations}`],["Status",selected.govCheck.verified?"Verified":"Pending"]].map(([l,v])=>(
-                  <div key={l} style={{background:C.surface,borderRadius:4,padding:"4px 7px"}}>
-                    <div style={{fontSize:10.5,color:C.muted}}>{l}</div>
-                    <div style={{fontSize:12.5,fontWeight:700,color:C.blue,fontFamily:MONO}}>{v}</div>
-                  </div>
-                ))}
-              </div>
-              {selected.govCheck.flags.length>0&&<div style={{marginTop:5,fontSize:11,color:C.accent,background:C.accent+"0f",borderRadius:3,padding:"2px 6px"}}>⚠ {selected.govCheck.flags[0]}</div>}
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {onOpenRunSummary&&<button onClick={onOpenRunSummary} style={edBtn()}><Icon name="run"/>What ran today?</button>}
+              <button onClick={()=>onOpenARIA("discovery")} style={edBtn()}><Icon name="spark"/>Ask ARIA</button>
             </div>
           </div>
-        )}
-      </div>}{/* closes _universe.length>0 wrapper */}
 
-      {/* ── Consolidated All-Time Discovery Recs Table ─────────────────────── */}
-      {_universe.length>0&&<DiscoveryRecsTable universe={_universe}/>}
+          <div>
+            <button onClick={()=>setHowOpen(o=>!o)} aria-expanded={howOpen}
+              style={{...edBtn("ghost"),minHeight:32,padding:"0 4px",fontSize:13,color:C.accent}}>
+              <Icon name="chevron" size={14} style={{transform:howOpen?"rotate(90deg)":"none",transition:"transform .15s"}}/>How discovery works
+            </button>
+            {howOpen&&(
+              <ol style={{margin:"8px 0 0",padding:"0 0 0 20px",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:"8px 24px",fontSize:13,color:C.textDim,lineHeight:1.5}}>
+                <li><b style={{color:C.text}}>Scan.</b> At 10:30 IST the screener checks 200 of about 1,700 NSE stocks, so every stock is seen roughly every 9 days.</li>
+                <li><b style={{color:C.text}}>Screen.</b> Stocks passing several fast filters (momentum, valuation vs sector, growth, institutional holding) make the shortlist.</li>
+                <li><b style={{color:C.text}}>Analyse.</b> Each shortlisted stock goes through all 7 agents, the same as your portfolio stocks.</li>
+                <li><b style={{color:C.text}}>Track.</b> Calls last 90 days and are re-checked daily at 16:45; weakened calls aren't extended.</li>
+              </ol>
+            )}
+          </div>
 
-      {/* ── Daily Screened Stocks panel ─────────────────────────────────────── */}
-      <DiscoveryRunsPanel runs={_runs} apiLoaded={apiLoaded}/>
+          {deduped.length>0&&(
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+              <div role="group" aria-label="Filter by status" style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {statusDefs.map(([id,label,fn])=>(
+                  <button key={id} onClick={()=>{setStatus(id);resetPaging();}} aria-pressed={status===id} style={edChip(status===id)}>
+                    {label}<span style={{fontFamily:MONO,fontSize:11,color:C.textDim}}>{deduped.filter(fn).length}</span>
+                  </button>
+                ))}
+              </div>
+              <label style={{display:"flex",alignItems:"center",gap:8,flex:"1 1 220px",maxWidth:narrow?"none":340,minHeight:38,
+                padding:"0 4px 0 12px",border:`1px solid ${C.border}`,borderRadius:6,background:C.surface,color:C.textDim}}>
+                <Icon name="search" size={15}/>
+                <span style={{position:"absolute",width:1,height:1,overflow:"hidden",clip:"rect(0 0 0 0)"}}>Search discoveries</span>
+                <input type="search" value={query} onChange={e=>{setQuery(e.target.value);resetPaging();}}
+                  placeholder="Search symbol, company or sector"
+                  style={{flex:1,minWidth:0,border:0,background:"transparent",color:C.text,fontSize:13.5,outline:"none",height:36}}/>
+                {query&&<button onClick={()=>{setQuery("");resetPaging();}} aria-label="Clear search"
+                  style={{width:32,height:32,display:"inline-grid",placeItems:"center",border:0,background:"transparent",color:C.textDim,cursor:"pointer",borderRadius:4}}><Icon name="close" size={14}/></button>}
+              </label>
+              {sectors.length>1&&(
+                <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.textDim}}>Sector
+                  <select value={sector} onChange={e=>{setSector(e.target.value);resetPaging();}} style={edSelect}>
+                    <option value="all">All sectors</option>
+                    {sectors.map(x=><option key={x} value={x}>{x}</option>)}
+                  </select>
+                </label>
+              )}
+              <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.textDim}}>Sort
+                <select value={sort} onChange={e=>setSort(e.target.value)} style={edSelect}>
+                  {DISCOVERY_SORTS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                </select>
+              </label>
+            </div>
+          )}
+
+          {IS_LIVE&&newest&&newest<today&&(
+            <p role="note" style={{margin:0,display:"flex",gap:8,alignItems:"center",fontSize:13,color:C.textDim}}>
+              <Icon name="info" style={{color:C.blue}}/>No new finds yet today (the screener runs at 10:30 IST). Latest find: {fmtDate(newest)}.
+            </p>
+          )}
+        </header>
+      )}
+
+      {loading&&(
+        <div aria-busy="true" style={{display:"flex",flexDirection:"column",gap:12,maxWidth:400}}>
+          {[0,1,2,3,4].map(i=><div key={i} style={{height:110,borderRadius:6,background:C.panel,animation:"pulse 1.4s ease-in-out infinite"}}/>)}
+        </div>
+      )}
+
+      {IS_LIVE&&apiLoaded&&universe.length===0&&(
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center",gap:10,padding:"48px 20px",border:`1px dashed ${C.borderHi}`,borderRadius:8,color:C.textDim}}>
+          <Icon name="search" size={28}/>
+          <div style={{fontFamily:SERIF,fontSize:20,fontWeight:600,color:C.text}}>No live discovery calls</div>
+          <p style={{margin:0,maxWidth:460,fontSize:13.5,lineHeight:1.55}}>The screener runs at 10:30 IST. If nothing appears by 11:30, check Governance → Data sources, or run <code style={{fontFamily:MONO}}>python -m agents.discovery_screener</code>.</p>
+          {onOpenRunSummary&&<button onClick={onOpenRunSummary} style={edBtn()}>Ask ARIA what ran today</button>}
+        </div>
+      )}
+
+      {deduped.length>0&&(
+        <div style={{display:narrow?"block":"grid",gridTemplateColumns:"minmax(300px,400px) minmax(0,1fr)",gap:24,alignItems:"start"}}>
+          {showList&&(
+            <div aria-label="Discovery calls" style={{display:"flex",flexDirection:"column",borderBottom:`1px solid ${C.borderHi}`}}>
+              {rows.length===0?(
+                <div style={{padding:"36px 16px",textAlign:"center",color:C.textDim,display:"flex",flexDirection:"column",gap:10,alignItems:"center",borderTop:`1px solid ${C.borderHi}`}}>
+                  <div style={{fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.text}}>No calls match</div>
+                  <p style={{margin:0,fontSize:13}}>Nothing matches these filters{q?` and the search “${query.trim()}”`:""}.</p>
+                  <button onClick={clearFilters} style={edBtn()}>Clear filters</button>
+                </div>
+              ):shown.map(s=>(
+                <DiscoveryCard key={s.id} stock={s} selected={!!selected&&selected.id===s.id&&(!narrow||detailOpen)} onSelect={()=>pick(s)}/>
+              ))}
+              {rows.length>shown.length&&(
+                <button onClick={()=>setLimit(l=>l+DISCOVERY_PAGE)} style={{...edBtn("ghost"),margin:"8px 0",color:C.accent}}>
+                  Show {Math.min(DISCOVERY_PAGE,rows.length-shown.length)} more of {rows.length-shown.length}
+                </button>
+              )}
+            </div>
+          )}
+          {showDetail&&(
+            <div style={narrow?{}:{position:"sticky",top:0,maxHeight:"calc(100vh - 150px)",overflowY:"auto",
+              border:`1px solid ${C.borderHi}`,borderRadius:8,background:C.surface}}>
+              <DiscoveryDetail
+                key={selected.id}
+                s={selected} narrow={narrow}
+                isHeld={heldSyms.has(cleanSym(selected.symbol))}
+                onBack={()=>setDetailOpen(false)}
+                onAdd={()=>onAddToPortfolio(selected)}
+                onAsk={()=>(onAskAbout||onAddToPortfolio)(selected)}
+                valuationCache={valuationCache} setValuationCache={setValuationCache}
+              />
+            </div>
+          )}
+          {!narrow&&!selected&&rows.length>0&&(
+            <div style={{padding:40,textAlign:"center",color:C.textDim}}>Pick a call from the list to see the full breakdown.</div>
+          )}
+        </div>
+      )}
+
+      {showList&&(
+        <div style={{marginTop:28}}>
+          {deduped.length>0&&<DiscoveryRecsTable universe={deduped}/>}
+          <DiscoveryRunsPanel runs={runs} apiLoaded={apiLoaded}/>
+        </div>
+      )}
     </div>
   );
 }
@@ -3899,6 +4042,11 @@ export default function App(){
                 valuationCache={valuationCache}
                 setValuationCache={setValuationCache}
                 onAddToPortfolio={(stock)=>{
+                  setAriaContext({type:"discovery",id:stock.id});
+                  setSelDiscoveryId(stock.id);
+                  setAriaOpen(true);
+                }}
+                onAskAbout={(stock)=>{
                   setAriaContext({type:"discovery",id:stock.id});
                   setSelDiscoveryId(stock.id);
                   setAriaOpen(true);
