@@ -607,7 +607,7 @@ const WarrenBotPanel=({wb})=>{
       </div>
 
       {/* Five sub-score boxes */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:5,marginBottom:9}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(88px,1fr))",gap:5,marginBottom:9}}>
         {subScores.map(({label,val})=>(
           <div key={label} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:5,padding:"5px 6px"}}>
             <div style={{fontSize:10.5,color:C.muted,marginBottom:2}}>{label}</div>
@@ -751,6 +751,10 @@ const ICON_PATHS={
   down:"M17 7L7 17M15 17H7V9",
   chevron:"M9 18l6-6-6-6",
   run:"M4 20V10M10 20V4M16 20v-7M2 20h20",
+  target:"M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 12h.01",
+  briefcase:"M3 7h18v13H3zM8 7V4h8v3M3 13h18",
+  activity:"M3 12h4l3-8 4 16 3-8h4",
+  more:"M5 12h.01M12 12h.01M19 12h.01",
 };
 const Icon=({name,size=16,style})=>(
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}
@@ -2066,7 +2070,7 @@ function PortfolioRiskPanel({risk}){
         <span style={{fontSize:12.5,fontWeight:700,color:C.accent}}>⚡ Portfolio Risk Dashboard</span>
         <span style={{fontSize:11,color:C.muted}}>{risk.snapshot_date} · {risk.holdings_count} holdings</span>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:7,marginBottom:10}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(96px,1fr))",gap:7,marginBottom:10}}>
         {[
           ["Ann. Vol",vol!=null?`${vol.toFixed(1)}%`:"—",vol>25?C.red:vol>15?C.accent:C.green],
           ["VaR 95%",var95!=null?`${var95.toFixed(2)}%`:"—",varColor],
@@ -3995,6 +3999,8 @@ export default function App(){
   const [selDiscoveryId,setSelDiscoveryId]=useState(null);
   const [selRecId,setSelRecId]=useState(null);
   const [ariaOpen,setAriaOpen]=useState(false);
+  const [moreOpen,setMoreOpen]=useState(false);
+  const narrow=useNarrow(760);
   const [ariaContext,setAriaContext]=useState(null);
   // When IS_LIVE, start with empty arrays so users see proper empty-state placeholders
   // rather than convincing-looking fabricated data.
@@ -4325,24 +4331,30 @@ export default function App(){
     {id:"governance",icon:"🛡",label:"Governance",badge:openAlerts,badgeColor:C.red},
   ];
 
+  const PRIMARY_TABS=[["discovery","Discover","search"],["recommendations","Recs","target"],["portfolio","Portfolio","briefcase"],["market","Market","activity"]];
+  const moreActive=!PRIMARY_TABS.some(([id])=>id===tab);
+  const moreBadge=TABS.filter(t=>!PRIMARY_TABS.some(([id])=>id===t.id)).reduce((a,t)=>a+(t.badge||0),0);
+  const goTab=id=>{setTab(id);setMoreOpen(false);};
+  const tickerItems=marketPulse.slice(0,6).map(m=>(
+    <div key={m.key} style={{display:"flex",gap:4,alignItems:"center",whiteSpace:"nowrap",flexShrink:0}}>
+      <span style={{fontSize:10.5,color:C.muted}}>{m.key}</span>
+      <span style={{fontSize:11,fontWeight:700,color:C.text,fontFamily:MONO}}>{m.value}</span>
+      <span style={{fontSize:10.5,color:m.up?C.green:C.red}}>{m.change}</span>
+    </div>
+  ));
+
   return(
-    <div style={{fontFamily:SANS,background:C.bg,color:C.text,height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{fontFamily:SANS,background:C.bg,color:C.text,height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden",position:"relative"}}>
       <style>{FONT_STYLE}</style>
 
       {/* TOP BAR */}
-      <div style={{background:C.bg,borderBottom:`1px solid ${C.text}`,padding:"0 20px",display:"flex",alignItems:"center",gap:18,height:60,flexShrink:0}}>
-        <div style={{display:"flex",alignItems:"baseline",gap:8,flexShrink:0}}>
-          <span style={{fontFamily:SERIF,fontSize:23,fontWeight:600,color:C.text,letterSpacing:-.3}}>Bharat Intelligence</span>
-          <span style={{fontSize:11,color:C.muted}}>v3.0</span>
+      <div style={{background:C.bg,borderBottom:`1px solid ${C.text}`,padding:narrow?"0 14px":"0 20px",display:"flex",alignItems:"center",gap:narrow?10:18,height:narrow?54:60,flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"baseline",gap:8,flexShrink:0,minWidth:0}}>
+          <span style={{fontFamily:SERIF,fontSize:narrow?20:23,fontWeight:600,color:C.text,letterSpacing:-.3,whiteSpace:"nowrap"}}>Bharat Intelligence</span>
+          {!narrow&&<span style={{fontSize:11,color:C.muted}}>v3.0</span>}
         </div>
-        <div className="ticker-scroll" style={{flex:1,display:"flex",gap:12,overflowX:"auto",msOverflowStyle:"none",scrollbarWidth:"none"}}>
-          {marketPulse.slice(0,6).map(m=>(
-            <div key={m.key} style={{display:"flex",gap:4,alignItems:"center",whiteSpace:"nowrap"}}>
-              <span style={{fontSize:10.5,color:C.muted}}>{m.key}</span>
-              <span style={{fontSize:11,fontWeight:700,color:C.text,fontFamily:MONO}}>{m.value}</span>
-              <span style={{fontSize:10.5,color:m.up?C.green:C.red}}>{m.change}</span>
-            </div>
-          ))}
+        {narrow?<div style={{flex:1}}/>:<div className="ticker-scroll" style={{flex:1,display:"flex",gap:12,overflowX:"auto",msOverflowStyle:"none",scrollbarWidth:"none",minWidth:0}}>
+          {tickerItems}
           {marketRegime&&(()=>{
             const regimeColor={BULL:C.green,BEAR:C.red,HIGH_VOLATILITY:C.orange,SIDEWAYS:C.muted}[marketRegime.regime]||C.muted;
                         const tip=[
@@ -4360,15 +4372,21 @@ export default function App(){
               </div>
             );
           })()}
-        </div>
-        <div style={{display:"flex",alignItems:"center",gap:7}}>
-          {openAlerts>0&&<button onClick={()=>setTab("governance")} style={{background:C.red+"12",border:`1px solid ${C.red}44`,borderRadius:4,padding:"2px 7px",color:C.red,fontSize:11,fontWeight:700,cursor:"pointer"}}>⚠ {openAlerts}</button>}
-          {portfolioAlerts.length>0&&<button onClick={()=>setTab("portfolio")} style={{background:C.orange+"12",border:`1px solid ${C.orange}44`,borderRadius:4,padding:"2px 7px",color:C.orange,fontSize:11,fontWeight:700,cursor:"pointer"}}>💼 {portfolioAlerts.length}</button>}
-          <div style={{fontSize:10.5,color:C.green,display:"flex",alignItems:"center",gap:2}}><Dot color={C.green} pulse/>Open</div>
-          <span style={{fontSize:10.5,color:C.muted}}>{now.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})} IST</span>
-          <button onClick={()=>setAriaOpen(o=>!o)} aria-pressed={ariaOpen} style={{background:ariaOpen?C.accentDim:C.accent,border:`1px solid ${C.accent}`,borderRadius:6,padding:"7px 14px",color:C.onFill,fontSize:12,fontWeight:700,cursor:"pointer",boxShadow:ariaOpen?`0 0 12px ${C.purple}44`:"none"}}>{ariaOpen?"✕ ARIA":"✦ ARIA"}</button>
+        </div>}
+        <div style={{display:"flex",alignItems:"center",gap:7,flexShrink:0}}>
+          {openAlerts>0&&<button onClick={()=>setTab("governance")} aria-label={`${openAlerts} governance alerts`} style={{background:C.red+"12",border:`1px solid ${C.red}44`,borderRadius:4,padding:narrow?"8px 8px":"2px 7px",color:C.red,fontSize:11,fontWeight:700,cursor:"pointer"}}>⚠ {openAlerts}</button>}
+          {portfolioAlerts.length>0&&<button onClick={()=>setTab("portfolio")} aria-label={`${portfolioAlerts.length} portfolio alerts`} style={{background:C.orange+"12",border:`1px solid ${C.orange}44`,borderRadius:4,padding:narrow?"8px 8px":"2px 7px",color:C.orange,fontSize:11,fontWeight:700,cursor:"pointer"}}>💼 {portfolioAlerts.length}</button>}
+          {!narrow&&<div style={{fontSize:10.5,color:C.green,display:"flex",alignItems:"center",gap:2}}><Dot color={C.green} pulse/>Open</div>}
+          {!narrow&&<span style={{fontSize:10.5,color:C.muted}}>{now.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})} IST</span>}
+          <button onClick={()=>setAriaOpen(o=>!o)} aria-pressed={ariaOpen} style={{background:ariaOpen?C.accentDim:C.accent,border:`1px solid ${C.accent}`,borderRadius:6,padding:narrow?"8px 12px":"7px 14px",minHeight:narrow?40:undefined,color:C.onFill,fontSize:12,fontWeight:700,cursor:"pointer",boxShadow:ariaOpen?`0 0 12px ${C.purple}44`:"none"}}>{ariaOpen?"✕ ARIA":"✦ ARIA"}</button>
         </div>
       </div>
+
+      {narrow&&marketPulse.length>0&&(
+        <div className="ticker-scroll" aria-label="Market ticker" style={{display:"flex",gap:16,overflowX:"auto",padding:"7px 14px",borderBottom:`1px solid ${C.borderHi}`,flexShrink:0,scrollbarWidth:"none"}}>
+          {tickerItems}
+        </div>
+      )}
 
       {govBanner&&openAlerts>0&&(
         <div style={{background:C.red+"0d",borderBottom:`1px solid ${C.red}33`,padding:"3px 15px",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
@@ -4382,7 +4400,7 @@ export default function App(){
       <div style={{flex:1,display:"flex",overflow:"hidden"}}>
         <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
           {/* TABS */}
-          <div className="tabs-scroll" style={{
+          {!narrow&&<div className="tabs-scroll" style={{
             padding:"0 12px",display:"flex",gap:4,
             background:C.bg,borderBottom:`1px solid ${C.borderHi}`,
             flexShrink:0,overflowX:"auto",overflowY:"visible",
@@ -4400,9 +4418,9 @@ export default function App(){
                 {t.badge>0&&<span style={{marginLeft:6,background:t.id==="discovery"?C.panel:C.red+"14",color:t.id==="discovery"?C.text:C.red,borderRadius:9,padding:"1px 7px",fontSize:11.5,fontWeight:600,fontFamily:MONO}}>{t.badge}</span>}
               </button>
             ))}
-          </div>
+          </div>}
 
-          <div style={{flex:1,overflowY:"auto",padding:"22px 24px"}}>
+          <div style={{flex:1,overflowY:"auto",padding:narrow?"16px 14px 24px":"22px 24px"}}>
 
             {/* DISCOVERY TAB — THE PRIMARY TAB */}
             {tab==="discovery"&&(
@@ -4598,7 +4616,15 @@ export default function App(){
         </div>
 
         {ariaOpen&&(
-          <div style={{width:340,borderLeft:`1px solid ${C.border}`,flexShrink:0,display:"flex",flexDirection:"column",animation:"slideIn .2s ease"}}>
+          <div role={narrow?"dialog":undefined} aria-label={narrow?"ARIA assistant":undefined} style={narrow
+            ?{position:"absolute",inset:0,zIndex:60,background:C.bg,display:"flex",flexDirection:"column"}
+            :{width:340,borderLeft:`1px solid ${C.border}`,flexShrink:0,display:"flex",flexDirection:"column",animation:"slideIn .2s ease"}}>
+            {narrow&&(
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 8px 6px 16px",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+                <span style={{fontFamily:SERIF,fontSize:18,fontWeight:600}}>ARIA</span>
+                <button onClick={()=>setAriaOpen(false)} style={edBtn("ghost")}><Icon name="close"/>Close</button>
+              </div>
+            )}
             <ARIAPanel
               selectedRec={(portfolioRecs||[]).find(r=>r.id===selRecId)}
               ariaContext={ariaContext}
@@ -4613,6 +4639,46 @@ export default function App(){
           </div>
         )}
       </div>
+
+      {narrow&&(
+        <nav aria-label="Sections" style={{display:"flex",flexShrink:0,borderTop:`1px solid ${C.borderHi}`,background:C.surface,padding:"2px 4px env(safe-area-inset-bottom)"}}>
+          {[...PRIMARY_TABS,["__more","More","more"]].map(([id,label,icon])=>{
+            const isMore=id==="__more";
+            const on=isMore?(moreActive||moreOpen):tab===id;
+            const badge=isMore?moreBadge:id==="portfolio"?portfolioAlerts.length:0;
+            return(
+              <button key={id} onClick={()=>isMore?setMoreOpen(o=>!o):goTab(id)} aria-current={on&&!isMore?"page":undefined}
+                aria-expanded={isMore?moreOpen:undefined}
+                style={{flex:1,minWidth:0,minHeight:58,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,
+                  border:0,background:"transparent",cursor:"pointer",color:on?C.accent:C.textDim,fontSize:11,fontWeight:on?600:500,position:"relative",fontFamily:SANS}}>
+                <Icon name={icon} size={20}/>
+                <span>{label}</span>
+                {badge>0&&<span style={{position:"absolute",top:5,left:"calc(50% + 5px)",minWidth:18,height:18,padding:"0 5px",borderRadius:9,background:C.red+"18",color:C.red,fontSize:10.5,fontWeight:700,display:"grid",placeItems:"center",fontFamily:MONO}}>{badge}</span>}
+              </button>
+            );
+          })}
+        </nav>
+      )}
+
+      {narrow&&moreOpen&&(
+        <>
+          <button aria-label="Close menu" onClick={()=>setMoreOpen(false)} style={{position:"absolute",inset:0,zIndex:40,border:0,background:"rgba(28,26,22,.35)",cursor:"default"}}/>
+          <div role="dialog" aria-label="More sections" style={{position:"absolute",left:0,right:0,bottom:0,zIndex:41,background:C.surface,borderRadius:"14px 14px 0 0",padding:"10px 12px 18px",boxShadow:"0 -10px 30px rgba(28,26,22,.15)"}}>
+            <div aria-hidden="true" style={{width:40,height:4,borderRadius:2,background:C.borderHi,margin:"2px auto 10px"}}/>
+            {TABS.filter(t=>!PRIMARY_TABS.some(([id])=>id===t.id)).map(t=>(
+              <button key={t.id} onClick={()=>goTab(t.id)} aria-current={tab===t.id?"page":undefined}
+                style={{display:"flex",alignItems:"center",gap:10,width:"100%",minHeight:52,padding:"0 12px",border:0,borderRadius:8,cursor:"pointer",textAlign:"left",fontFamily:SANS,
+                  background:tab===t.id?C.accent+"12":"transparent",color:tab===t.id?C.accent:C.text,fontSize:15,fontWeight:500}}>
+                {t.label}
+                {t.badge>0&&<span style={{marginLeft:"auto",background:C.red+"14",color:C.red,borderRadius:9,padding:"1px 8px",fontSize:12,fontWeight:600,fontFamily:MONO}}>{t.badge}</span>}
+              </button>
+            ))}
+            <button onClick={()=>{setMoreOpen(false);setAriaOpen(true);}} style={{display:"flex",alignItems:"center",gap:10,width:"100%",minHeight:52,padding:"0 12px",border:0,borderRadius:8,cursor:"pointer",background:"transparent",color:C.text,fontSize:15,fontFamily:SANS}}>
+              <Icon name="spark"/>Ask ARIA
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
