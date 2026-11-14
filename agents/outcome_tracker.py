@@ -1173,7 +1173,7 @@ def run_sentiment_validation(dry_run: bool = False) -> dict:
                     from datetime import date as _d2
                     client.table("agent_performance").upsert({
                         "agent_name":        "sentiment",
-                        "accuracy_90d":      accuracy_30d / 100,
+                        "accuracy_90d":      accuracy_30d,  # percentage, like every other writer (ADR-003)
                         "hallucination_rate": 0.0,
                         "trend":             "DEGRADING",
                         "audit_date":        _d2.today().isoformat(),

@@ -9,7 +9,7 @@ Plan: `workplan.yaml` · Review: `REVIEW.md` · Target: `TARGET_ARCHITECTURE.md`
 |---|---|---|---|---|
 | WP-001 | TODO | — | — | Confirm the portfolio pipeline publishes on the next run |
 | WP-002 | NEEDS_HUMAN | — | — | Apply `add_danger_drop_pct_column.sql` in Supabase |
-| WP-003 | TODO | — | — | Freeze agent weights to equal in one config file |
+| WP-003 | IN_PROGRESS | — (branch `wp/WP-003-equal-agent-weights`, local) | 2026-11-14 | Equal weights via `data/decision_config.py`; regime multipliers off; discovery weights routed through config; outcome_tracker writes %. Tests pass (1 pre-existing live-DB test failure, unrelated). Awaiting owner OK to push + open PR |
 | WP-004 | TODO | — | — | Persist score, gate result and source on outcome rows (backfill run is manual) |
 | WP-005 | TODO | — | — | Record every worker job run in the job ledger |
 | WP-006 | TODO | — | — | Alert when a job is missing or breaks its invariant |
