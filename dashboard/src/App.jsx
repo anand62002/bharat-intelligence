@@ -803,47 +803,6 @@ function CriticalDangerBanner({holdings, onOpenARIA}){
     </div>
   );
 }
-function RiskGauge({score}){
-  const color=score<33?C.green:score<66?C.accent:C.red;
-  const rad=((score/100)*180-90)*Math.PI/180;
-  return(
-    <div style={{textAlign:"center",flexShrink:0}}>
-      <svg width="66" height="40" viewBox="0 0 66 40">
-        <defs><linearGradient id={`rg${score}`} x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stopColor={C.green}/><stop offset="50%" stopColor={C.accent}/><stop offset="100%" stopColor={C.red}/>
-        </linearGradient></defs>
-        <path d="M4 34 A29 29 0 0 1 62 34" fill="none" stroke={`url(#rg${score})`} strokeWidth="6" strokeLinecap="round"/>
-        <line x1="33" y1="34" x2={33+19*Math.cos(rad)} y2={34+19*Math.sin(rad)} stroke={C.text} strokeWidth="1.5" strokeLinecap="round"/>
-        <circle cx="33" cy="34" r="3" fill={C.text}/>
-      </svg>
-      <div style={{fontSize:14,fontWeight:800,color,marginTop:-3,fontFamily:MONO}}>{score}</div>
-      <div style={{fontSize:10.5,color:C.muted}}>{score<33?"Low":score<66?"Mod":"High"}</div>
-    </div>
-  );
-}
-
-// Confidence gauge — high conf = green (opposite polarity to risk gauge)
-function ConfidenceGauge({pct, label="hit rate", title}){
-  const v=Math.round(pct||0);
-  // Calibrated hit rate: 50% is a coin flip vs the Nifty, so colour around it.
-  const color=v>=60?C.green:v>=50?C.accent:C.muted;
-  const rad=((v/100)*180-90)*Math.PI/180;
-  return(
-    <div title={title} style={{textAlign:"center",flexShrink:0,cursor:title?"help":"default"}}>
-      <svg width="66" height="40" viewBox="0 0 66 40">
-        <defs><linearGradient id={`cg${v}`} x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stopColor={C.muted}/><stop offset="50%" stopColor={C.accent}/><stop offset="100%" stopColor={C.green}/>
-        </linearGradient></defs>
-        <path d="M4 34 A29 29 0 0 1 62 34" fill="none" stroke={`url(#cg${v})`} strokeWidth="6" strokeLinecap="round"/>
-        <line x1="33" y1="34" x2={33+19*Math.cos(rad)} y2={34+19*Math.sin(rad)} stroke={C.text} strokeWidth="1.5" strokeLinecap="round"/>
-        <circle cx="33" cy="34" r="3" fill={C.text}/>
-      </svg>
-      <div style={{fontSize:14,fontWeight:800,color,marginTop:-3,fontFamily:MONO}}>{v}%</div>
-      <div style={{fontSize:10.5,color:C.muted}}>{label}</div>
-    </div>
-  );
-}
-
 // Shared signal-category sets (used in cards + deep dive)
 const BULL_SIGNALS=new Set(["BULLISH","BUY","POSITIVE","STRONG_BUY","BULLISH_ANALOGUE"]);
 const BEAR_SIGNALS=new Set(["BEARISH","SELL","NEGATIVE","AVOID","BEARISH_ANALOGUE","STRONG_SELL"]);
@@ -972,7 +931,7 @@ function DiscoveryCard({stock:s,selected,onSelect}){
 function LevelsBar({s}){
   const stop=s.stoplossNum, tgt=s.targetNum, lo=s.entryLow, hi=s.entryHigh, now=s.price;
   const vals=[stop,tgt,lo,hi,now].filter(v=>v!=null&&!isNaN(v)&&v>0);
-  if(vals.length<3||!now) return <p style={{margin:0,fontSize:13,color:C.textDim}}>Price levels aren't available for this call yet.</p>;
+  if(vals.length<2) return <p style={{margin:0,fontSize:13,color:C.textDim}}>Price levels aren't available for this call yet.</p>;
   const mn=Math.min(...vals), mx=Math.max(...vals), pad=(mx-mn)*0.08||1, L=mn-pad, H=mx+pad;
   const pos=v=>`${((v-L)/(H-L)*100).toFixed(2)}%`;
   const mark=(v,color,label)=>v!=null&&!isNaN(v)&&v>0&&(
@@ -981,7 +940,7 @@ function LevelsBar({s}){
   const legend=[
     ["Stop-loss",inr(stop),{background:C.red}],
     ["Entry zone",lo&&hi?`${inr(lo)}–${inr(hi).slice(1)}`:"—",{background:C.accent+"18",border:`1px solid ${C.accent}`}],
-    ["Now",inr(now),{background:C.text}],
+    ...(now>0?[["Now",inr(now),{background:C.text}]]:[]),
     ["Target",inr(tgt),{background:C.green}],
   ];
   return(
@@ -1002,11 +961,63 @@ function LevelsBar({s}){
   );
 }
 
-// ─── DISCOVERY: DETAIL PANEL ──────────────────────────────────────────────────
-function DiscoveryDetail({s,narrow,isHeld,onBack,onAdd,onAsk,valuationCache,setValuationCache}){
-  const agents=Object.entries(s.agents||{}).filter(([,a])=>a&&a.signal);
+// ─── SHARED DETAIL SECTIONS (Discovery + Recs) ────────────────────────────────
+function AgentSignals({agents:raw,narrow}){
+  const agents=Object.entries(raw||{}).filter(([,a])=>a&&a.signal);
+  if(!agents.length) return null;
   const bull=agents.filter(([,a])=>BULL_SIGNALS.has(a.signal)).length;
   const bear=agents.filter(([,a])=>BEAR_SIGNALS.has(a.signal)).length;
+  return(
+    <section>
+      <h3 style={edH3}>Agent signals <span style={{fontFamily:SANS,fontSize:12,color:C.textDim,fontWeight:400}}>{bull} bullish · {bear} bearish · {agents.length-bull-bear} neutral</span></h3>
+      <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden",background:C.surface}}>
+        {agents.map(([k,a],i)=>{
+          const tone=actionTone(a.signal), fill=tone==="buy"?C.green:tone==="sell"?C.red:C.orange;
+          return(
+            <div key={k} style={{display:"grid",gridTemplateColumns:narrow?"minmax(0,1fr) auto 32px":"130px 120px minmax(60px,110px) 32px",columnGap:12,rowGap:4,
+              alignItems:"center",padding:"11px 14px",borderTop:i?`1px solid ${C.border}`:"none",fontSize:13}}>
+              <span style={{fontWeight:600,textTransform:"capitalize"}}>{k.replace(/_/g," ")}</span>
+              <span><EdTag tone={tone}>{String(a.signal).replace(/_/g," ")}</EdTag></span>
+              {!narrow&&<span aria-hidden="true" style={{height:6,borderRadius:3,background:C.panel,overflow:"hidden",display:"block"}}>
+                <span style={{display:"block",height:"100%",width:`${Math.max(0,Math.min(100,a.score||0))}%`,background:fill}}/></span>}
+              <span style={{fontFamily:MONO,textAlign:"right"}}>{a.score??"—"}</span>
+              {(a.detail||a.reason)&&<span style={{gridColumn:"1/-1",color:C.textDim,fontSize:12.5,lineHeight:1.5}}>{a.detail||a.reason}</span>}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+function CatalystsRisks({catalysts,risks,narrow}){
+  const cats=catalysts||[], rks=risks||[];
+  const list=(items,icon,color)=>(
+    <ul style={{margin:0,padding:0,listStyle:"none",display:"flex",flexDirection:"column",gap:9}}>
+      {items.map(t=><li key={t} style={{display:"flex",gap:9,fontSize:13,lineHeight:1.45}}><Icon name={icon} size={15} style={{color,marginTop:2}}/><span>{t}</span></li>)}
+    </ul>
+  );
+  return(
+    <div style={{display:"grid",gridTemplateColumns:narrow?"minmax(0,1fr)":"repeat(2,minmax(0,1fr))",gap:12}}>
+      <div style={edBox}>
+        <h3 style={{...edH3,fontSize:17}}>Catalysts</h3>
+        {cats.length?list(cats,"up",C.green):<p style={{margin:0,fontSize:13,color:C.textDim}}>No specific catalyst was recorded.</p>}
+      </div>
+      <div style={edBox}>
+        <h3 style={{...edH3,fontSize:17}}>Risks</h3>
+        {rks.length?list(rks,"down",C.red):<p style={{margin:0,fontSize:13,color:C.textDim}}>No agent voted bearish and liquidity is fine. Keep an eye on the stop-loss.</p>}
+      </div>
+    </div>
+  );
+}
+const DetailNote=({tone,children})=>(
+  <div role="note" style={{display:"flex",gap:10,alignItems:"flex-start",padding:"12px 14px",borderRadius:6,fontSize:13.5,lineHeight:1.5,
+    background:tone==="warn"?C.orange+"14":C.blue+"10",color:C.text}}>
+    <Icon name="info" style={{color:tone==="warn"?C.orange:C.blue,marginTop:1}}/><span>{children}</span>
+  </div>
+);
+
+// ─── DISCOVERY: DETAIL PANEL ──────────────────────────────────────────────────
+function DiscoveryDetail({s,narrow,isHeld,onBack,onAdd,onAsk,valuationCache,setValuationCache}){
   const notes=[];
   if(s.callStatus==="WEAKENED") notes.push(["warn",s.statusReason||"The daily re-check weakened this call. It won't be extended unless the agents confirm it again."]);
   if(s.dataQuality==="ESTIMATED") notes.push(["info","Some fundamentals came from a fallback source, so treat the upside as an estimate."]);
@@ -1072,46 +1083,8 @@ function DiscoveryDetail({s,narrow,isHeld,onBack,onAdd,onAsk,valuationCache,setV
         <LevelsBar s={s}/>
       </section>
 
-      {agents.length>0&&(
-        <section>
-          <h3 style={edH3}>Agent signals <span style={{fontFamily:SANS,fontSize:12,color:C.textDim,fontWeight:400}}>{bull} bullish · {bear} bearish · {agents.length-bull-bear} neutral</span></h3>
-          <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden",background:C.surface}}>
-            {agents.map(([k,a],i)=>{
-              const tone=actionTone(a.signal), fill=tone==="buy"?C.green:tone==="sell"?C.red:C.orange;
-              return(
-                <div key={k} style={{display:"grid",gridTemplateColumns:narrow?"minmax(0,1fr) auto 32px":"130px 120px minmax(60px,110px) 32px",columnGap:12,rowGap:4,
-                  alignItems:"center",padding:"11px 14px",borderTop:i?`1px solid ${C.border}`:"none",fontSize:13}}>
-                  <span style={{fontWeight:600,textTransform:"capitalize"}}>{k.replace(/_/g," ")}</span>
-                  <span><EdTag tone={tone}>{a.signal.replace(/_/g," ")}</EdTag></span>
-                  {!narrow&&<span aria-hidden="true" style={{height:6,borderRadius:3,background:C.panel,overflow:"hidden",display:"block"}}>
-                    <span style={{display:"block",height:"100%",width:`${Math.max(0,Math.min(100,a.score||0))}%`,background:fill}}/></span>}
-                  <span style={{fontFamily:MONO,textAlign:"right"}}>{a.score??"—"}</span>
-                  {(a.detail||a.reason)&&<span style={{gridColumn:"1/-1",color:C.textDim,fontSize:12.5,lineHeight:1.5}}>{a.detail||a.reason}</span>}
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
-
-      <div style={{display:"grid",gridTemplateColumns:narrow?"minmax(0,1fr)":"repeat(2,minmax(0,1fr))",gap:12}}>
-        <div style={edBox}>
-          <h3 style={{...edH3,fontSize:17}}>Catalysts</h3>
-          {(s.catalysts||[]).length?(
-            <ul style={{margin:0,padding:0,listStyle:"none",display:"flex",flexDirection:"column",gap:9}}>
-              {s.catalysts.map(c=><li key={c} style={{display:"flex",gap:9,fontSize:13,lineHeight:1.45}}><Icon name="up" size={15} style={{color:C.green,marginTop:2}}/><span>{c}</span></li>)}
-            </ul>
-          ):<p style={{margin:0,fontSize:13,color:C.textDim}}>No specific catalyst was recorded.</p>}
-        </div>
-        <div style={edBox}>
-          <h3 style={{...edH3,fontSize:17}}>Risks</h3>
-          {(s.risks||[]).length?(
-            <ul style={{margin:0,padding:0,listStyle:"none",display:"flex",flexDirection:"column",gap:9}}>
-              {s.risks.map(r=><li key={r} style={{display:"flex",gap:9,fontSize:13,lineHeight:1.45}}><Icon name="down" size={15} style={{color:C.red,marginTop:2}}/><span>{r}</span></li>)}
-            </ul>
-          ):<p style={{margin:0,fontSize:13,color:C.textDim}}>No agent voted bearish and liquidity is fine. Keep an eye on the stop-loss.</p>}
-        </div>
-      </div>
+      <AgentSignals agents={s.agents} narrow={narrow}/>
+      <CatalystsRisks catalysts={s.catalysts} risks={s.risks} narrow={narrow}/>
 
       {fwd.length>0&&(
         <section>
@@ -1151,6 +1124,305 @@ function DiscoveryDetail({s,narrow,isHeld,onBack,onAdd,onAsk,valuationCache,setV
         <button onClick={onAsk} style={edBtn()}><Icon name="spark"/>Ask ARIA about {cleanSym(s.symbol)}</button>
       </div>
     </article>
+  );
+}
+
+// ─── PORTFOLIO RECS ───────────────────────────────────────────────────────────
+// Brand-name holdings whose NSE/BSE ticker differs. Mirrors the aliases in
+// data/symbol_map.py::YF_SYMBOL_MAP and api/main.py::_NSE_OVERRIDES — only
+// needed because /api/portfolio returns yfSymbol=null for every holding.
+const HOLDING_TICKER_ALIASES={
+  IHCL:"INDHOTEL", BHARATSEAT:"BHARATSE", HITACHIENERGYINDIA:"POWERINDIA", ZOMATO:"ETERNAL",
+  MUTHOOT:"MUTHOOTFIN", LNT:"LT", "L&T":"LT", SHAKTIPUMPS:"SHAKTIPUMP",
+  GEVERNOVA:"522275", GETDINDIA:"522275",
+};
+/** Map of ticker (no .NS/.BO) → holding, so a rec can find the holding it is about. */
+const holdingsByTicker=portfolio=>{
+  const m=new Map();
+  (portfolio||[]).filter(h=>h.status!=="exited").forEach(h=>{
+    const sym=cleanSym(h.symbol).toUpperCase();
+    m.set(sym,h);
+    if(h.yfSymbol) m.set(cleanSym(h.yfSymbol).toUpperCase(),h);
+    if(HOLDING_TICKER_ALIASES[sym]) m.set(HOLDING_TICKER_ALIASES[sym],h);
+  });
+  return m;
+};
+/** Synthesis summaries embed "⚠ …" warnings; split them out as notes. */
+const splitSummary=txt=>{
+  const parts=String(txt||"").split("⚠");
+  const body=[], notes=[];
+  const addBody=t=>t.split(/\n+/).map(x=>x.trim()).filter(Boolean).forEach(x=>body.push(x));
+  addBody(parts[0]);
+  parts.slice(1).forEach(seg=>{
+    const lines=seg.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+    const note=[];
+    while(lines.length&&lines[0].length<=220) note.push(lines.shift());
+    if(!note.length&&lines.length) note.push(lines.shift());
+    if(note.length){
+      const text=note.join(" ");
+      notes.push({tone:/QUALIFIED|unverified|could not/i.test(text)?"info":"warn",text});
+    }
+    lines.forEach(x=>body.push(x));
+  });
+  return {body,notes};
+};
+const cleanHeadline=h=>String(h||"").replace(/^[^\p{L}\p{N}]+/u,"").trim();
+const recConfLabel=r=>r.isDiscovery?"Hit rate":"Confidence";
+
+function RecCard({rec:r,held,selected,onSelect}){
+  const hasTarget=r.targetNum!=null;
+  return(
+    <button onClick={onSelect} aria-pressed={!!selected} className="ed-card" style={{
+      display:"flex",flexDirection:"column",gap:8,width:"100%",textAlign:"left",cursor:"pointer",
+      padding:"16px 12px 15px",border:"none",borderTop:`1px solid ${C.borderHi}`,borderRadius:0,
+      background:selected?C.surface:"transparent",boxShadow:selected?`inset 0 2px 0 ${C.accent}`:"none",
+      color:C.text,fontFamily:SANS}}>
+      <span style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",width:"100%"}}>
+        <span style={{fontFamily:SERIF,fontSize:19,fontWeight:600}}>{cleanSym(r.symbol)}</span>
+        <EdTag tone={actionTone(r.action)}>{r.action}</EdTag>
+        {held&&<EdTag tone="info">Held</EdTag>}
+        {r.isDiscovery&&<EdTag tone="mute">Discovery</EdTag>}
+        {r.price>0&&<span style={{marginLeft:"auto",fontFamily:MONO,fontSize:13}}>{inr(r.price)}</span>}
+      </span>
+      {r.headline&&<span style={{fontSize:13,color:C.textDim,lineHeight:1.45,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{cleanHeadline(r.headline)}</span>}
+      <span style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:8,width:"100%"}}>
+        <Metric k={recConfLabel(r)} v={r.confidence!=null?`${Math.round(r.confidence)}%`:"—"} title={r.isDiscovery?hitRateTitle(r):"How sure the synthesis model is about this call"}/>
+        <Metric k="Upside" v={hasTarget?signedPct(r.upsidePct,0):"—"} color={hasTarget?dirColor(r.upsidePct):undefined} title={hasTarget?undefined:"No target set for this call"}/>
+        <Metric k="Risk" v={r.riskScore>0?`${Math.round(r.riskScore)}/100`:"—"} color={r.riskScore>=70?C.red:undefined}/>
+      </span>
+      <span style={{fontSize:12,color:C.textDim}}>{[r.callDate||r.createdAt?`Called ${fmtDate(r.callDate||r.createdAt)}`:null,r.horizon||null,r.validTill?`valid till ${fmtDate(r.validTill)}`:null].filter(Boolean).join(" · ")}</span>
+    </button>
+  );
+}
+
+function RecDetail({r,holding,narrow,onBack,onAsk,onAdd,onGoPortfolio,valuationCache,setValuationCache}){
+  const {body,notes}=splitSummary(r.summary);
+  const gov=r.govCheck||{};
+  const flags=gov.flags||[];
+  const hasTarget=r.targetNum!=null;
+  const lvl={price:r.price>0?r.price:(holding?.currentPrice||0),stoplossNum:r.stoplossNum,targetNum:r.targetNum,entryLow:r.entryLow,entryHigh:r.entryHigh};
+  const nm=nameOf(r), sec=sectorOf(r)||holding?.sector;
+  return(
+    <article aria-label={`${cleanSym(r.symbol)} recommendation`} style={{padding:narrow?"16px 4px":"30px 34px",display:"flex",flexDirection:"column",gap:24}}>
+      {narrow&&<button onClick={onBack} style={{...edBtn("ghost"),alignSelf:"flex-start",paddingLeft:6}}><Icon name="back"/>Back to list</button>}
+
+      <header style={{display:"flex",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
+        <div style={{minWidth:0,flex:"1 1 320px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <h2 style={{fontFamily:SERIF,fontSize:narrow?28:36,fontWeight:600,margin:0,lineHeight:1.1}}>{cleanSym(r.symbol)}</h2>
+            <EdTag tone={actionTone(r.action)}>{r.action}</EdTag>
+            {holding&&<EdTag tone="info">Held</EdTag>}
+            {r.isDiscovery&&<EdTag tone="mute">Discovery</EdTag>}
+          </div>
+          {(nm||sec)&&<p style={{margin:"4px 0 0",color:C.textDim,fontSize:14}}>{[nm||holding?.name,sec].filter(Boolean).join(" · ")}</p>}
+          {r.headline&&<p style={{margin:"10px 0 0",fontFamily:SERIF,fontSize:narrow?18:21,lineHeight:1.4,fontWeight:500}}>{cleanHeadline(r.headline)}</p>}
+        </div>
+        {lvl.price>0&&(
+          <div style={{display:"flex",flexDirection:"column",alignItems:narrow?"flex-start":"flex-end",gap:2}}>
+            <span style={{fontFamily:MONO,fontSize:24,fontWeight:600}}>{inr(lvl.price)}</span>
+            {holding&&holding.avgBuy>0&&<span style={{fontFamily:MONO,fontSize:13,color:dirColor(lvl.price-holding.avgBuy)}}>{signedPct((lvl.price-holding.avgBuy)/holding.avgBuy*100)} on your {holding.qty} shares</span>}
+          </div>
+        )}
+      </header>
+
+      {notes.map((n,i)=><DetailNote key={i} tone={n.tone}>{n.text}</DetailNote>)}
+      {gov.withheld&&<DetailNote tone="warn">Governance withheld part of this call because its claims could not be verified.</DetailNote>}
+
+      {body.length>0&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12,maxWidth:"72ch"}}>
+          {body.map((t,i)=><p key={i} style={{margin:0,fontSize:15,lineHeight:1.65}}>{t}</p>)}
+        </div>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:narrow?"repeat(2,minmax(0,1fr))":"repeat(4,minmax(0,1fr))",gap:10}}>
+        {[
+          [recConfLabel(r),r.confidence!=null?`${Math.round(r.confidence)}%`:"—",null],
+          ["Upside",hasTarget?signedPct(r.upsidePct,0):"—",hasTarget?dirColor(r.upsidePct):null],
+          ["Risk score",r.riskScore>0?`${Math.round(r.riskScore)}/100`:"—",r.riskScore>=70?C.red:null],
+          ["Position size",r.positionLabel||(r.suggestedPositionPct?`${r.suggestedPositionPct}%`:"—"),null],
+        ].map(([k,v,color])=>(
+          <div key={k} style={{padding:"12px 14px",borderRadius:6,background:C.panel,minWidth:0}}>
+            <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:".05em"}}>{k}</div>
+            <div style={{fontFamily:k==="Position size"?SANS:MONO,fontSize:k==="Position size"?14:20,fontWeight:600,marginTop:2,color:color||C.text}}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      <section>
+        <h3 style={edH3}>Price levels <span style={{fontFamily:SANS,fontSize:12,color:C.textDim,fontWeight:400}}>{[r.horizon,r.validTill?`valid till ${fmtDate(r.validTill)}`:null].filter(Boolean).join(" · ")}</span></h3>
+        <LevelsBar s={lvl}/>
+      </section>
+
+      <AgentSignals agents={r.agents} narrow={narrow}/>
+      {((r.catalysts||[]).length>0||(r.risks||[]).length>0)&&<CatalystsRisks catalysts={r.catalysts} risks={r.risks} narrow={narrow}/>}
+
+      {r.warrenBot&&<WarrenBotPanel wb={r.warrenBot}/>}
+      <ValuationScenariosPanel
+        val={valuationCache[r.symbol]}
+        symbol={r.symbol}
+        onFetch={()=>{
+          apiFetch(`/api/valuation/${encodeURIComponent(r.symbol)}`)
+            .then(d=>{if(d&&!d.error)setValuationCache(prev=>({...prev,[r.symbol]:d}));})
+            .catch(()=>{});
+        }}
+      />
+
+      <p style={{margin:0,fontSize:12.5,color:C.textDim,display:"flex",gap:6,alignItems:"center"}}>
+        <GovShield size={14}/>
+        {flags.length?`Governance flagged: ${flags[0]}`:"Governance check passed with no flags."}
+      </p>
+
+      <div style={{display:"flex",gap:10,flexWrap:"wrap",borderTop:`1px solid ${C.border}`,paddingTop:18}}>
+        {holding
+          ?<button onClick={onGoPortfolio} style={edBtn("accent")}>View in portfolio</button>
+          :BULL_SIGNALS.has(r.action)&&<button onClick={onAdd} title="Opens ARIA to record your purchase" style={edBtn("accent")}><Icon name="plus"/>Add to portfolio</button>}
+        <button onClick={onAsk} style={edBtn()}><Icon name="spark"/>Ask ARIA about {cleanSym(r.symbol)}</button>
+      </div>
+    </article>
+  );
+}
+
+const RECS_SORTS=[["newest","Newest first"],["conf","Highest confidence"],["risk","Highest risk"],["upside","Highest upside"],["sym","Symbol A–Z"]];
+function RecsTab({recs:_recs,portfolio,apiLoaded,selRecId,setSelRecId,valuationCache,setValuationCache,onAsk,onAdd,onGoPortfolio}){
+  const recs=Array.isArray(_recs)?_recs:[];
+  const narrow=useNarrow(900);
+  const topRef=useRef(null);
+  const [filter,setFilter]=useState("all");
+  const [source,setSource]=useState("all");
+  const [query,setQuery]=useState("");
+  const [sort,setSort]=useState("newest");
+  const [detailOpen,setDetailOpen]=useState(false);
+
+  const byTicker=holdingsByTicker(portfolio);
+  const holdingOf=r=>byTicker.get(cleanSym(r.symbol).toUpperCase())||null;
+  const defs=[
+    ["all","All",()=>true],
+    ["held","My holdings",r=>!!holdingOf(r)],
+    ["buy","Buy",r=>BULL_SIGNALS.has(r.action)],
+    ["hold","Hold",r=>r.action==="HOLD"],
+    ["sell","Sell / Avoid",r=>BEAR_SIGNALS.has(r.action)],
+  ];
+  const fn=(defs.find(d=>d[0]===filter)||defs[0])[2];
+  const srcFn=r=>source==="all"||(source==="discovery")===!!r.isDiscovery;
+  const q=query.trim().toLowerCase();
+  const matches=r=>!q||[cleanSym(r.symbol),r.name,r.headline,holdingOf(r)?.name].some(v=>v&&String(v).toLowerCase().includes(q));
+  const num=v=>v==null||isNaN(v)?-Infinity:v;
+  const sortFns={
+    newest:(a,b)=>(b.createdAt||"").localeCompare(a.createdAt||""),
+    conf:(a,b)=>num(b.confidence)-num(a.confidence),
+    risk:(a,b)=>num(b.riskScore)-num(a.riskScore),
+    upside:(a,b)=>num(b.targetNum!=null?b.upsidePct:null)-num(a.targetNum!=null?a.upsidePct:null),
+    sym:(a,b)=>cleanSym(a.symbol).localeCompare(cleanSym(b.symbol)),
+  };
+  const base=recs.filter(srcFn);
+  const rows=base.filter(fn).filter(matches).sort(sortFns[sort]);
+  const selected=rows.find(r=>r.id===selRecId)||(narrow?null:rows[0])||null;
+  const showDetail=!!selected&&(!narrow||detailOpen);
+  const showList=!narrow||!detailOpen;
+  const pick=r=>{setSelRecId(r.id);setDetailOpen(true);if(narrow&&topRef.current) topRef.current.scrollIntoView({block:"start"});};
+  const clearFilters=()=>{setFilter("all");setSource("all");setQuery("");};
+  const heldCount=recs.filter(r=>holdingOf(r)).length;
+  const loading=IS_LIVE&&!apiLoaded&&recs.length===0;
+
+  let empty=null;
+  if(rows.length===0&&recs.length>0){
+    empty=filter==="held"&&!q&&source==="all"
+      ?{t:"No calls on your holdings yet",p:"The 06:00 IST pipeline analyses your holdings each morning. If none appear, the run may have been suppressed. Check Governance → Data sources.",b:"Show all recommendations",a:()=>setFilter("all")}
+      :{t:"No calls match",p:`Nothing matches these filters${q?` and the search “${query.trim()}”`:""}.`,b:"Clear filters",a:clearFilters};
+  }
+
+  return(
+    <div ref={topRef} style={{animation:"fadeUp .3s ease",maxWidth:1440,margin:"0 auto",scrollMarginTop:16}}>
+      {showList&&(
+        <header style={{display:"flex",flexDirection:"column",gap:14,marginBottom:18}}>
+          <div>
+            <h1 style={{fontFamily:SERIF,fontSize:narrow?26:32,fontWeight:600,margin:0,letterSpacing:-.3,lineHeight:1.15}}>Portfolio recommendations</h1>
+            <p style={{margin:"4px 0 0",fontSize:14,color:C.textDim}}>
+              Agent calls on your holdings and new ideas · updated daily at 06:00 IST{recs.length?` · ${recs.length} calls`:""}
+            </p>
+          </div>
+          {recs.length>0&&(
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+              <div role="group" aria-label="Filter recommendations" style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {defs.map(([id,label,f])=>(
+                  <button key={id} onClick={()=>setFilter(id)} aria-pressed={filter===id} style={edChip(filter===id)}>
+                    {label}<span style={{fontFamily:MONO,fontSize:11,color:C.textDim}}>{base.filter(f).length}</span>
+                  </button>
+                ))}
+              </div>
+              <label style={{display:"flex",alignItems:"center",gap:8,flex:"1 1 220px",maxWidth:narrow?"none":340,minHeight:38,
+                padding:"0 4px 0 12px",border:`1px solid ${C.border}`,borderRadius:6,background:C.surface,color:C.textDim}}>
+                <Icon name="search" size={15}/>
+                <span style={{position:"absolute",width:1,height:1,overflow:"hidden",clip:"rect(0 0 0 0)"}}>Search recommendations</span>
+                <input type="search" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search symbol, company or headline"
+                  style={{flex:1,minWidth:0,border:0,background:"transparent",color:C.text,fontSize:13.5,outline:"none",height:36}}/>
+                {query&&<button onClick={()=>setQuery("")} aria-label="Clear search"
+                  style={{width:32,height:32,display:"inline-grid",placeItems:"center",border:0,background:"transparent",color:C.textDim,cursor:"pointer",borderRadius:4}}><Icon name="close" size={14}/></button>}
+              </label>
+              <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.textDim}}>Source
+                <select value={source} onChange={e=>setSource(e.target.value)} style={edSelect}>
+                  <option value="all">All sources</option>
+                  <option value="pipeline">Daily pipeline</option>
+                  <option value="discovery">Discovery</option>
+                </select>
+              </label>
+              <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.textDim}}>Sort
+                <select value={sort} onChange={e=>setSort(e.target.value)} style={edSelect}>
+                  {RECS_SORTS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+                </select>
+              </label>
+            </div>
+          )}
+          {recs.length>0&&heldCount===0&&(portfolio||[]).length>0&&(
+            <p role="note" style={{margin:0,display:"flex",gap:8,alignItems:"center",fontSize:13,color:C.textDim}}>
+              <Icon name="info" style={{color:C.blue}}/>None of today's calls cover your holdings yet.
+            </p>
+          )}
+        </header>
+      )}
+
+      {loading&&(
+        <div aria-busy="true" style={{display:"flex",flexDirection:"column",gap:12,maxWidth:400}}>
+          {[0,1,2,3,4].map(i=><div key={i} style={{height:120,borderRadius:6,background:C.panel,animation:"pulse 1.4s ease-in-out infinite"}}/>)}
+        </div>
+      )}
+
+      {IS_LIVE&&apiLoaded&&recs.length===0&&(
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center",gap:10,padding:"48px 20px",border:`1px dashed ${C.borderHi}`,borderRadius:8,color:C.textDim}}>
+          <div style={{fontFamily:SERIF,fontSize:20,fontWeight:600,color:C.text}}>No recommendations yet</div>
+          <p style={{margin:0,maxWidth:460,fontSize:13.5,lineHeight:1.55}}>The pipeline publishes BUY / HOLD / SELL calls at 06:00 IST. If none appear by 06:30, check Governance → Data sources to see whether the run failed or every call was suppressed.</p>
+        </div>
+      )}
+
+      {recs.length>0&&(
+        <div style={{display:narrow?"block":"grid",gridTemplateColumns:"minmax(300px,400px) minmax(0,1fr)",gap:24,alignItems:"start"}}>
+          {showList&&(
+            <div aria-label="Recommendations" style={{display:"flex",flexDirection:"column",borderBottom:`1px solid ${C.borderHi}`}}>
+              {empty?(
+                <div style={{padding:"36px 16px",textAlign:"center",color:C.textDim,display:"flex",flexDirection:"column",gap:10,alignItems:"center",borderTop:`1px solid ${C.borderHi}`}}>
+                  <div style={{fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.text}}>{empty.t}</div>
+                  <p style={{margin:0,fontSize:13,lineHeight:1.5}}>{empty.p}</p>
+                  <button onClick={empty.a} style={edBtn()}>{empty.b}</button>
+                </div>
+              ):rows.map(r=>(
+                <RecCard key={r.id} rec={r} held={!!holdingOf(r)} selected={!!selected&&selected.id===r.id&&(!narrow||detailOpen)} onSelect={()=>pick(r)}/>
+              ))}
+            </div>
+          )}
+          {showDetail&&(
+            <div style={narrow?{}:{position:"sticky",top:0,maxHeight:"calc(100vh - 150px)",overflowY:"auto",
+              border:`1px solid ${C.borderHi}`,borderRadius:8,background:C.surface}}>
+              <RecDetail key={selected.id} r={selected} holding={holdingOf(selected)} narrow={narrow}
+                onBack={()=>setDetailOpen(false)}
+                onAsk={()=>onAsk(selected,holdingOf(selected))}
+                onAdd={()=>onAdd(selected)}
+                onGoPortfolio={onGoPortfolio}
+                valuationCache={valuationCache} setValuationCache={setValuationCache}/>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -3652,7 +3924,6 @@ export default function App(){
   const [discoveryRuns,     setDiscoveryRuns]     = useState([]);
   const [brokenSymbols,     setBrokenSymbols]     = useState([]);
   const [portfolioRecs,     setPortfolioRecs]     = useState(IS_LIVE ? [] : PORTFOLIO_RECOMMENDATIONS);
-  const [recsPortfolioFilter, setRecsPortfolioFilter] = useState(false); // DB-8: filter recs to held symbols only
   const [marketPulse,       setMarketPulse]       = useState(IS_LIVE ? [] : MARKET_PULSE);
   const [govAlerts,         setGovAlerts]         = useState(IS_LIVE ? [] : GOV_ALERTS);
   const [researchFeed,      setResearchFeed]      = useState(IS_LIVE ? [] : AI_RESEARCH_FEED);
@@ -4057,113 +4328,31 @@ export default function App(){
             )}
 
             {/* PORTFOLIO RECOMMENDATIONS */}
-            {tab==="recommendations"&&(()=>{
-              const heldSymbols=new Set((portfolio||[]).filter(h=>h.status==="holding").map(h=>h.symbol));
-              const filteredRecs=recsPortfolioFilter&&heldSymbols.size>0
-                ?portfolioRecs.filter(r=>heldSymbols.has(r.symbol))
-                :portfolioRecs;
-              return(
-              <div style={{animation:"fadeUp .3s ease"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
-                  <div>
-                    <h1 style={{fontFamily:SERIF,fontSize:28,fontWeight:600,color:C.text,letterSpacing:-.3,lineHeight:1.2,margin:0}}>Stock Recommendations</h1>
-                    <div style={{fontSize:11,color:C.muted,marginTop:1}}>Agent signals for NSE stocks · Updated daily at 06:00 IST</div>
-                  </div>
-                  {heldSymbols.size>0&&(
-                    <div style={{display:"flex",alignItems:"center",gap:6,background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:"5px 10px"}}>
-                      <span style={{fontSize:11,color:C.muted}}>Filter:</span>
-                      <button
-                        onClick={()=>setRecsPortfolioFilter(false)}
-                        style={{background:!recsPortfolioFilter?C.accent+"22":"none",border:`1px solid ${!recsPortfolioFilter?C.accent+"66":"transparent"}`,borderRadius:4,padding:"2px 8px",color:!recsPortfolioFilter?C.accent:C.muted,fontSize:11,cursor:"pointer",fontWeight:!recsPortfolioFilter?700:400}}
-                      >All</button>
-                      <button
-                        onClick={()=>setRecsPortfolioFilter(true)}
-                        style={{background:recsPortfolioFilter?C.teal+"22":"none",border:`1px solid ${recsPortfolioFilter?C.teal+"66":"transparent"}`,borderRadius:4,padding:"2px 8px",color:recsPortfolioFilter?C.teal:C.muted,fontSize:11,cursor:"pointer",fontWeight:recsPortfolioFilter?700:400}}
-                      >📌 My Holdings</button>
-                    </div>
-                  )}
-                </div>
-                {IS_LIVE && apiLoaded && portfolioRecs.length===0 && (
-                  <EmptyState icon="🎯" title="No recommendations yet"
-                    sub="The orchestrator generates BUY/HOLD/SELL signals daily at 06:00 IST for a rotating set of NSE symbols. If no recs appear, check the Governance tab → Data Source Health to confirm the pipeline ran successfully today." />
-                )}
-                {recsPortfolioFilter&&heldSymbols.size>0&&filteredRecs.length===0&&portfolioRecs.length>0&&(
-                  <EmptyState icon="📌" title="No recommendations for your holdings yet"
-                    sub={`The screener cycles through ~200 stocks/day from the NSE universe. Signals for your ${heldSymbols.size} held stocks will appear once the screener reaches them (typically within 1–9 days). Switch to "All" to see all available recommendations.`} />
-                )}
-                {filteredRecs.length>0&&<div style={{display:"grid",gridTemplateColumns:"300px 1fr",gap:14}}>
-                  <div>
-                    {filteredRecs.map(r=>{
-                      const ac=r.action==="BUY"?C.green:r.action==="SELL"?C.red:C.accent;
-                      const inPort=portfolio.some(h=>h.symbol===r.symbol&&h.status==="holding");
-                      return(
-                        <div key={r.id} onClick={()=>setSelRecId(r.id)} style={{background:selRecId===r.id?C.panel:C.surface,border:`1px solid ${selRecId===r.id?C.accent+"55":C.border}`,borderRadius:8,padding:11,cursor:"pointer",marginBottom:7}}>
-                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:7}}>
-                            <div style={{flex:1}}>
-                              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
-                                <span style={{fontSize:13,fontWeight:700,color:C.text,fontFamily:MONO}}>{r.symbol}</span>
-                                <Tag color={ac}>{r.action}</Tag>
-                                {inPort&&<Tag color={C.teal} small>📌 held</Tag>}
-                                <span style={{fontSize:11,color:C.muted}}>conf <b style={{color:C.accent}}>{r.confidence}%</b></span>
-                                {r.suggestedPositionPct!=null&&r.suggestedPositionPct>0&&(
-                                  <span style={{background:C.green+"18",color:C.green,border:`1px solid ${C.green}44`,borderRadius:3,padding:"1px 5px",fontSize:11,fontWeight:700}}>
-                                    📐 {r.suggestedPositionPct}%
-                                  </span>
-                                )}
-                              </div>
-                              <div style={{fontSize:11,color:C.textDim}}>{r.headline}</div>
-                              <div style={{fontSize:10.5,color:C.muted,marginTop:1}}>Till {r.validTill} · {r.horizon}{r.positionLabel?` · ${r.positionLabel}`:""}</div>
-                            </div>
-                            <RiskGauge score={r.riskScore}/>
-                          </div>
-                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:4,marginBottom:6}}>
-                            {[["Entry",r.entry,C.text],["Target",r.target,C.green],["Stop",r.stoploss,C.red]].map(([l,v,col])=>(
-                              <div key={l} style={{background:C.bg,borderRadius:3,padding:"3px 6px"}}>
-                                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase"}}>{l}</div>
-                                <div style={{fontSize:11,fontWeight:700,color:col,fontFamily:MONO}}>{v}</div>
-                              </div>
-                            ))}
-                          </div>
-                          <Bar pct={r.confidence} color={ac}/>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  {portfolioRecs.find(r=>r.id===selRecId)&&(
-                    <div style={{animation:"fadeUp .2s ease"}}>
-                      {(()=>{const r=portfolioRecs.find(x=>x.id===selRecId);const icons={technical:"📊",fundamental:"🏭",sentiment:"📰",institutional:"🏛",macro:"🌍",historical:"📜"};const sc=s=>({BUY:C.green,SELL:C.red,NEUTRAL:C.muted,POSITIVE:C.green,"VERY POSITIVE":C.green,HOLD:C.accent}[s]||C.muted);return(<>
-                        <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:2}}>{r.symbol} — Full Analysis</div>
-                        <div style={{fontSize:12,color:C.textDim,lineHeight:1.55,marginBottom:11}}>{r.summary}</div>
-                        <div style={{fontSize:11,fontWeight:700,color:C.accent,marginBottom:7,textTransform:"uppercase",letterSpacing:1}}>Agent Breakdown</div>
-                        <div style={{display:"flex",flexDirection:"column",gap:5}}>
-                          {Object.entries(r.agents).map(([k,a])=>(
-                            <div key={k} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:5,padding:8}}>
-                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
-                                <span style={{fontSize:11,fontWeight:600,color:C.text}}>{icons[k]} {k.charAt(0).toUpperCase()+k.slice(1)}</span>
-                                <div style={{display:"flex",gap:4,alignItems:"center"}}><Tag color={sc(a.signal)} small>{a.signal}</Tag><span style={{fontSize:10.5,color:C.muted,fontFamily:MONO}}>{a.score}</span></div>
-                              </div>
-                              <div style={{fontSize:11,color:C.textDim,lineHeight:1.5,marginBottom:3}}>{a.detail}</div>
-                              <Bar pct={a.score}/>
-                            </div>
-                          ))}
-                        </div>
-                        <WarrenBotPanel wb={r.warrenBot}/>
-                        <ValuationScenariosPanel
-                          val={valuationCache[r.symbol]}
-                          symbol={r.symbol}
-                          onFetch={()=>{
-                            apiFetch(`/api/valuation/${encodeURIComponent(r.symbol)}`)
-                              .then(d=>{if(d&&!d.error)setValuationCache(prev=>({...prev,[r.symbol]:d}));})
-                              .catch(()=>{});
-                          }}
-                        />
-                      </>);})()}
-                    </div>
-                  )}
-                </div>}{/* closes filteredRecs.length>0 wrapper */}
-              </div>
-              );
-            })()}
+            {tab==="recommendations"&&(
+              <RecsTab
+                recs={portfolioRecs}
+                portfolio={portfolio}
+                apiLoaded={apiLoaded}
+                selRecId={selRecId}
+                setSelRecId={setSelRecId}
+                valuationCache={valuationCache}
+                setValuationCache={setValuationCache}
+                onAsk={(r,holding)=>{
+                  if(holding){ openARIA("holding",holding); return; }
+                  if(r.isDiscovery&&(discoveryUniverse||[]).some(s=>s.id===r.id)){
+                    setAriaContext({type:"discovery",id:r.id}); setSelDiscoveryId(r.id); setAriaOpen(true); return;
+                  }
+                  setAriaContext(null); setAriaOpen(true);
+                }}
+                onAdd={(r)=>{
+                  if(r.isDiscovery&&(discoveryUniverse||[]).some(s=>s.id===r.id)){
+                    setAriaContext({type:"discovery",id:r.id}); setSelDiscoveryId(r.id);
+                  } else setAriaContext(null);
+                  setAriaOpen(true);
+                }}
+                onGoPortfolio={()=>setTab("portfolio")}
+              />
+            )}
 
             {tab==="portfolio"&&<PortfolioTab
               portfolio={portfolio}
