@@ -23,7 +23,8 @@ export default function LongHorizonPanel({ C, apiFetch, isLive }) {
   }, [apiFetch, isLive]);
 
   const box = { border: `1px solid ${C.border}`, borderRadius: 8, marginTop: 14, overflow: "hidden" };
-  const head = { display: "flex", alignItems: "center", gap: 8, padding: "10px 13px", cursor: "pointer", background: C.surface };
+  const head = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "12px 14px", cursor: "pointer", background: C.surface,
+    width: "100%", border: 0, textAlign: "left", font: "inherit", color: C.text, minHeight: 48 };
 
   const rec = data?.track_record;
   const sum = data?.summary;
@@ -34,21 +35,22 @@ export default function LongHorizonPanel({ C, apiFetch, isLive }) {
 
   return (
     <div style={box}>
-      <div style={head} onClick={() => setOpen((o) => !o)}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.text }}>🌱 Long-Horizon Track</span>
-        <span style={{ fontSize: 10.5, color: C.muted }}>quality compounders · 1–3 yr holds · separate paper book</span>
+      <button type="button" style={head} onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span style={{ fontFamily: "'Source Serif 4',Georgia,serif", fontSize: 18, fontWeight: 600, color: C.text }}>Long-horizon track</span>
+        <span style={{ fontSize: 12, color: C.textDim || C.muted }}>quality compounders · 1–3 year holds · separate paper book</span>
         {sum && (
           <span style={{ marginLeft: "auto", fontSize: 11, fontFamily: MONO, color: (sum.total_pnl_pct || 0) >= 0 ? C.green : C.red }}>
             {pct(sum.total_pnl_pct)} total · best {sum.best_multiple || 0}×
           </span>
         )}
-        <span style={{ fontSize: 11, color: C.muted, marginLeft: sum ? 8 : "auto" }}>{open ? "▾" : "▸"}</span>
-      </div>
+        <span aria-hidden="true" style={{ fontSize: 11, color: C.muted, marginLeft: sum ? 8 : "auto" }}>{open ? "▾" : "▸"}</span>
+      </button>
 
       {open && (
         <div style={{ padding: "10px 13px" }}>
           {!isLive && <div style={{ fontSize: 11, color: C.muted }}>Connect the backend to see the long-horizon track.</div>}
-          {err && <div style={{ fontSize: 11, color: C.red }}>Could not load: {err}</div>}
+          {isLive && !data && !err && <div style={{ fontSize: 13, color: C.textDim || C.muted }}>Loading the long-horizon track…</div>}
+          {err && <div style={{ fontSize: 13, color: C.red }}>Could not load: {err}</div>}
           {data?.migration_needed && (
             <div style={{ fontSize: 11, color: C.orange || C.accent }}>
               Database tables not created yet — run <code>{data.migration}</code> in the Supabase SQL editor.

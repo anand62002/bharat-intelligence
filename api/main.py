@@ -41,7 +41,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 import yfinance as yf
 from dotenv import load_dotenv

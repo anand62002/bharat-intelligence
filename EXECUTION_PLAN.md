@@ -1,6 +1,6 @@
 # Bharat Intelligence — Investment-Grade Execution Plan
 ### Target: 6.0 → 8.8 / 10 System Robustness
-*Last updated: 2026-11-10*
+*Last updated: 2026-11-15*
 
 > **Standing rules (apply after every build):**
 > 1. Update `CLAUDE.md` — new files, tables, endpoints, env vars, resolved issues
@@ -107,6 +107,20 @@
 | P8-A | **ATR-14 Volatility Stoploss** — `agents/technical.py` computes `atr_14/atr_stoploss/atr_stoploss_pct`; synthesis prompt enforces 2×ATR floor via `{atr_stoploss}` placeholder; orchestrator injects from technical result. Replaces arbitrary 15% flat stoploss. 6 tests added. | ✅ DONE | 2026-07-22 |
 | P8-B | **ARIA On-Demand Analyse Command** — `POST /api/analyse` endpoint runs full 10-agent pipeline (dry_run=True, 180s timeout) for any symbol on demand. ARIA detects "analyse SYMBOL" intent → confirmation flow → `<run_analyse>` tag → dashboard calls endpoint + shows result inline. 10 tests added. | ✅ DONE | 2026-07-22 |
 | OPS-3 | **Weekly Health Audit** — `scripts/weekly_audit.py` with 9 checks (kappa, daily_runs, alpha_live, trendlyne, discovery, RAG, agent_performance, forward_poller, outcome_seeder). Sunday 07:45 IST worker job (`job_weekly_audit()`). 14 tests added. Exit code 1 on FAIL. | ✅ DONE | 2026-07-22 |
+
+### Session 2026-11-15 — Dashboard redesign (Editorial Research)
+| ID | Item | Status | Date |
+|---|---|---|---|
+| UX-1 | **Design direction** — Claude Design canvas with three working prototypes (Terminal Pro / Modern Fintech / Editorial Research) across Discovery, Recs, Portfolio, Market, desktop + phone. Editorial Research chosen. | ✅ DONE | 2026-11-11 |
+| UX-2 | **Design system** — light paper palette, Source Serif 4 / Inter / JetBrains Mono, line icons instead of emoji, readable type scale (was 7–9px), shared primitives in `App.jsx`. | ✅ DONE | 2026-11-11 |
+| UX-3 | **Discovery rebuilt** — list + sticky detail, status/sector filters, search, sort, paging, levels bar, agent signals with reasons, loading/empty/no-match states. | ✅ DONE | 2026-11-15 |
+| UX-4 | **Portfolio Recs rebuilt** — My holdings filter fixed (never matched before), source filter, summary warnings as notes, upside only with a target. | ✅ DONE | 2026-11-15 |
+| UX-5 | **Portfolio rebuilt** — real Add-holding form (averages into held positions), Needs-attention area, sortable table with expandable rows, below-stop wording fix, sector allocation. | ✅ DONE | 2026-11-15 |
+| UX-6 | **Market rebuilt** — price tiles, regime strip, Morning/Closing brief with weekend fallback, news topics with loading/error states. Backend: `/api/market/digest` 500 on any parameter fixed (`Optional` import). | ✅ DONE | 2026-11-15 |
+| UX-7 | **Phone layout** — bottom tab bar + More sheet, ticker row, full-screen ARIA; every tab and expanded panel verified at 375px and 320px with no clipping. | ✅ DONE | 2026-11-15 |
+| UX-8 | **Editorial pass on Performance / Gov Research / Governance** — restyled atoms, serif headings, wrapping grids, scrollable tables, keyboard-operable collapsible headers. | ✅ DONE | 2026-11-15 |
+| UX-9 | **Follow-up:** `/api/portfolio` should return each holding's `yfSymbol` so the dashboard can drop its copy of the brand-name aliases (`HOLDING_TICKER_ALIASES`). | ⬜ PENDING | — |
+| UX-10 | **Follow-up:** deeper rebuild of Performance / Gov Research / Governance (currently restyled, not redesigned); price-history sparklines on Market need an API that returns intraday/daily series. | ⬜ PENDING | — |
 
 ### Session 2026-11-10 (part 2) — Discovery freshness, calibrated confidence, scroll
 | ID | Item | Status | Date |
