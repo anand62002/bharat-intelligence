@@ -85,6 +85,54 @@ def _entry_price(rec: dict) -> float | None:
     return None
 
 
+# ─── Score + gate extraction (WP-004) ─────────────────────────────────────────
+
+def _as_float(v) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f   # NaN -> None
+
+
+def outcome_scores(rec: dict) -> tuple[float | None, float | None]:
+    """
+    (composite_score, validation_kappa) to store on a recommendation_outcomes row.
+
+    composite_score — the score the decision was made on:
+      • discovery: metadata.call_signal_score (frozen at insert), else
+        metadata.signal_score (may have been refreshed by a later re-check)
+      • portfolio pipeline: rec["composite_score"] (in-memory) or
+        metadata.composite_score (persisted by save_recs_node)
+      • legacy fallback: gov_check.validation.composite_score / weighted_score
+    validation_kappa — gov_check.validation.aggregate_kappa (judge panel), when present.
+
+    Every seeding path (orchestrator save, daily seeder, backfill) uses this so
+    the fields are filled the same way. Without them neither the score nor the
+    gate can be tested against outcomes (ADR-002, ADR-006).
+    """
+    meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
+    gov = rec.get("gov_check") if isinstance(rec.get("gov_check"), dict) else {}
+    val = gov.get("validation") if isinstance(gov.get("validation"), dict) else {}
+
+    score = None
+    if rec.get("is_discovery"):
+        for key in ("call_signal_score", "signal_score"):
+            if meta.get(key) is not None:
+                score = meta[key]
+                break
+    else:
+        score = rec.get("composite_score")
+        if score is None:
+            score = meta.get("composite_score")
+    if score is None:
+        score = val.get("composite_score")
+        if score is None:
+            score = val.get("weighted_score")
+
+    return _as_float(score), _as_float(val.get("aggregate_kappa"))
+
+
 # ─── Main seeder ──────────────────────────────────────────────────────────────
 
 def run_seeder(dry_run: bool = True, resolve_past: bool = False) -> dict:
@@ -113,7 +161,7 @@ def run_seeder(dry_run: bool = True, resolve_past: bool = False) -> dict:
         recs = (
             client.table("recommendations")
             .select("id,symbol,action,entry_low,entry_high,confidence,"
-                    "created_at,agent_signals,gov_check,metadata,upside_pct")
+                    "created_at,agent_signals,gov_check,metadata,upside_pct,is_discovery")
             .order("created_at", desc=False)
             .execute()
             .data or []
@@ -171,23 +219,13 @@ def run_seeder(dry_run: bool = True, resolve_past: bool = False) -> dict:
 
         entry_px = _entry_price(rec)
 
-        # Extract composite_score from gov_check
-        gov = rec.get("gov_check") or {}
-        composite_score = None
-        if isinstance(gov, dict):
-            val = gov.get("validation") or {}
-            composite_score = val.get("composite_score") or val.get("weighted_score")
-
-        # Extract validation_kappa
-        val_kappa = None
-        if isinstance(gov, dict):
-            val_kappa = (gov.get("validation") or {}).get("aggregate_kappa")
+        composite_score, val_kappa = outcome_scores(rec)
 
         if dry_run:
             log.info(
-                "[DRY RUN] Would seed: %s %s rec_date=%s entry=%.2f",
+                "[DRY RUN] Would seed: %s %s rec_date=%s entry=%.2f score=%s kappa=%s",
                 symbol, action, rec_date,
-                entry_px or 0,
+                entry_px or 0, composite_score, val_kappa,
             )
             seeded += 1
             continue

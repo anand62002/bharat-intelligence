@@ -272,3 +272,136 @@ class TestRunSeederLive:
             result = run_seeder(dry_run=False)
         assert result["skipped"] == 1
         assert mock_seed.call_count == 0
+
+
+# ─── WP-004: composite_score + validation_kappa on every seeding path ────────
+
+from agents.rec_outcome_seeder import outcome_scores  # noqa: E402
+
+_DISCOVERY_REC = {
+    "id": "disc-1", "symbol": "GRASIM", "action": "BUY", "is_discovery": True,
+    "entry_low": 100.0, "entry_high": 102.0, "created_at": "2026-11-10T05:00:00+00:00",
+    "metadata": {"signal_score": 81.0, "price": 101.0},
+    "gov_check": {"flags": [], "passed": True, "note": "discovery_auto"},
+}
+_PORTFOLIO_REC = {
+    "id": "port-1", "symbol": "TITAN", "action": "HOLD", "is_discovery": False,
+    "entry_low": 3000.0, "entry_high": 3050.0, "created_at": "2026-11-14T00:48:00+00:00",
+    "metadata": {"composite_score": 63.4, "data_quality": "FULL"},
+    "gov_check": {"claims_checked": 6, "validation": {"aggregate_kappa": 0.519, "status": "QUALIFIED"}},
+}
+
+
+class TestOutcomeScores:
+    def test_discovery_prefers_frozen_call_score(self):
+        rec = {"is_discovery": True, "metadata": {"call_signal_score": 77.0, "signal_score": 90.0}}
+        assert outcome_scores(rec) == (77.0, None)
+
+    def test_discovery_falls_back_to_signal_score(self):
+        assert outcome_scores(_DISCOVERY_REC) == (81.0, None)
+
+    def test_portfolio_reads_persisted_composite_and_kappa(self):
+        assert outcome_scores(_PORTFOLIO_REC) == (63.4, 0.519)
+
+    def test_portfolio_in_memory_composite_wins(self):
+        rec = {**_PORTFOLIO_REC, "composite_score": 70.0}
+        assert outcome_scores(rec)[0] == 70.0
+
+    def test_zero_score_is_kept_not_treated_as_missing(self):
+        rec = {"is_discovery": False, "composite_score": 0.0}
+        assert outcome_scores(rec) == (0.0, None)
+
+    def test_legacy_validation_composite_fallback(self):
+        rec = {"is_discovery": False, "gov_check": {"validation": {"composite_score": 78.5}}}
+        assert outcome_scores(rec)[0] == 78.5
+
+    def test_garbage_is_none(self):
+        assert outcome_scores({"metadata": "x", "gov_check": None}) == (None, None)
+        assert outcome_scores({"is_discovery": True, "metadata": {"signal_score": "nan"}}) == (None, None)
+
+
+class TestSeederFillsBothFields:
+    @pytest.mark.parametrize("rec,score,kappa", [
+        (_DISCOVERY_REC, 81.0, None),
+        (_PORTFOLIO_REC, 63.4, 0.519),
+    ])
+    def test_seeder_passes_score_and_kappa(self, rec, score, kappa):
+        with (
+            patch("agents.rec_outcome_seeder._supabase") as mock_sb,
+            patch("agents.outcome_tracker.seed_pending_outcome", return_value=True) as mock_seed,
+        ):
+            mock_sb.return_value = _make_mock_client([rec], existing_outcome_ids=[])
+            run_seeder(dry_run=False)
+        kw = mock_seed.call_args.kwargs
+        assert kw["composite_score"] == score
+        assert kw["validation_kappa"] == kappa
+
+    def test_seeder_selects_is_discovery(self):
+        rec_table = MagicMock()
+        rec_table.select.return_value.order.return_value.execute.return_value.data = []
+        client = MagicMock()
+        client.table.side_effect = lambda name: rec_table
+        with patch("agents.rec_outcome_seeder._supabase", return_value=client):
+            run_seeder(dry_run=True)
+        cols = rec_table.select.call_args_list[0].args[0]
+        assert "is_discovery" in cols
+
+
+class TestOrchestratorSeedPath:
+    """save_recs_node seeds the outcome row with the same fields, and a failure is loud."""
+
+    def _state(self):
+        rec = {
+            "symbol": "TITAN.NS", "action": "HOLD", "confidence": 60.0, "risk_score": 40.0,
+            "entry_low": 3000.0, "entry_high": 3050.0, "horizon_days": 90,
+            "upside_pct": 10.0, "upside_confidence": 60.0, "danger_drop_pct": 15.0,
+            "danger_confidence": 50.0, "headline": "h", "summary": "s",
+            "agent_signals": {"technical": {"signal": "BUY", "score": 60}},
+            "is_discovery": False, "composite_score": 63.4,
+            "gov_check": {"claims_checked": 6, "validation": {"aggregate_kappa": 0.519}},
+        }
+        return {"recommendations": [rec], "errors": [], "dry_run": False, "symbol_results": {}}
+
+    def _client(self):
+        client = MagicMock()
+        client.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{"id": "r1"}])
+        return client
+
+    def test_seed_gets_score_and_kappa_and_metadata_persists_composite(self):
+        import asyncio
+        from scheduler import orchestrator as orch
+        client = self._client()
+        with (
+            patch.object(orch, "_supabase", return_value=client),
+            patch("agents.outcome_tracker.seed_pending_outcome", return_value=True) as mock_seed,
+        ):
+            out = asyncio.run(orch.save_recs_node(self._state()))
+        kw = mock_seed.call_args.kwargs
+        assert (kw["composite_score"], kw["validation_kappa"]) == (63.4, 0.519)
+        inserted = client.table.return_value.insert.call_args_list[0].args[0]
+        assert inserted["metadata"]["composite_score"] == 63.4
+        assert not [e for e in out["errors"] if "outcome_seed" in e]
+
+    def test_seed_exception_logged_at_warning_and_recorded(self, caplog):
+        import asyncio
+        import logging
+        from scheduler import orchestrator as orch
+        with (
+            patch.object(orch, "_supabase", return_value=self._client()),
+            patch("agents.outcome_tracker.seed_pending_outcome", side_effect=RuntimeError("boom")),
+            caplog.at_level(logging.WARNING),
+        ):
+            out = asyncio.run(orch.save_recs_node(self._state()))
+        assert any(r.levelno == logging.WARNING and "outcome seed failed" in r.getMessage()
+                   for r in caplog.records)
+        assert any("outcome_seed TITAN.NS: boom" in e for e in out["errors"])
+
+    def test_seed_returning_false_is_recorded(self):
+        import asyncio
+        from scheduler import orchestrator as orch
+        with (
+            patch.object(orch, "_supabase", return_value=self._client()),
+            patch("agents.outcome_tracker.seed_pending_outcome", return_value=False),
+        ):
+            out = asyncio.run(orch.save_recs_node(self._state()))
+        assert any("outcome_seed TITAN.NS" in e for e in out["errors"])

@@ -574,6 +574,21 @@ def _verify_claim(
 # Governance rules application
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _keep_validation(rec: dict, new_gov: dict) -> dict:
+    """
+    Carry the judge panel's result (gov_check["validation"], written by
+    synthesise_node) into the fact-check gov_check that replaces it.
+
+    Without this every published rec lost its aggregate_kappa before it was
+    saved, so validation_kappa could never be copied onto its outcome row and
+    the judge gate could not be tested against results (WP-004).
+    """
+    old = rec.get("gov_check")
+    if isinstance(old, dict) and "validation" in old and "validation" not in new_gov:
+        new_gov = {**new_gov, "validation": old["validation"]}
+    return new_gov
+
+
 def _apply_governance_rules(claims: list[Claim], rec: dict) -> dict:
     """
     Evaluate verified claims against governance rules. Returns a gov_check dict
@@ -771,13 +786,13 @@ def _check_one(
 
     if len(claims) < MIN_CLAIMS_FOR_CHECK:
         log.info("[%s] Only %d claims extracted — skipping fact check", symbol, len(claims))
-        rec["gov_check"] = {
+        rec["gov_check"] = _keep_validation(rec, {
             "checked_at":  datetime.now(timezone.utc).isoformat(),
             "claims_checked": len(claims),
             "skipped_reason": f"Insufficient claims ({len(claims)} < {MIN_CLAIMS_FOR_CHECK})",
             "withheld": False,
             "flags": [],
-        }
+        })
         return rec, {}
 
     # ── P4-C: Deterministic numerical grounding pass (pre-LLM) ───────────────
@@ -794,7 +809,7 @@ def _check_one(
         log.debug("[%s] %s → %s", symbol, claim.claim_text[:60], claim.status)
 
     gov_check, confidence_delta, withheld = _apply_governance_rules(claims, rec)
-    rec["gov_check"] = gov_check
+    rec["gov_check"] = _keep_validation(rec, gov_check)
 
     # Apply confidence adjustment (floor at 5, cap at 100)
     if confidence_delta != 0:
@@ -888,12 +903,12 @@ def check_recommendations(
                 run_agent_counts[agent]["contradicted"] += cnts["contradicted"]
         except Exception as exc:
             log.error("[%s] fact check failed: %s", symbol, exc)
-            rec["gov_check"] = {
+            rec["gov_check"] = _keep_validation(rec, {
                 "checked_at": datetime.now(timezone.utc).isoformat(),
                 "error": str(exc),
                 "withheld": False,
                 "flags": [],
-            }
+            })
 
     # Update agent_performance with hallucination rates
     _update_hallucination_rates(run_agent_counts, client, dry_run)
