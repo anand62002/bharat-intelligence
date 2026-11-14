@@ -3205,159 +3205,236 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
 
 
 // ─── MARKET DIGEST PANEL (P6-C) ───────────────────────────────────────────────
-function MarketDigestPanel({ digestData, apiLoaded }) {
-  const [openType, setOpenType] = useState(null);
+// ─── MARKET ───────────────────────────────────────────────────────────────────
+const MOOD_TONE={BULLISH:"buy",BEARISH:"sell",VOLATILE:"warn",MIXED:"hold",NEUTRAL:"mute"};
+const IMPACT_TONE={POSITIVE:"buy",NEGATIVE:"sell",WATCH:"warn",NEUTRAL:"mute"};
+const REGIME_LABEL={BULL:"Bull market",BEAR:"Bear market",SIDEWAYS:"Range-bound",HIGH_VOLATILITY:"High volatility"};
+const REGIME_TONE={BULL:"buy",BEAR:"sell",SIDEWAYS:"hold",HIGH_VOLATILITY:"warn"};
+const NEWS_TOPICS=["NIFTY","SENSEX","FII","RBI","BUDGET"];
+const prettyState=v=>v?String(v).replace(/_/g," ").toLowerCase().replace(/^\w/,c=>c.toUpperCase()):"—";
+const isoDaysAgo=n=>{const d=new Date();d.setDate(d.getDate()-n);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;};
 
-  const digests = digestData?.digests || [];
-  const morning = digests.find(d => d.digestType === 'MORNING');
-  const closing = digests.find(d => d.digestType === 'CLOSING');
+function MarketTab({pulse,regime,digestData,apiLoaded,news,newsTopic,onNewsTopic,onWhatRan,onAskAria}){
+  const narrow=useNarrow(760);
+  const [kind,setKind]=useState(null);              // MORNING | CLOSING
+  const [fallback,setFallback]=useState(null);      // {date,digests} when today has none
+  const [fallbackState,setFallbackState]=useState("idle"); // idle|loading|done|none
+  const [newsState,setNewsState]=useState("idle");  // idle|loading|error
+  const [newsLimit,setNewsLimit]=useState(8);
+  const [showAllEvents,setShowAllEvents]=useState(false);
 
-  const MOOD_COLOR = {
-    BULLISH:  C.green,
-    BEARISH:  C.red,
-    VOLATILE: C.orange,
-    MIXED:    C.accent,
-    NEUTRAL:  C.muted,
+  const todays=digestData?.digests||[];
+  // Weekends and holidays have no brief: walk back up to a week for the latest one.
+  // A ref (not state) guards the one-off search, so flipping the status to
+  // "loading" doesn't re-run the effect and cancel the search it just started.
+  const fallbackStarted=useRef(false);
+  const mounted=useRef(true);
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
+  useEffect(()=>{
+    if(!IS_LIVE||!apiLoaded||!digestData||todays.length>0||fallbackStarted.current) return;
+    fallbackStarted.current=true;
+    setFallbackState("loading");
+    (async()=>{
+      for(let i=1;i<=7;i++){
+        const d=isoDaysAgo(i);
+        try{
+          const r=await apiFetch(`/api/market/digest?digest_date=${d}`);
+          if(r?.digests?.length){ if(mounted.current){setFallback({date:d,digests:r.digests});setFallbackState("done");} return; }
+        }catch(e){ break; }
+      }
+      if(mounted.current) setFallbackState("none");
+    })();
+  },[apiLoaded,digestData,todays.length]);
+
+  const digests=todays.length?todays:(fallback?.digests||[]);
+  const fromDate=todays.length?null:fallback?.date;
+  const byType=t=>digests.find(d=>d.digestType===t);
+  const active=kind||(byType("CLOSING")?"CLOSING":"MORNING");
+  const dg=byType(active);
+  const events=dg?.keyEvents||[];
+  const shownEvents=showAllEvents?events:events.slice(0,5);
+
+  const pickTopic=t=>{
+    if(t===newsTopic) return;
+    setNewsState("loading"); setNewsLimit(8);
+    Promise.resolve(onNewsTopic(t)).then(ok=>setNewsState(ok===false?"error":"idle")).catch(()=>setNewsState("error"));
   };
-  const IMPACT_COLOR = {
-    POSITIVE: C.green,
-    NEGATIVE: C.red,
-    WATCH:    C.orange,
-    NEUTRAL:  C.muted,
-  };
+  const shownNews=(news||[]).slice(0,newsLimit);
+  const loadingPulse=IS_LIVE&&!apiLoaded&&(pulse||[]).length===0;
 
-  if (!apiLoaded) return (
-    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:14}}>
-      <div style={{fontSize:12.5,fontWeight:700,color:C.text,marginBottom:8}}>📋 Market Brief</div>
-      <div style={{fontSize:12,color:C.muted}}>Loading digest…</div>
-    </div>
-  );
-
-  if (digests.length === 0) return (
-    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:14}}>
-      <div style={{fontSize:12.5,fontWeight:700,color:C.text,marginBottom:6}}>📋 Market Brief</div>
-      <div style={{fontSize:12,color:C.muted}}>
-        No digest yet today. Generated daily at 08:45 IST (Morning) and 16:20 IST (Closing).
-      </div>
-    </div>
-  );
-
-  function DigestCard({ digest, type }) {
-    if (!digest) return (
-      <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:12,flex:1}}>
-        <div style={{fontSize:12,color:C.muted}}>
-          {type === 'MORNING' ? '🌅 Morning Brief' : '🌆 Closing Digest'} not yet available today.
+  return(
+    <div style={{animation:"fadeUp .3s ease",maxWidth:1440,margin:"0 auto",display:"flex",flexDirection:"column",gap:22}}>
+      <header style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",gap:12,flexWrap:"wrap"}}>
+        <div>
+          <h1 style={{fontFamily:SERIF,fontSize:narrow?26:32,fontWeight:600,margin:0,letterSpacing:-.3,lineHeight:1.15}}>Market</h1>
+          <p style={{margin:"4px 0 0",fontSize:14,color:C.textDim}}>Indices, commodities and flows · prices refresh every 60 seconds</p>
         </div>
-      </div>
-    );
-    const isOpen = openType === type;
-    const mood = digest.marketMood || 'NEUTRAL';
-    const moodColor = MOOD_COLOR[mood] || C.muted;
-    return (
-      <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:7,padding:12,flex:1,minWidth:0}}>
-        {/* Header */}
-        <div
-          onClick={() => setOpenType(isOpen ? null : type)}
-          style={{cursor:'pointer',display:'flex',alignItems:'center',gap:8,marginBottom: isOpen ? 10 : 0}}
-        >
-          <span style={{fontSize:14}}>{type === 'MORNING' ? '🌅' : '🌆'}</span>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:12,fontWeight:700,color:'white'}}>
-              {type === 'MORNING' ? 'Morning Brief' : 'Closing Digest'}
-            </div>
-            <div style={{fontSize:10.5,color:C.muted}}>{digest.digestDate} · {digest.headlineCount} headlines</div>
+        {IS_LIVE&&<button onClick={onWhatRan} style={edBtn()}><Icon name="run"/>What ran today?</button>}
+      </header>
+
+      <section aria-label="Prices">
+        {loadingPulse?(
+          <div aria-busy="true" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+            {[0,1,2,3,4,5,6,7].map(i=><div key={i} style={{height:92,borderRadius:8,background:C.panel,animation:"pulse 1.4s ease-in-out infinite"}}/>)}
           </div>
-          <span style={{
-            fontSize:10.5,fontWeight:700,padding:'2px 7px',borderRadius:4,
-            background:moodColor+'22',color:moodColor,border:`1px solid ${moodColor}44`,
-          }}>{mood}</span>
-          <span style={{fontSize:11,color:C.muted,marginLeft:4}}>{isOpen ? '▲' : '▼'}</span>
-        </div>
-
-        {/* Collapsed preview */}
-        {!isOpen && digest.niftySignal && (
-          <div style={{fontSize:11,color:C.muted,marginTop:4,fontStyle:'italic',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-            {digest.niftySignal}
+        ):(pulse||[]).length===0?(
+          <p style={{margin:0,fontSize:13.5,color:C.textDim}}>Prices aren't available right now. They need a live backend connection.</p>
+        ):(
+          <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill,minmax(${narrow?140:170}px,1fr))`,gap:12}}>
+            {pulse.map(m=>{
+              const flat=!m.change||/^[+-]?0(\.0+)?%$/.test(m.change)||/flat|unch/i.test(m.change);
+              const col=flat?C.textDim:m.up?C.green:C.red;
+              return(
+                <div key={m.key} style={{...edBox,padding:"14px 16px",minWidth:0}}>
+                  <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:".06em",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{m.key}</div>
+                  <div style={{fontFamily:MONO,fontSize:narrow?18:21,fontWeight:600,marginTop:4,whiteSpace:"nowrap"}}>{m.value}</div>
+                  <div style={{fontFamily:MONO,fontSize:12.5,marginTop:2,color:col}}>{flat?"■":m.up?"▲":"▼"} {m.change||"—"}</div>
+                </div>
+              );
+            })}
           </div>
         )}
+      </section>
 
-        {/* Expanded content */}
-        {isOpen && (
-          <div style={{animation:'fadeUp .2s ease'}}>
-            {/* Summary */}
-            {digest.summary && (
-              <div style={{fontSize:12,color:'#ccc',lineHeight:1.6,marginBottom:10,whiteSpace:'pre-line'}}>
-                {digest.summary}
-              </div>
-            )}
-            {/* Key Events */}
-            {(digest.keyEvents||[]).length > 0 && (
-              <div style={{marginBottom:10}}>
-                <div style={{fontSize:11,fontWeight:700,color:C.muted,marginBottom:5,textTransform:'uppercase'}}>Key Events</div>
-                {digest.keyEvents.map((evt,i) => {
-                  const ic = IMPACT_COLOR[evt.impact] || C.muted;
-                  return (
-                    <div key={i} style={{display:'flex',gap:6,alignItems:'flex-start',marginBottom:4}}>
-                      <span style={{fontSize:10.5,padding:'1px 5px',borderRadius:3,background:ic+'22',color:ic,border:`1px solid ${ic}44`,flexShrink:0,marginTop:1}}>
-                        {evt.impact||'—'}
-                      </span>
-                      <span style={{fontSize:11,color:'#bbb',lineHeight:1.4}}>{evt.event}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {/* Themes + Sectors */}
-            <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
-              {(digest.topThemes||[]).length > 0 && (
-                <div>
-                  <div style={{fontSize:10.5,color:C.muted,marginBottom:4,textTransform:'uppercase'}}>Themes</div>
-                  <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
-                    {digest.topThemes.map((t,i) => (
-                      <span key={i} style={{fontSize:10.5,background:C.accent+'22',color:C.accent,padding:'1px 6px',borderRadius:4}}>
-                        {t}
-                      </span>
-                    ))}
-                  </div>
+      {regime&&(
+        <section aria-label="Market regime" style={{...edBox,display:"flex",flexWrap:"wrap",gap:"14px 28px",alignItems:"center"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <span style={{fontFamily:SERIF,fontSize:19,fontWeight:600}}>Market regime</span>
+            <EdTag tone={REGIME_TONE[regime.regime]||"mute"}>{REGIME_LABEL[regime.regime]||prettyState(regime.regime)}</EdTag>
+            {regime.confidence!=null&&<span style={{fontFamily:MONO,fontSize:13,color:C.textDim}}>{regime.confidence}% confidence</span>}
+          </div>
+          {[["Nifty trend",regime.nifty_trend],["Volatility (VIX)",regime.vix_state],["FII flows",regime.fii_trend],["Breadth",regime.breadth_state],["Momentum",regime.momentum_state]].filter(([,v])=>v).map(([k,v])=>(
+            <div key={k} style={{display:"flex",flexDirection:"column",fontSize:12,color:C.textDim}}>
+              {k}<b style={{color:C.text,fontSize:13.5,fontWeight:600}}>{prettyState(v)}</b>
+            </div>
+          ))}
+          {regime.regime_date&&<span style={{fontSize:12,color:C.textDim,marginLeft:narrow?0:"auto"}}>As of {fmtDate(regime.regime_date)}</span>}
+        </section>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:narrow?"minmax(0,1fr)":"minmax(0,1.6fr) minmax(0,1fr)",gap:16,alignItems:"start"}}>
+        <section aria-label="Market brief" style={{...edBox,padding:narrow?"16px":"22px 24px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:14}}>
+            <h2 style={{...edH3,fontSize:21,margin:0}}>{active==="MORNING"?"Morning brief":"Closing digest"}
+              {dg&&<span style={{fontFamily:SANS,fontSize:12,color:C.textDim,fontWeight:400}}>{fromDate?`${fmtDate(fromDate)} · `:""}{dg.headlineCount?`${dg.headlineCount} headlines`:""}</span>}
+            </h2>
+            <div role="group" aria-label="Brief" style={{display:"flex",gap:6}}>
+              {[["MORNING","Morning"],["CLOSING","Closing"]].map(([t,l])=>(
+                <button key={t} onClick={()=>{setKind(t);setShowAllEvents(false);}} aria-pressed={active===t} style={edChip(active===t)}>{l}</button>
+              ))}
+            </div>
+          </div>
+
+          {fromDate&&dg&&<div style={{marginBottom:14}}><DetailNote tone="info">There's no brief yet today, so this is the latest one, from {new Date(fromDate+"T00:00:00").toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"short"})}.</DetailNote></div>}
+
+          {!apiLoaded||fallbackState==="loading"?(
+            <div aria-busy="true" style={{display:"flex",flexDirection:"column",gap:10}}>
+              {[90,70,85,60].map((w,i)=><div key={i} style={{height:14,width:`${w}%`,borderRadius:4,background:C.panel,animation:"pulse 1.4s ease-in-out infinite"}}/>)}
+            </div>
+          ):!dg?(
+            <div style={{padding:"18px 0",color:C.textDim,fontSize:13.5,lineHeight:1.55}}>
+              {digests.length
+                ?<>The {active==="MORNING"?"morning brief":"closing digest"} isn't out for this day. {active==="CLOSING"?"It publishes at 16:20 IST, after the close.":"It publishes at 05:30 IST."}
+                    <div style={{marginTop:10}}><button onClick={()=>setKind(active==="MORNING"?"CLOSING":"MORNING")} style={edBtn()}>Show the {active==="MORNING"?"closing digest":"morning brief"}</button></div></>
+                :"No brief has been published in the last week. Briefs publish at 05:30 and 16:20 IST on trading days. If they're missing, check Governance → Data sources."}
+            </div>
+          ):(
+            <div style={{display:"flex",flexDirection:"column",gap:16}}>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}><span style={{fontSize:13,color:C.textDim}}>Mood</span><EdTag tone={MOOD_TONE[dg.marketMood]||"mute"}>{prettyState(dg.marketMood||"NEUTRAL")}</EdTag></div>
+              {dg.summary&&<p style={{margin:0,fontFamily:SERIF,fontSize:narrow?16.5:18,lineHeight:1.55,whiteSpace:"pre-line"}}>{dg.summary}</p>}
+              {dg.niftySignal&&(
+                <div style={{padding:"12px 14px",borderRadius:6,background:C.accent+"10",fontSize:14,lineHeight:1.5}}>
+                  <b>Nifty signal:</b> {dg.niftySignal}
                 </div>
               )}
-              {(digest.sectorsInFocus||[]).length > 0 && (
+              {events.length>0&&(
                 <div>
-                  <div style={{fontSize:10.5,color:C.muted,marginBottom:4,textTransform:'uppercase'}}>Sectors</div>
-                  <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
-                    {digest.sectorsInFocus.map((s,i) => (
-                      <span key={i} style={{fontSize:10.5,background:C.surface,color:C.muted,padding:'1px 6px',borderRadius:4,border:`1px solid ${C.border}`}}>
-                        {s}
-                      </span>
+                  <h3 style={{...edH3,fontSize:16,marginBottom:4}}>Key events</h3>
+                  <ul style={{margin:0,padding:0,listStyle:"none"}}>
+                    {shownEvents.map((e,i)=>(
+                      <li key={i} style={{display:"grid",gridTemplateColumns:narrow?"minmax(0,1fr)":"84px minmax(0,1fr)",gap:narrow?4:12,padding:"10px 0",borderTop:`1px solid ${C.border}`,fontSize:13.5,lineHeight:1.5}}>
+                        <span><EdTag tone={IMPACT_TONE[e.impact]||"mute"}>{prettyState(e.impact||"Neutral")}</EdTag></span>
+                        <span>{e.event||e.title||String(e)}</span>
+                      </li>
                     ))}
-                  </div>
+                  </ul>
+                  {events.length>5&&<button onClick={()=>setShowAllEvents(s=>!s)} style={{...edBtn("ghost"),color:C.accent,paddingLeft:0}}>{showAllEvents?"Show fewer":`Show all ${events.length} events`}</button>}
                 </div>
               )}
             </div>
-            {/* Nifty signal */}
-            {digest.niftySignal && (
-              <div style={{marginTop:10,padding:'6px 10px',background:C.surface,borderRadius:5,border:`1px solid ${C.border}`}}>
-                <span style={{fontSize:10.5,color:C.muted,marginRight:6}}>📊 NIFTY SIGNAL:</span>
-                <span style={{fontSize:11,color:'white',fontStyle:'italic'}}>{digest.niftySignal}</span>
+          )}
+        </section>
+
+        <div style={{display:"flex",flexDirection:"column",gap:16}}>
+          {dg&&(dg.topThemes||[]).length>0&&(
+            <section style={edBox} aria-label="Themes">
+              <h3 style={{...edH3,fontSize:17}}>Themes</h3>
+              <ul style={{margin:0,padding:"0 0 0 18px",display:"flex",flexDirection:"column",gap:6,fontSize:13.5,lineHeight:1.45}}>
+                {dg.topThemes.map((t,i)=><li key={i}>{t}</li>)}
+              </ul>
+            </section>
+          )}
+          {dg&&(dg.sectorsInFocus||[]).length>0&&(
+            <section style={edBox} aria-label="Sectors in focus">
+              <h3 style={{...edH3,fontSize:17}}>Sectors in focus</h3>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {dg.sectorsInFocus.map((s,i)=><span key={i} style={{display:"inline-flex",alignItems:"center",minHeight:28,padding:"0 11px",borderRadius:999,background:C.panel,fontSize:12.5}}>{s}</span>)}
               </div>
+            </section>
+          )}
+          <section style={edBox} aria-label="Ask ARIA">
+            <h3 style={{...edH3,fontSize:17}}>Ask about the market</h3>
+            <p style={{margin:"0 0 12px",fontSize:13,color:C.textDim,lineHeight:1.5}}>ARIA can explain today's moves, the regime, or how a theme affects your holdings.</p>
+            <button onClick={onAskAria} style={edBtn()}><Icon name="spark"/>Ask ARIA</button>
+          </section>
+        </div>
+      </div>
+
+      <section aria-label="India market news">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:6}}>
+          <h2 style={{...edH3,fontSize:21,margin:0}}>India market news</h2>
+          <div role="group" aria-label="News topic" style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {NEWS_TOPICS.map(t=>(
+              <button key={t} onClick={()=>pickTopic(t)} aria-pressed={newsTopic===t} style={edChip(newsTopic===t)}>{t}</button>
+            ))}
+          </div>
+        </div>
+        {newsState==="loading"?(
+          <div aria-busy="true" style={{display:"flex",flexDirection:"column",gap:12,paddingTop:12}}>
+            {[92,70,85,60,78].map((w,i)=><div key={i} style={{height:16,width:`${w}%`,borderRadius:4,background:C.panel,animation:"pulse 1.4s ease-in-out infinite"}}/>)}
+          </div>
+        ):newsState==="error"?(
+          <div style={{padding:"20px 0"}}><DetailNote tone="warn">Couldn't load {newsTopic} headlines. Check the backend and try again.</DetailNote>
+            <button onClick={()=>{setNewsState("loading");Promise.resolve(onNewsTopic(newsTopic,true)).then(ok=>setNewsState(ok===false?"error":"idle")).catch(()=>setNewsState("error"));}} style={{...edBtn(),marginTop:10}}>Try again</button></div>
+        ):shownNews.length===0?(
+          <p style={{margin:"16px 0 0",fontSize:13.5,color:C.textDim}}>{IS_LIVE?`No ${newsTopic} headlines in the feed right now.`:"News needs a live backend connection."}</p>
+        ):(
+          <div style={{display:"flex",flexDirection:"column"}}>
+            {shownNews.map((n,i)=>{
+              const parts=String(n.title||"").split(" - ");
+              const outlet=parts.length>1?parts.pop():null;
+              return(
+                <a key={i} href={n.url} target="_blank" rel="noreferrer" className="ed-card"
+                  style={{display:"flex",flexDirection:"column",gap:4,padding:"14px 6px",borderTop:`1px solid ${C.border}`,color:C.text,textDecoration:"none"}}>
+                  <span style={{fontFamily:SERIF,fontSize:narrow?16:18,lineHeight:1.4,fontWeight:500}}>{parts.join(" - ")}</span>
+                  <span style={{fontSize:12,color:C.textDim,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                    {outlet||n.source}{n.published?` · ${fmtDate(n.published)}`:""}<Icon name="up" size={13}/>
+                    <span style={{position:"absolute",width:1,height:1,overflow:"hidden",clip:"rect(0 0 0 0)"}}>(opens in a new tab)</span>
+                  </span>
+                </a>
+              );
+            })}
+            {(news||[]).length>shownNews.length&&(
+              <button onClick={()=>setNewsLimit(l=>l+8)} style={{...edBtn("ghost"),color:C.accent,borderTop:`1px solid ${C.border}`,borderRadius:0}}>
+                Show {Math.min(8,news.length-shownNews.length)} more headlines
+              </button>
             )}
           </div>
         )}
-      </div>
-    );
-  }
-
-  return (
-    <div style={{marginBottom:14}}>
-      <div style={{fontSize:12.5,fontWeight:700,color:'white',marginBottom:8}}>📋 Market Brief</div>
-      <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-        <DigestCard digest={morning} type="MORNING" />
-        <DigestCard digest={closing} type="CLOSING" />
-      </div>
+      </section>
     </div>
   );
 }
-
 
 // ─── CONFIDENCE CALIBRATION CHART (P6-A) ─────────────────────────────────────
 function ConfidenceCalibrationChart({ calibration }) {
@@ -4374,8 +4451,8 @@ export default function App(){
           })()}
         </div>}
         <div style={{display:"flex",alignItems:"center",gap:7,flexShrink:0}}>
-          {openAlerts>0&&<button onClick={()=>setTab("governance")} aria-label={`${openAlerts} governance alerts`} style={{background:C.red+"12",border:`1px solid ${C.red}44`,borderRadius:4,padding:narrow?"8px 8px":"2px 7px",color:C.red,fontSize:11,fontWeight:700,cursor:"pointer"}}>⚠ {openAlerts}</button>}
-          {portfolioAlerts.length>0&&<button onClick={()=>setTab("portfolio")} aria-label={`${portfolioAlerts.length} portfolio alerts`} style={{background:C.orange+"12",border:`1px solid ${C.orange}44`,borderRadius:4,padding:narrow?"8px 8px":"2px 7px",color:C.orange,fontSize:11,fontWeight:700,cursor:"pointer"}}>💼 {portfolioAlerts.length}</button>}
+          {!narrow&&openAlerts>0&&<button onClick={()=>setTab("governance")} aria-label={`${openAlerts} governance alerts`} style={{background:C.red+"12",border:`1px solid ${C.red}44`,borderRadius:4,padding:narrow?"8px 8px":"2px 7px",color:C.red,fontSize:11,fontWeight:700,cursor:"pointer"}}>⚠ {openAlerts}</button>}
+          {!narrow&&portfolioAlerts.length>0&&<button onClick={()=>setTab("portfolio")} aria-label={`${portfolioAlerts.length} portfolio alerts`} style={{background:C.orange+"12",border:`1px solid ${C.orange}44`,borderRadius:4,padding:narrow?"8px 8px":"2px 7px",color:C.orange,fontSize:11,fontWeight:700,cursor:"pointer"}}>💼 {portfolioAlerts.length}</button>}
           {!narrow&&<div style={{fontSize:10.5,color:C.green,display:"flex",alignItems:"center",gap:2}}><Dot color={C.green} pulse/>Open</div>}
           {!narrow&&<span style={{fontSize:10.5,color:C.muted}}>{now.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})} IST</span>}
           <button onClick={()=>setAriaOpen(o=>!o)} aria-pressed={ariaOpen} style={{background:ariaOpen?C.accentDim:C.accent,border:`1px solid ${C.accent}`,borderRadius:6,padding:narrow?"8px 12px":"7px 14px",minHeight:narrow?40:undefined,color:C.onFill,fontSize:12,fontWeight:700,cursor:"pointer",boxShadow:ariaOpen?`0 0 12px ${C.purple}44`:"none"}}>{ariaOpen?"✕ ARIA":"✦ ARIA"}</button>
@@ -4507,74 +4584,22 @@ export default function App(){
             )}
 
             {tab==="market"&&(
-              <div style={{animation:"fadeUp .3s ease"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:11}}>
-                  <h1 style={{fontFamily:SERIF,fontSize:28,fontWeight:600,color:C.text,letterSpacing:-.3,lineHeight:1.2,margin:0}}>Live Market Pulse</h1>
-                  {IS_LIVE&&(
-                    <button onClick={openARIAWithRun} style={{background:C.orange+"22",border:`1px solid ${C.orange}44`,borderRadius:7,padding:"5px 11px",color:C.orange,fontSize:12,fontWeight:700,cursor:"pointer"}}>
-                      📊 What ran today?
-                    </button>
-                  )}
-                </div>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
-                  {marketPulse.map(m=>(
-                    <div key={m.key} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:6,padding:9}}>
-                      <div style={{fontSize:10,color:C.muted,marginBottom:2,textTransform:"uppercase"}}>{m.key}</div>
-                      <div style={{fontSize:14,fontWeight:800,color:C.text,fontFamily:MONO}}>{m.value}</div>
-                      <div style={{fontSize:10.5,color:m.up?C.green:C.red,marginTop:2}}>{m.change}</div>
-                    </div>
-                  ))}
-                </div>
-                {/* P6-C: Morning Brief + Closing Digest */}
-                <MarketDigestPanel digestData={marketDigest} apiLoaded={apiLoaded} />
-
-                {/* DB-7: India Market News Feed */}
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                  <div style={{fontSize:12.5,fontWeight:700,color:C.text}}>📰 India Market News</div>
-                  <div style={{display:"flex",gap:5,alignItems:"center"}}>
-                    {["NIFTY","SENSEX","FII","RBI","BUDGET"].map(sym=>(
-                      <button key={sym} onClick={()=>{
-                        setNewsSymbol(sym);
-                        apiFetch(`/api/news/${sym}`)
-                          .then(d=>{if(d?.news)setMarketNews(d.news);})
-                          .catch(()=>{});
-                      }} style={{
-                        background:newsSymbol===sym?C.accent+"22":"none",
-                        border:`1px solid ${newsSymbol===sym?C.accent+"55":C.border}`,
-                        borderRadius:4,padding:"2px 8px",
-                        color:newsSymbol===sym?C.accent:C.muted,
-                        fontSize:11,cursor:"pointer",fontWeight:newsSymbol===sym?700:400,
-                      }}>{sym}</button>
-                    ))}
-                  </div>
-                </div>
-                {marketNews.length>0?(
-                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {marketNews.map((item,i)=>(
-                      <a key={i} href={item.url} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}>
-                        <div style={{
-                          background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,
-                          padding:"9px 12px",cursor:"pointer",
-                          transition:"border-color 0.15s",
-                        }}
-                          onMouseEnter={e=>e.currentTarget.style.borderColor=C.accent+"55"}
-                          onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}
-                        >
-                          <div style={{fontSize:12.5,color:C.text,lineHeight:1.4,marginBottom:4}}>{item.title}</div>
-                          <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                            <span style={{fontSize:10.5,color:C.muted}}>{item.source}</span>
-                            {item.published&&<span style={{fontSize:10.5,color:C.muted}}>· {item.published}</span>}
-                            <span style={{fontSize:10.5,color:C.accent,marginLeft:"auto"}}>↗ Read</span>
-                          </div>
-                        </div>
-                      </a>
-                    ))}
-                  </div>
-                ):(
-                  <EmptyState icon="📰" title="No news loaded yet"
-                    sub={IS_LIVE?"Click a topic above to fetch headlines from Google News.":"News feed requires a live backend connection."} />
-                )}
-              </div>
+              <MarketTab
+                pulse={marketPulse}
+                regime={marketRegime}
+                digestData={marketDigest}
+                apiLoaded={apiLoaded}
+                news={marketNews}
+                newsTopic={newsSymbol}
+                onNewsTopic={t=>{
+                  setNewsSymbol(t);
+                  return apiFetch(`/api/news/${t}`)
+                    .then(d=>{ setMarketNews(Array.isArray(d?.news)?d.news:[]); return true; })
+                    .catch(()=>false);
+                }}
+                onWhatRan={openARIAWithRun}
+                onAskAria={()=>{ setAriaContext(null); setAriaOpen(true); }}
+              />
             )}
 
             {tab==="governance_research"&&<GovernanceResearchTab onOpenARIA={openARIA} researchFeed={researchFeed} apiLoaded={apiLoaded} liveAttribution={liveAttribution}/>}
