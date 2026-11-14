@@ -158,4 +158,4 @@ These were found and fixed in Nov 2026 sessions. Each is a *pattern* the archite
 | `data/trendlyne_fno_fetcher.py` | 539 | data/trendlyne_fno_fetcher.py |
 | `api/main.py` | 3520 | api/main.py — Bharat Intelligence FastAPI Backend |
 
-Dashboard: `dashboard/src/App.jsx` 4178 lines (single-file SPA) + `LongHorizonPanel.jsx`. Tests: 63 files.
+Dashboard: `dashboard/src/App.jsx` 4167 lines (single-file SPA) + `LongHorizonPanel.jsx`. Tests: 63 files.

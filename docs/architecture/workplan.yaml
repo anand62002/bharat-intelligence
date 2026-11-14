@@ -1,0 +1,637 @@
+# Bharat Intelligence — implementation work plan
+# Source: docs/architecture/REVIEW.md, TARGET_ARCHITECTURE.md, ADR-001..008 (2026-11-12)
+# Execute with: /execute-wp WP-NNN   ·   Status: docs/architecture/STATUS.md
+# Order = recommended execution order. One package = one pull request (<= ~400 changed lines).
+# Migrations and production data changes are applied by a human, never by an agent.
+
+# ───────────────────────── Stage 1 — make it loud ─────────────────────────
+
+- id: WP-001
+  title: "Confirm the portfolio pipeline publishes on the next run"
+  adr: null
+  why: "The fix in bf5d3fa has never run in production; daily_runs has no orchestrator row and all 15 non-discovery recs ever saved are SUPPRESSED."
+  depends_on: []
+  risk: low
+  autonomy: review
+  model: claude-sonnet-5-5
+  touches: [scripts/verify_pipeline_publish.py, tests/test_verify_pipeline_publish.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Add scripts/verify_pipeline_publish.py: read-only; takes --date (default today)."
+    - "Query daily_runs where pipeline='orchestrator' for the date; print status, symbols_processed, errors, details.reasons, details.errors."
+    - "Query recommendations where is_discovery=false for the date; print counts by action."
+    - "Print a verdict line: PUBLISHED / SCHEMA_DRIFT_ONLY / ALL_SUPPRESSED / NO_OUTPUT / NO_RUN, following REVIEW.md section 3."
+    - "Exit 0 only when at least one non-SUPPRESSED row exists; exit 1 otherwise."
+    - "Unit-test the verdict function with fake rows for each of the five cases."
+    - "Run it after a 06:00 IST run and paste the output into STATUS.md."
+  acceptance:
+    - "pytest tests/test_verify_pipeline_publish.py passes"
+    - "python scripts/verify_pipeline_publish.py exits 0 for a date on which the 06:00 run completed"
+    - "Query: select count(*) from daily_runs where pipeline='orchestrator' returns >= 1"
+    - "Query: select count(*) from recommendations where is_discovery=false and action<>'SUPPRESSED' returns >= 1"
+  tests: [tests/test_verify_pipeline_publish.py]
+  rollback: "Delete the script and its test; nothing else depends on them."
+  effort_hours: 2
+
+- id: WP-002
+  title: "Apply the danger_drop_pct migration in production"
+  adr: ADR-005
+  why: "Production recommendations lacks danger_drop_pct; the tolerant insert saves rows without it and reports SCHEMA_DRIFT on every run."
+  depends_on: [WP-001]
+  risk: low
+  autonomy: manual
+  model: claude-sonnet-5-5
+  touches: [CLAUDE.md]
+  db_migration: db/migrations/add_danger_drop_pct_column.sql
+  prod_data_change: null
+  steps:
+    - "Human: run db/migrations/add_danger_drop_pct_column.sql in the Supabase SQL editor."
+    - "Human: run python scripts/verify_pipeline_publish.py after the next 06:00 run."
+    - "Agent: mark the migration applied in CLAUDE.md and correct the note that add_daily_runs_pipeline.sql is pending (it is applied)."
+  acceptance:
+    - "Query: select danger_drop_pct from recommendations limit 1 succeeds"
+    - "Next orchestrator daily_runs row has no SCHEMA_DRIFT entry in details.errors"
+  tests: []
+  rollback: "alter table recommendations drop column danger_drop_pct; the tolerant insert keeps the pipeline working."
+  effort_hours: 0.5
+
+- id: WP-003
+  title: "Freeze agent weights to equal in one config file"
+  adr: ADR-003
+  why: "Production weights come from six stale rows that give the technical agent about 0.2% of the composite (orchestrator.py:207, 858-870)."
+  depends_on: []
+  risk: medium
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [data/decision_config.py, scheduler/orchestrator.py, agents/discovery_screener.py, agents/outcome_tracker.py, tests/test_decision_config.py, tests/test_orchestrator.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Create data/decision_config.py with AGENT_WEIGHTS_MODE='equal', REGIME_MULTIPLIERS_ENABLED=False and a docstring pointing at ADR-003 and ADR-006."
+    - "In load_weights_node, when mode is 'equal', return 1/len(AGENT_NAMES) for each agent and skip the agent_performance read; log 'Agent weights: equal'."
+    - "In _composite_score, apply regime multipliers only when REGIME_MULTIPLIERS_ENABLED is true."
+    - "Check agents/discovery_screener.py for any separate weighting and route it through the same config."
+    - "Fix agents/outcome_tracker.py:1176 to write a percentage, not a fraction."
+    - "Add tests/test_decision_config.py: equal mode yields equal weights whatever agent_performance contains; an AST scan fails if another runtime module defines agent weights."
+  acceptance:
+    - "pytest tests/test_decision_config.py tests/test_orchestrator.py passes"
+    - "python -m scheduler.orchestrator --dry logs 'Agent weights: equal'"
+    - "grep -n 'accuracy_30d / 100' agents/outcome_tracker.py returns nothing"
+  tests: [tests/test_decision_config.py, tests/test_orchestrator.py]
+  rollback: "Set AGENT_WEIGHTS_MODE='accuracy' in data/decision_config.py, or revert the PR."
+  effort_hours: 3
+
+- id: WP-004
+  title: "Persist score, gate result and source on outcome rows"
+  adr: ADR-002
+  why: "All 154 resolved outcomes have null composite_score and validation_kappa, so neither the score nor the gate can be tested against results."
+  depends_on: []
+  risk: medium
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [agents/rec_outcome_seeder.py, agents/outcome_tracker.py, scheduler/orchestrator.py, agents/paper_portfolio.py, scripts/backfill_outcome_scores.py, tests/test_rec_outcome_seeder.py, tests/test_outcome_tracker.py]
+  db_migration: null
+  prod_data_change: "scripts/backfill_outcome_scores.py copies metadata.signal_score into recommendation_outcomes.composite_score for existing discovery rows. Default is dry-run and prints row counts; --run writes a JSON backup of affected rows to logs/ first. A human runs --run."
+  steps:
+    - "In rec_outcome_seeder, populate composite_score from metadata.signal_score (discovery) or the rec composite (portfolio), and validation_kappa from gov_check.validation.aggregate_kappa when present."
+    - "Make seed_pending_outcome accept and store the same fields on every call path."
+    - "Change the swallow at scheduler/orchestrator.py:1735 from log.debug to log.warning and append to the run errors list."
+    - "In paper_portfolio.open_new_positions, skip recs whose metadata.kind is HOLDING_REVIEW and log the count skipped, so the 90-day book stays one strategy."
+    - "Add scripts/backfill_outcome_scores.py with dry-run default and backup."
+    - "Tests: seeder fills both fields for a discovery rec and a portfolio rec; a seeding exception is logged at WARNING."
+  acceptance:
+    - "pytest tests/test_rec_outcome_seeder.py tests/test_outcome_tracker.py passes"
+    - "python scripts/backfill_outcome_scores.py prints the number of rows it would update and writes nothing"
+    - "After the human run: select count(*) from recommendation_outcomes where composite_score is not null returns >= 150"
+  tests: [tests/test_rec_outcome_seeder.py, tests/test_outcome_tracker.py]
+  rollback: "Revert the PR; restore recommendation_outcomes rows from the JSON backup in logs/."
+  effort_hours: 4
+
+- id: WP-005
+  title: "Record every worker job run in the job ledger"
+  adr: ADR-005
+  why: "No job records that it ran or what it produced; until today daily_runs held only discovery rows with errors hard-coded to 0."
+  depends_on: []
+  risk: medium
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [data/run_log.py, worker.py, data/llm_utils.py, tests/test_run_log.py, tests/test_worker_tracking.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Add tracked_job(name) to data/run_log.py: a decorator that times the job, catches any exception, and calls log_daily_run with status OK or FAILED, the exception text and a details dict."
+    - "Let a job return a dict; tracked_job stores it under details.output and uses its 'count' key as symbols_processed."
+    - "Wrap all 25 job_* functions in worker.py. Orchestrator and discovery already log their own row; give them a skip flag so they are not logged twice."
+    - "Make each job_* return its result dict instead of only logging it."
+    - "Add a small token counter in data/llm_utils.py that accumulates input and output tokens per run; tracked_job writes it to details.llm_usage."
+    - "Tests: a raising job writes a FAILED row and does not propagate; a returning job writes OK with its count; a missing Supabase client does not crash the job."
+  acceptance:
+    - "pytest tests/test_run_log.py tests/test_worker_tracking.py passes"
+    - "python -c 'import worker' succeeds"
+    - "After one day in production: select count(distinct pipeline) from daily_runs where run_date = current_date returns >= 18"
+  tests: [tests/test_run_log.py, tests/test_worker_tracking.py]
+  rollback: "Revert the PR; the decorator has no side effects beyond daily_runs inserts."
+  effort_hours: 5
+
+- id: WP-006
+  title: "Alert when a job is missing or breaks its invariant"
+  adr: ADR-005
+  why: "A pipeline that ran and produced nothing reported success for six months; absence of output must be the alarm."
+  depends_on: [WP-005]
+  risk: medium
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [scheduler/invariants.py, worker.py, api/main.py, scripts/weekly_audit.py, tests/test_invariants.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Create scheduler/invariants.py with a declarative list: job name, days it is due, and a check on that day's daily_runs row."
+    - "Define checks for at least: orchestrator (status in OK or WARNING and recommendations >= 1 when holdings exist), discovery (status OK), forward poller (updated >= 90% of open), paper update, discovery re-check, outcome tracker, target updater."
+    - "Add check_invariants(client, run_date) returning a list of breaches; never raises."
+    - "Add job_watchdog at 19:00 IST: for each breach insert one CRITICAL portfolio_alerts row with alert_type JOB_INVARIANT, deduplicated per job per day."
+    - "Expose breaches on /api/system/health."
+    - "Call check_invariants for the last 7 days from scripts/weekly_audit.py."
+    - "Tests: a missing row, a FAILED row and a zero-output row each produce exactly one breach; a healthy day produces none; non-trading days are skipped."
+  acceptance:
+    - "pytest tests/test_invariants.py passes"
+    - "python -c 'from scheduler.invariants import check_invariants' succeeds"
+    - "Drill: with one job disabled for a day, select count(*) from portfolio_alerts where alert_type='JOB_INVARIANT' and created_at::date = current_date returns 1"
+  tests: [tests/test_invariants.py]
+  rollback: "Remove the 19:00 job from worker.py; alerts already written can be resolved in bulk by alert_type."
+  effort_hours: 5
+
+- id: WP-007
+  title: "Check the production schema against a code contract"
+  adr: ADR-005
+  why: "A column present in db/schema.sql but absent in production blocked every published rec; 28 migrations are applied by hand with no check."
+  depends_on: []
+  risk: low
+  autonomy: review
+  model: claude-sonnet-5-5
+  touches: [db/contract.py, scripts/check_schema.py, worker.py, scripts/weekly_audit.py, tests/test_schema_contract.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Create db/contract.py: a dict of table name to the set of columns that runtime code inserts or updates. Start with recommendations, recommendation_outcomes, daily_runs, portfolio_holdings, portfolio_alerts, paper_portfolio_positions, paper_portfolio_snapshots, agent_performance, discovery_runs, long_horizon_picks, long_horizon_positions."
+    - "Create scripts/check_schema.py: for each table select its contract columns with limit 0; collect columns that return PGRST204 or 'does not exist'; print a table; exit 1 if any are missing."
+    - "Call the check once at worker start; log CRITICAL per missing column and continue."
+    - "Add the check to scripts/weekly_audit.py as a tenth check."
+    - "Add tests/test_schema_contract.py: every key in save_recs_node._DB_COLUMNS is in the recommendations contract; the checker reports a missing column from a fake client."
+  acceptance:
+    - "pytest tests/test_schema_contract.py passes"
+    - "python scripts/check_schema.py prints one line per table and exits 0 once WP-002 is applied"
+    - "Before WP-002 it exits 1 and names recommendations.danger_drop_pct"
+  tests: [tests/test_schema_contract.py]
+  rollback: "Remove the startup call from worker.py; the script is read-only."
+  effort_hours: 3
+
+- id: WP-008
+  title: "Remove production credentials from CI test runs"
+  adr: ADR-005
+  why: "ci.yml:19-20 passes the production service-role key and Anthropic key to every pull-request test run."
+  depends_on: []
+  risk: medium
+  autonomy: review
+  model: claude-sonnet-5-5
+  touches: [.github/workflows/ci.yml, tests/conftest.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Run the suite locally with SUPABASE_URL, SUPABASE_SERVICE_KEY, ANTHROPIC_API_KEY and OPENAI_API_KEY unset; list the tests that fail."
+    - "Add an autouse fixture in tests/conftest.py that fails any test creating a real Supabase or Anthropic client unless marked integration."
+    - "Fix or mark as integration each test from the first step."
+    - "In ci.yml replace the secret references with fixed dummy values and run pytest with -m 'not integration'."
+    - "State in the PR description that the two repository secrets can now be deleted by the maintainer."
+  acceptance:
+    - "grep -c 'secrets.SUPABASE_SERVICE_KEY' .github/workflows/ci.yml returns 0"
+    - "grep -c 'secrets.ANTHROPIC_API_KEY' .github/workflows/ci.yml returns 0"
+    - "With all four env vars unset, python -m pytest tests/ -q -m 'not integration' passes"
+  tests: [tests/conftest.py]
+  rollback: "Revert the PR."
+  effort_hours: 4
+
+- id: WP-009
+  title: "Add an exception-policy test with a shrinking allowlist"
+  adr: ADR-005
+  why: "473 except-Exception handlers and 251 debug logs let five outages run for weeks to months unseen."
+  depends_on: []
+  risk: low
+  autonomy: auto
+  model: claude-sonnet-5-5
+  touches: [tests/test_exception_policy.py, tests/exception_allowlist.txt]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Write tests/test_exception_policy.py: walk the AST of every .py file under agents, data, scheduler, governance and api."
+    - "Flag an 'except Exception' or bare except whose body only passes, continues, returns None or an empty literal, or whose only logging call is below WARNING."
+    - "Identify each site as path::function::ordinal so line shifts do not break the list."
+    - "Generate tests/exception_allowlist.txt from the current tree."
+    - "The test fails if a flagged site is not on the allowlist, and fails if an allowlisted site no longer exists, forcing the list to shrink."
+    - "Print the current count so the evidence pack can read it."
+  acceptance:
+    - "pytest tests/test_exception_policy.py passes on the unchanged tree"
+    - "Adding 'try: x()\\nexcept Exception: pass' to any runtime module makes the test fail"
+    - "No file outside tests/ is modified"
+  tests: [tests/test_exception_policy.py]
+  rollback: "Delete the test and the allowlist."
+  effort_hours: 3
+
+- id: WP-010
+  title: "Make swallowed failures loud on the decision path"
+  adr: ADR-005
+  why: "The decision path still hides failures, for example position sizing and warren sizing at discovery_screener.py:1248 and 1260."
+  depends_on: [WP-009]
+  risk: medium
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [scheduler/orchestrator.py, agents/discovery_screener.py, agents/outcome_tracker.py, agents/paper_portfolio.py, agents/target_updater.py, tests/exception_allowlist.txt, tests/test_loud_failures.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "List the allowlisted sites in the five touched files."
+    - "For each: log at WARNING with the symbol and exception; where the job has an errors list or returns a result dict, add the failure to it so it reaches the job ledger."
+    - "Do not change control flow: a failure that was non-fatal stays non-fatal."
+    - "Remove each fixed site from tests/exception_allowlist.txt."
+    - "Add tests/test_loud_failures.py covering three representative sites with caplog."
+  acceptance:
+    - "pytest tests/test_exception_policy.py tests/test_loud_failures.py passes"
+    - "wc -l tests/exception_allowlist.txt is at least 25 lower than on main"
+    - "Full suite passes: python -m pytest tests/ -q -m 'not integration'"
+  tests: [tests/test_loud_failures.py, tests/test_exception_policy.py]
+  rollback: "Revert the PR."
+  effort_hours: 4
+
+- id: WP-011
+  title: "Run the regime detector before the orchestrator"
+  adr: null
+  why: "The regime job runs at 06:30, after the 06:00 orchestrator that reads it (worker.py:720, 818), so decisions use yesterday's regime."
+  depends_on: []
+  risk: low
+  autonomy: auto
+  model: claude-sonnet-5-5
+  touches: [worker.py, tests/test_worker_schedule.py, CLAUDE.md]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Move the regime detector trigger in worker.py from 06:30 to 05:45 IST."
+    - "Update the schedule docstring in worker.py and the schedule block in CLAUDE.md."
+    - "Add tests/test_worker_schedule.py: build the scheduler without starting it and assert the regime job fires before the orchestrator job."
+  acceptance:
+    - "pytest tests/test_worker_schedule.py passes"
+    - "python -c 'import worker' succeeds"
+  tests: [tests/test_worker_schedule.py]
+  rollback: "Restore hour=6, minute=30."
+  effort_hours: 1
+
+# ───────────────────────── Stage 2 — record everything ─────────────────────────
+
+- id: WP-012
+  title: "Create the candidates ledger table"
+  adr: ADR-002
+  why: "Only promoted calls are recorded, giving about 15 independent labels a month; 200 screened symbols a day are discarded."
+  depends_on: []
+  risk: low
+  autonomy: manual
+  model: claude-sonnet-5-5
+  touches: [db/migrations/create_candidates.sql, db/schema.sql, db/contract.py]
+  db_migration: db/migrations/create_candidates.sql
+  prod_data_change: null
+  steps:
+    - "Agent: write create_candidates.sql — id uuid pk, run_date date, symbol text, yf_symbol text, source text (discovery, portfolio, multibagger), stage text (SCREENED, PRESCREEN_PASS, DEEP, PROMOTED), price numeric, nifty numeric, features jsonb, agent_signals jsonb, signal_score numeric, gate_score numeric, data_quality text, tier text, rec_id uuid null, feature_version int, price_t30, nifty_t30, alpha_t30, price_t90, nifty_t90, alpha_t90 numeric null, labelled_at timestamptz null, created_at timestamptz default now()."
+    - "Add unique (run_date, symbol, source); indexes on run_date and on (alpha_t30 is null)."
+    - "Grant to service_role as in grant_service_role_rls.sql; disable RLS (public market data only)."
+    - "Mirror the table in db/schema.sql and add its columns to db/contract.py."
+    - "Human: run the migration in the Supabase SQL editor."
+  acceptance:
+    - "Query: select count(*) from candidates returns 0 without error"
+    - "python scripts/check_schema.py exits 0"
+  tests: []
+  rollback: "drop table candidates;"
+  effort_hours: 1.5
+
+- id: WP-013
+  title: "Write every screened symbol to the candidates ledger"
+  adr: ADR-002
+  why: "Without the rejected candidates there is no way to test whether the pre-screen itself adds value."
+  depends_on: [WP-012]
+  risk: medium
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [data/candidate_ledger.py, agents/discovery_screener.py, agents/multibagger_screener.py, tests/test_candidate_ledger.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Create data/candidate_ledger.py with record_candidates(client, rows) doing a batched upsert on (run_date, symbol, source), and FEATURE_VERSION = 1."
+    - "On a missing table log one WARNING naming the migration and return 0; never raise."
+    - "In run_discovery, after the pre-screen, write one row per symbol in the slice with the features the pre-screen already computed: RSI, price vs EMA200, PE, sector PE, revenue growth, institutional holding, filters passed, pass or fail."
+    - "After deep analysis update the same rows with agent_signals, signal_score, data_quality, tier and rec_id."
+    - "Fetch the Nifty level once per run, not per symbol."
+    - "Write multibagger picks with source='multibagger'."
+    - "Return rows written in the discovery result so the job ledger records it."
+    - "Tests: 200 screened symbols produce 200 rows; a deep-analysed symbol is updated, not duplicated; a missing table does not fail the run."
+  acceptance:
+    - "pytest tests/test_candidate_ledger.py tests/test_discovery_screener.py passes"
+    - "python -m agents.discovery_screener --no-save writes no ledger rows"
+    - "After one production run: select count(*) from candidates where run_date = current_date and source='discovery' returns >= 150"
+  tests: [tests/test_candidate_ledger.py, tests/test_discovery_screener.py]
+  rollback: "Revert the PR; rows already written are harmless."
+  effort_hours: 5
+
+- id: WP-014
+  title: "Label candidate rows with 30- and 90-day alpha"
+  adr: ADR-002
+  why: "Features without outcomes teach nothing; the same alpha definition must apply to candidates and to published calls."
+  depends_on: [WP-013]
+  risk: medium
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [agents/outcome_tracker.py, data/candidate_ledger.py, worker.py, tests/test_candidate_labels.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Add label_candidates(client, horizon_days) to data/candidate_ledger.py: select rows whose horizon has passed and whose label is null, in batches of 500."
+    - "Reuse the batch price download and price-on-date helpers in agents/outcome_tracker.py; do not write a second price lookup."
+    - "Compute alpha as symbol return minus Nifty return over the row's own window, the same formula as recommendation_outcomes."
+    - "Call it for 30 and 90 days from the existing 18:30 outcome-tracker job; return labelled and failed counts to the job ledger."
+    - "Use the .or_ null-filter pattern, never None inside .in_."
+    - "Tests: a 31-day-old row gets alpha_t30 and not alpha_t90; a tz-aware price index works; a symbol with no price is counted as failed, not labelled 0."
+  acceptance:
+    - "pytest tests/test_candidate_labels.py passes"
+    - "31 days after WP-013 ships: select count(*) from candidates where alpha_t30 is not null returns >= 100"
+    - "Outcome-tracker daily_runs row shows details.output.candidates_labelled"
+  tests: [tests/test_candidate_labels.py]
+  rollback: "Remove the call from the 18:30 job; set the label columns to null if needed."
+  effort_hours: 4
+
+- id: WP-015
+  title: "Store the gate score for every symbol, honestly named"
+  adr: ADR-004
+  why: "The metric called kappa is mean score times agreement (synthesis_validator.py:321-348) and no outcome row carries it."
+  depends_on: [WP-004, WP-013]
+  risk: low
+  autonomy: review
+  model: claude-sonnet-5-5
+  touches: [scheduler/synthesis_validator.py, scheduler/orchestrator.py, agents/discovery_screener.py, api/main.py, tests/test_synthesis_validator.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Add gate_score to ValidationOutcome.to_dict alongside aggregate_kappa (same value) and correct the docstrings: it is quality times agreement, not a kappa statistic."
+    - "Keep the aggregate_kappa key for one release so the dashboard does not break; add gateScore to the API transformer."
+    - "In the orchestrator, write gate_score and per-rubric quality to the candidates row (source='portfolio') for every symbol, published or suppressed."
+    - "In discovery, write the discovery validation score to the candidates row."
+    - "Do not change thresholds or suppression behaviour in this package."
+    - "Tests: to_dict has both keys; a suppressed symbol still produces a ledger write."
+  acceptance:
+    - "pytest tests/test_synthesis_validator.py passes"
+    - "After one production run: select count(*) from candidates where source='portfolio' and gate_score is not null and run_date = current_date equals the number of holdings analysed"
+  tests: [tests/test_synthesis_validator.py]
+  rollback: "Revert the PR."
+  effort_hours: 3
+
+- id: WP-016
+  title: "Define typed agent results with contract tests"
+  adr: ADR-005
+  why: "A wrong dict key (intrinsic_value vs intrinsic_value_per_share) disabled target extension for months and the tests mocked the same wrong key."
+  depends_on: []
+  risk: low
+  autonomy: auto
+  model: claude-opus-5-5
+  touches: [agents/contracts.py, tests/test_agent_contracts.py, tests/fixtures/agent_outputs/]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Create agents/contracts.py with a TypedDict per agent listing the keys that other modules read, found by grepping consumers in scheduler, agents and api."
+    - "Add a CONSUMED_KEYS map: agent name to the set of keys each consumer reads."
+    - "Record one real output per agent as JSON under tests/fixtures/agent_outputs by running each agent's pure scoring function on saved inputs with the network mocked."
+    - "tests/test_agent_contracts.py: every consumed key exists in the recorded output of the producing agent."
+    - "Do not change any agent's behaviour in this package."
+  acceptance:
+    - "pytest tests/test_agent_contracts.py passes"
+    - "Renaming intrinsic_value_per_share in the warren_bot fixture makes the test fail"
+    - "No file under agents/ other than contracts.py is modified"
+  tests: [tests/test_agent_contracts.py]
+  rollback: "Delete the new files."
+  effort_hours: 5
+
+# ───────────────────────── Stage 3 — shadow ─────────────────────────
+
+- id: WP-017
+  title: "Fit a shadow probability model on the ledger"
+  adr: ADR-006
+  why: "Calibration bands of 41.6, 53.3, 43.9 and 37.3 percent on n=13 to 38 cannot separate good calls from bad; the ledger gives enough rows to try."
+  depends_on: [WP-014]
+  risk: medium
+  autonomy: review
+  model: claude-fable-5-1
+  touches: [agents/shadow_model.py, scripts/evaluate_shadow_model.py, tests/test_shadow_model.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Create agents/shadow_model.py: load labelled candidates; build a small fixed feature vector from features and agent scores; treat missing values explicitly."
+    - "Implement L2-regularised logistic regression with numpy (no new dependency) and isotonic calibration."
+    - "Implement walk-forward evaluation by run_date: expanding training window, weekly test folds, no row in both."
+    - "Report per fold and pooled: beat-Nifty rate by score quintile, Brier score vs the base-rate baseline, and 90 percent intervals computed on weekly clusters."
+    - "Report the same for three incumbents: the current signal_score, the equal-weight composite, and pre-screen pass vs fail."
+    - "scripts/evaluate_shadow_model.py prints the report as markdown; it writes nothing to the database."
+    - "Refuse to report with fewer than 300 labelled rows or fewer than 8 distinct weeks; say so instead."
+    - "Tests on synthetic data: a planted signal is recovered; pure noise yields a Brier score no better than baseline; folds never leak."
+  acceptance:
+    - "pytest tests/test_shadow_model.py passes"
+    - "python scripts/evaluate_shadow_model.py prints either the report or the explicit 'insufficient data: N rows, W weeks' line"
+    - "grep -rn 'shadow_model' scheduler/ agents/discovery_screener.py returns nothing (no production effect)"
+  tests: [tests/test_shadow_model.py]
+  rollback: "Delete the new files."
+  effort_hours: 8
+
+- id: WP-018
+  title: "Move every number out of the synthesis prompt into code"
+  adr: ADR-001
+  why: "The prompt asks the LLM for confidence, target and upside with a score-to-confidence table (orchestrator_synthesis.txt:43-52, 94-99)."
+  depends_on: [WP-003, WP-015]
+  risk: high
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [prompts/orchestrator_synthesis.txt, scheduler/orchestrator.py, scheduler/decision.py, agents/call_calibration.py, tests/test_decision.py, tests/test_synthesis_null_fields.py, scripts/test_synthesis.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Create scheduler/decision.py with decide(symbol, agent_results, composite, price, calibration) returning action, confidence, entry_low, entry_high, target, stoploss, upside_pct, horizon_days and danger_drop_pct."
+    - "Confidence: calibrated rate from agents/call_calibration.py for the composite's band. Entry and stop: ATR fields from the technical agent. Target: valuation gap capped at 100 percent, as discovery does. Action: rule on composite and consensus gate, reusing _apply_consensus_gate."
+    - "Rewrite the prompt: give the decision as fixed inputs; ask only for bull_case, bear_case, synthesis, headline and optional veto with veto_reason. Remove the calibration table."
+    - "In synthesise_node call decide first; merge the LLM text; apply a veto only as BUY to HOLD and record it in metadata."
+    - "On any synthesis failure publish the decision with a templated explanation from agents/rationale.py and record SYNTHESIS_FALLBACK."
+    - "Put the old path behind DECISION_SOURCE in data/decision_config.py, default 'code', so it can be switched back."
+    - "Update scripts/test_synthesis.py and the null-field tests for the smaller JSON contract."
+    - "Ask for a Fable review of the PR against ADR-001 before merge."
+  acceptance:
+    - "pytest tests/test_decision.py tests/test_synthesis_null_fields.py passes"
+    - "python scripts/test_synthesis.py reports ALL CHECKS PASSED"
+    - "grep -c 'upside_confidence' prompts/orchestrator_synthesis.txt returns 0"
+    - "A dry run on three symbols with ANTHROPIC_API_KEY unset still yields three recommendations"
+    - "Twenty consecutive production runs show details.reasons.synthesis_failed = 0"
+  tests: [tests/test_decision.py, tests/test_synthesis_null_fields.py]
+  rollback: "Set DECISION_SOURCE='llm' in data/decision_config.py."
+  effort_hours: 8
+
+# ───────────────────────── Stage 4 — switch by rule ─────────────────────────
+
+- id: WP-019
+  title: "Size positions from calibrated probability with an unlock rule"
+  adr: ADR-006
+  why: "All 334 paper positions are the same size because the sizer's confidence input is the raw score, always at least 65 (discovery_screener.py:1250)."
+  depends_on: [WP-003]
+  risk: medium
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [agents/position_sizer.py, agents/call_calibration.py, agents/discovery_screener.py, agents/paper_portfolio.py, data/decision_config.py, tests/test_position_sizer.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Add size_from_probability(hit_rate, band_n, lower_bound) to agents/position_sizer.py."
+    - "Rule: BASE size for every call while no band's 90 percent lower bound exceeds 55 percent; a larger tier unlocks only for bands that clear it with band_n >= 30. Thresholds live in data/decision_config.py."
+    - "Add a lower-bound helper to agents/call_calibration.py (Wilson interval)."
+    - "Discovery passes the calibrated rate and band size, not the raw score."
+    - "Label positions BASE, with a sizing_rationale that says conviction sizing is locked and why."
+    - "Leave calc_position_size in place for the on-demand analyse endpoint until WP-018 lands."
+    - "Tests: today's calibration yields BASE for every band; a synthetic band at 70 percent with n=60 unlocks."
+  acceptance:
+    - "pytest tests/test_position_sizer.py passes"
+    - "python -m agents.discovery_screener --no-save logs 'sizing: BASE (conviction locked)' for every promoted symbol"
+    - "GET /api/paper/portfolio shows position_label BASE on positions opened after the change"
+  tests: [tests/test_position_sizer.py]
+  rollback: "Revert the PR; existing positions are unaffected."
+  effort_hours: 4
+
+- id: WP-020
+  title: "Cut the judge panel to grounding plus one shadow judge"
+  adr: ADR-004
+  why: "Fifteen judge calls per symbol score template compliance, and their link to outcomes has never been measured."
+  depends_on: [WP-015, WP-018, WP-023]
+  risk: high
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [scheduler/synthesis_validator.py, scheduler/orchestrator.py, governance/fact_checker.py, data/decision_config.py, tests/test_synthesis_validator.py, tests/test_grounding_gate.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Precondition, checked by a human: the evidence pack shows at least 60 labelled rows with a gate score, and the top half by gate score does not beat the bottom half on alpha. If it does, stop and record NEEDS_HUMAN."
+    - "Extend _numerical_grounding_check to extract every number in the narrative and compare it with agent data, using the metric tolerances in fact_check.txt."
+    - "Add GATE_MODE to data/decision_config.py: 'panel' (today) or 'grounding'."
+    - "In grounding mode: a failed check regenerates the narrative once, then falls back to the templated explanation; the symbol is never dropped."
+    - "Keep one judge on the data_provenance rubric, result stored but not acted on."
+    - "Tests: a narrative citing a PE absent from agent data fails grounding; a clean one passes; suppression count is zero in grounding mode."
+  acceptance:
+    - "pytest tests/test_grounding_gate.py tests/test_synthesis_validator.py passes"
+    - "With GATE_MODE='grounding', a dry run makes at most one judge call per symbol (count from details.llm_usage)"
+    - "Ten consecutive production runs show details.reasons.suppressed_by_judges = 0"
+  tests: [tests/test_grounding_gate.py, tests/test_synthesis_validator.py]
+  rollback: "Set GATE_MODE='panel' in data/decision_config.py."
+  effort_hours: 6
+
+- id: WP-021
+  title: "Publish a daily holdings review from the portfolio pipeline"
+  adr: ADR-007
+  why: "The pipeline asks for an entry zone on stocks already owned and has never saved a published row; exit guidance is what a holder needs."
+  depends_on: [WP-018]
+  risk: high
+  autonomy: review
+  model: claude-opus-5-5
+  touches: [scheduler/orchestrator.py, scheduler/decision.py, agents/target_updater.py, api/main.py, scheduler/invariants.py, tests/test_holdings_review.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Add review_holding(holding, agent_results, fair_value) to scheduler/decision.py returning review_action (from target_updater.exit_signal), thesis_status (rule shared with agents/discovery_rescorer.py), reason, stop and target."
+    - "When the pipeline is not on_demand, build a HOLDING_REVIEW record per holding instead of a BUY-style recommendation; metadata.kind = 'HOLDING_REVIEW'."
+    - "Before insert, mark the holding's previous live review superseded so one live row exists per holding."
+    - "Stops and targets are read from portfolio_holdings; this job does not write them."
+    - "Add reviewAction, thesisStatus and reviewReason to GET /api/portfolio from the live review; keep exitSignal for the current dashboard."
+    - "Exclude HOLDING_REVIEW rows from /api/recommendations by default."
+    - "Add the invariant: live reviews equal open holdings on each trading day."
+    - "POST /api/analyse keeps its present behaviour."
+    - "Tests: 3 holdings yield 3 live reviews; a second run supersedes rather than duplicates; no review is opened as a paper position."
+  acceptance:
+    - "pytest tests/test_holdings_review.py passes"
+    - "After one production run: select count(*) from recommendations where metadata->>'kind'='HOLDING_REVIEW' and valid_till >= current_date equals select count(*) from portfolio_holdings where status='OPEN'"
+    - "select count(*) from paper_portfolio_positions p join recommendations r on r.id = p.rec_id where r.metadata->>'kind'='HOLDING_REVIEW' returns 0"
+  tests: [tests/test_holdings_review.py]
+  rollback: "Revert the PR; set valid_till to yesterday on HOLDING_REVIEW rows to hide them."
+  effort_hours: 8
+
+- id: WP-022
+  title: "Label the backtest honestly in the API"
+  adr: ADR-006
+  why: "The 62 to 66 percent backtest tests a technical rule on a survivorship-biased universe, and its Max DD is the worst single trade."
+  depends_on: []
+  risk: low
+  autonomy: auto
+  model: claude-sonnet-5-5
+  touches: [api/main.py, agents/backtester.py, tests/test_backtest_summary.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "In the /api/backtest/summary response add strategy='technical_rule_only', survivorship_bias=true, and a caveat string."
+    - "Return the max_drawdown value under worstTrade as well; keep maxDrawdown for one release."
+    - "Return the Sharpe value under alphaMeanOverStd as well, since it is not annualised."
+    - "Correct the docstrings in agents/backtester.py to match."
+    - "Do not rename database columns."
+  acceptance:
+    - "pytest tests/test_backtest_summary.py passes"
+    - "The endpoint response contains survivorship_bias: true and worstTrade"
+  tests: [tests/test_backtest_summary.py]
+  rollback: "Revert the PR."
+  effort_hours: 2
+
+- id: WP-023
+  title: "Report ADR signals and ledger evaluation in the evidence pack"
+  adr: ADR-006
+  why: "The pack mislabels discovery rows as orchestrator runs and reports suppression as a share of saved rows; it should carry the signals each ADR names."
+  depends_on: [WP-005, WP-014, WP-017]
+  risk: low
+  autonomy: review
+  model: claude-sonnet-5-5
+  touches: [scripts/build_architect_pack.py, tests/test_architect_pack.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Read runs by daily_runs.pipeline; report orchestrator and discovery separately."
+    - "Report suppression as a share of symbols analysed, from details.reasons."
+    - "Add sections: job ledger coverage (jobs due vs rows), invariant breaches in 30 days, exception allowlist count, schema check result, LLM tokens per run."
+    - "Add ledger sections: rows, labelled rows, share by data_quality, pre-screen pass vs fail alpha with interval, gate score top vs bottom half, and the WP-017 report."
+    - "Split paper-book results by rec source."
+    - "State the n and interval next to every rate."
+    - "Tests: section builders on fixture rows; pack builds with an empty candidates table."
+  acceptance:
+    - "pytest tests/test_architect_pack.py passes"
+    - "python scripts/build_architect_pack.py completes and CURRENT_STATE.md contains the headings 'Job ledger' and 'Candidate ledger'"
+    - "CURRENT_STATE.md reports orchestrator and discovery run counts on separate lines, each matching select pipeline, count(*) from daily_runs group by 1"
+  tests: [tests/test_architect_pack.py]
+  rollback: "Revert the PR."
+  effort_hours: 5
+
+- id: WP-024
+  title: "Refresh the docs and remove the deprecated Breeze job"
+  adr: ADR-008
+  why: "CLAUDE.md disagrees with the code in at least five places listed in REVIEW.md section 4, and the Breeze refresh job serves a deprecated source."
+  depends_on: [WP-011, WP-021]
+  risk: low
+  autonomy: review
+  model: claude-sonnet-5-5
+  touches: [CLAUDE.md, EXECUTION_PLAN.md, docs/ARCHITECTURE.md, docs/FABLE5_REDESIGN_PROMPT.md, docs/execution_roadmap.md, worker.py, data/breeze_auth.py, data/options_fetcher.py, requirements.txt, tests/test_options_fetcher.py]
+  db_migration: null
+  prod_data_change: null
+  steps:
+    - "Correct each row of REVIEW.md section 4 in CLAUDE.md."
+    - "Replace the EXECUTION_PLAN.md progress percentage with a pointer to workplan.yaml and STATUS.md; mark P4-D and the Quantsapp line deferred per ADR-008."
+    - "Replace docs/ARCHITECTURE.md with a short pointer to docs/architecture/; delete docs/FABLE5_REDESIGN_PROMPT.md and docs/execution_roadmap.md if nothing links to them."
+    - "Remove job_breeze_token_refresh from worker.py, the Breeze branch from data/options_fetcher.py, data/breeze_auth.py, and breeze-connect from requirements.txt."
+    - "Delete run_discovery_node from scheduler/orchestrator.py only if no test imports it; otherwise leave it and note why."
+    - "List the Railway env vars that can now be removed (BREEZE_*, ICICI_*) in the PR description for the maintainer."
+  acceptance:
+    - "python -c 'import worker' succeeds"
+    - "grep -rn 'breeze' worker.py data/options_fetcher.py requirements.txt returns nothing"
+    - "python -m pytest tests/ -q -m 'not integration' passes"
+    - "pytest tests/test_worker_schedule.py tests/test_options_fetcher.py passes"
+  tests: [tests/test_options_fetcher.py]
+  rollback: "Revert the PR."
+  effort_hours: 4

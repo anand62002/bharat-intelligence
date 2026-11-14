@@ -801,23 +801,18 @@ def _build_rag_description(
 # Composite scoring
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Weights per agent (must sum to 1.0)
-_AGENT_WEIGHTS = {
-    "technical":     0.20,
-    "fundamental":   0.25,
-    "sentiment":     0.10,
-    "institutional": 0.20,
-    "macro":         0.10,
-    "historical_rag":0.10,
-    "commodities":   0.05,
-}
-
-
 def _composite_score(agent_results: dict) -> float:
-    """Weighted average of all agent scores, 0–100."""
+    """
+    Weighted average of all agent scores, 0–100.
+
+    Weights come from data/decision_config.py (ADR-003: equal across agents).
+    Never define an agent-weight table here — tests/test_decision_config.py
+    fails if any module other than decision_config does.
+    """
+    from data.decision_config import discovery_weights
     total_w = 0.0
     weighted_sum = 0.0
-    for name, weight in _AGENT_WEIGHTS.items():
+    for name, weight in discovery_weights().items():
         res = agent_results.get(name, {})
         score = res.get("score")
         if score is not None:

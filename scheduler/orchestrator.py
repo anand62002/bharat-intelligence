@@ -69,11 +69,10 @@ from langgraph.graph import StateGraph, END                    # noqa: E402
 from data.llm_utils import first_text  # model-agnostic response text extraction
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-AGENT_NAMES: list[str] = [
-    "technical", "fundamental", "sentiment",
-    "institutional", "macro", "historical_rag", "commodities",
-]
-DEFAULT_ACCURACY      = 70.0    # fallback accuracy when agent_performance has no row
+# Agent list and weighting policy live in data/decision_config.py (ADR-003).
+from data import decision_config  # noqa: E402
+AGENT_NAMES: list[str] = list(decision_config.AGENT_NAMES)
+DEFAULT_ACCURACY      = 70.0    # legacy "accuracy" mode only: fallback when agent_performance has no row
 # Upgraded 2026-10-02: claude-sonnet-4-6 -> claude-opus-5-5 (P7-A).
 # Synthesis is the highest-leverage call in the system — it runs the bull/bear
 # debate across 7 agent signals and produces the published recommendation — so
@@ -223,15 +222,16 @@ def _composite_score(
     weights before computing the composite. Weights are re-normalised after
     applying multipliers so they still sum to 1.0.
     """
-    # Apply regime multipliers if regime is known
+    # Regime multipliers are off by default (ADR-003: they multiplied weights
+    # that were never validated). Gate: decision_config.REGIME_MULTIPLIERS_ENABLED.
     effective_weights = weights
-    if regime:
+    if regime and decision_config.REGIME_MULTIPLIERS_ENABLED:
         try:
             from agents.regime_detector import apply_regime_multipliers
             effective_weights = apply_regime_multipliers(weights, regime)
             log.debug("_composite_score: applied %s regime multipliers", regime)
         except Exception as _re:
-            log.debug("_composite_score: regime multipliers unavailable — %s", _re)
+            log.warning("_composite_score: regime multipliers unavailable — %s", _re)
 
     total_w   = 0.0
     total     = 0.0
@@ -847,12 +847,15 @@ async def load_symbols_node(state: OrchestratorState) -> dict:
 
 async def load_weights_node(state: OrchestratorState) -> dict:
     """
-    Fetch the latest accuracy_90d for each agent from Supabase agent_performance.
-    Normalise so weights sum to 1.0.
-    Agents with no performance record receive DEFAULT_ACCURACY (70.0).
+    Agent weights for the composite (ADR-003).
+
+    Mode "equal" (default, data/decision_config.py): 1/len(AGENT_NAMES) each;
+    agent_performance is NOT read — it is for reporting only.
+    Mode "accuracy" (rollback only): latest accuracy_90d per agent from
+    agent_performance, normalised; missing agents receive DEFAULT_ACCURACY.
     """
     raw: dict[str, float] = {}
-    client = _supabase()
+    client = _supabase() if not decision_config.weights_are_equal() else None
     if client:
         try:
             resp = (
@@ -871,11 +874,15 @@ async def load_weights_node(state: OrchestratorState) -> dict:
         except Exception as exc:
             log.warning("Could not load agent performance weights: %s", exc)
 
-    weights = _normalise_weights(raw)
-    log.info(
-        "Agent weights: %s",
-        {k: f"{v:.4f}" for k, v in weights.items()},
-    )
+    if decision_config.weights_are_equal():
+        weights = {a: round(1.0 / len(AGENT_NAMES), 6) for a in AGENT_NAMES}
+        log.info(decision_config.describe_weights())
+    else:
+        weights = _normalise_weights(raw)
+        log.info(
+            "Agent weights (accuracy mode): %s",
+            {k: f"{v:.4f}" for k, v in weights.items()},
+        )
 
     # ── Load current market regime ───────────────────────────────────��────────
     current_regime = None
@@ -884,11 +891,13 @@ async def load_weights_node(state: OrchestratorState) -> dict:
         current_regime = load_current_regime()
         if current_regime:
             log.info(
-                "Current regime: %s (confidence=%s%%) — applying weight multipliers",
+                "Current regime: %s (confidence=%s%%) — weight multipliers %s",
                 current_regime.get("regime"), current_regime.get("confidence"),
+                "ON" if decision_config.REGIME_MULTIPLIERS_ENABLED
+                else "OFF (data/decision_config.py)",
             )
         else:
-            log.info("No regime data available — using flat weights")
+            log.info("No regime data available")
     except Exception as _regime_exc:
         log.warning("Regime load failed (non-fatal): %s", _regime_exc)
 

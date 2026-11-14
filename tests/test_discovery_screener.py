@@ -600,7 +600,7 @@ class TestCompositeScore:
         results = _make_agent_results(80)
         del results["commodities"]
         score = _composite_score(results)
-        # Without commodities (weight 0.05), remaining weights sum to 0.95
+        # Without commodities, the remaining agents still average to 80
         # score should still be ~80 because all are 80
         assert 70 < score <= 100
 
@@ -613,19 +613,20 @@ class TestCompositeScore:
         score = _composite_score(results)
         assert score > 0  # other agents still contribute
 
-    def test_fundamental_has_higher_weight_than_sentiment(self):
+    def test_agents_weighted_equally(self):
+        """ADR-003: discovery composite uses equal weights from data/decision_config.py."""
         results = _make_agent_results(50)
         results["fundamental"]["score"] = 100
         results["sentiment"]["score"]   = 0
-        high = _composite_score(results)
+        a = _composite_score(results)
 
         results2 = _make_agent_results(50)
         results2["fundamental"]["score"] = 0
         results2["sentiment"]["score"]   = 100
-        low = _composite_score(results2)
+        b = _composite_score(results2)
 
-        # fundamental weight 0.25 > sentiment weight 0.10
-        assert high > low
+        assert a == pytest.approx(b)
+        assert a == pytest.approx(50.0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
