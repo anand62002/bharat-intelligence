@@ -301,6 +301,16 @@ def _is_horizon_reached(entry_date: date, today: date = None) -> bool:
 # Core operations
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _drop_holding_reviews(recs: list[dict]) -> tuple[list[dict], int]:
+    """Remove recs with metadata.kind == 'HOLDING_REVIEW'. Returns (kept, n_dropped)."""
+    kept = [
+        r for r in recs
+        if not (isinstance(r.get("metadata"), dict)
+                and r["metadata"].get("kind") == "HOLDING_REVIEW")
+    ]
+    return kept, len(recs) - len(kept)
+
+
 def open_new_positions(client, dry_run: bool = True) -> dict:
     """
     Open paper positions for BUY recs that don't have a position yet.
@@ -361,6 +371,13 @@ def open_new_positions(client, dry_run: bool = True) -> dict:
         len(recs), len(existing_rec_ids), len(open_symbols),
         len(recs) - len(existing_rec_ids),
     )
+
+    # ADR-007 / WP-004: holdings reviews are not entry calls. Keeping them out
+    # keeps the 90-day paper book a single strategy (discovery calls).
+    recs, n_reviews = _drop_holding_reviews(recs)
+    if n_reviews:
+        log.info("Skipped %d HOLDING_REVIEW recs (not part of the 90-day paper book)", n_reviews)
+        skipped += n_reviews
 
     for rec in recs:
         rec_id  = str(rec.get("id", ""))

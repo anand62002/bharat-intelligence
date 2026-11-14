@@ -280,3 +280,19 @@ class TestSeedPendingOutcome:
             rec_date    = date.today(),
         )
         assert result is False
+
+
+class TestSeedPendingOutcomeStoresScores:
+    """WP-004: the inserted row carries composite_score and validation_kappa."""
+
+    @patch("agents.outcome_tracker._fetch_price_on_date", return_value=22000.0)
+    def test_row_has_score_and_kappa(self, _mock_price):
+        mock_client = MagicMock()
+        seed_pending_outcome(
+            client=mock_client, rec_id="r", symbol="TITAN", action="HOLD",
+            entry_price=3025.0, rec_date=date.today(),
+            composite_score=63.4, validation_kappa=0.519,
+        )
+        row = mock_client.table.return_value.insert.call_args.args[0]
+        assert row["composite_score"] == 63.4
+        assert row["validation_kappa"] == 0.519

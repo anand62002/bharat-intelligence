@@ -1371,6 +1371,10 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             "metadata": {
                 "price":             result.current_price,
                 "sector":            result.sector,
+                # WP-004: frozen at insert. metadata.signal_score is refreshed by
+                # re-confirmations and the daily re-check; this one never changes,
+                # so the outcome row records the score the call was made on.
+                "call_signal_score": result.upside_confidence,
                 "discovery_score":   result.composite_score,
                 "screen_triggers":   result.screen_triggers,
                 "risks":             risks,

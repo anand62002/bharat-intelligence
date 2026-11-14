@@ -1692,6 +1692,10 @@ async def save_recs_node(state: OrchestratorState) -> dict:
                 if _yrs is not None:
                     row["metadata"]["data_years_available"] = int(_yrs)
                 row["metadata"]["data_quality"]  = _dq
+                # WP-004: persist the composite the decision was made on, so the
+                # daily seeder and backfill can copy it onto the outcome row.
+                if rec.get("composite_score") is not None:
+                    row["metadata"]["composite_score"] = rec["composite_score"]
                 if tech_sig.get("atr_14") is not None:
                     row["metadata"]["atr_14"]           = tech_sig["atr_14"]
                     row["metadata"]["atr_stoploss"]     = tech_sig.get("atr_stoploss")
@@ -1725,23 +1729,26 @@ async def save_recs_node(state: OrchestratorState) -> dict:
                             entry_price = float(entry_high)
                         else:
                             entry_price = None
-                        gov_check = rec.get("gov_check") or {}
-                        val_kappa = None
-                        if isinstance(gov_check, dict) and "validation" in gov_check:
-                            val_kappa = gov_check["validation"].get("aggregate_kappa")
-                        seed_pending_outcome(
+                        from agents.rec_outcome_seeder import outcome_scores
+                        composite_score, val_kappa = outcome_scores(rec)
+                        seeded = seed_pending_outcome(
                             client          = client,
                             rec_id          = str(rec_id),
                             symbol          = rec["symbol"],
                             action          = rec.get("action", "BUY"),
                             entry_price     = entry_price,
                             rec_date        = date.today(),
-                            composite_score = rec.get("composite_score"),
+                            composite_score = composite_score,
                             agent_signals   = rec.get("agent_signals", {}),
                             validation_kappa = val_kappa,
                         )
+                        if not seeded:
+                            errors.append(f"outcome_seed {rec['symbol']}: insert failed")
                     except Exception as ot_exc:
-                        log.debug("[%s] outcome seed skipped: %s", rec["symbol"], ot_exc)
+                        # Was log.debug — a failed seed silently dropped the rec
+                        # from the track record (WP-004 / ADR-005).
+                        log.warning("[%s] outcome seed failed: %s", rec["symbol"], ot_exc)
+                        errors.append(f"outcome_seed {rec['symbol']}: {ot_exc}")
         except Exception as exc:
             log.error("[%s] save failed: %s", rec["symbol"], exc)
             errors.append(f"save {rec['symbol']}: {exc}")
