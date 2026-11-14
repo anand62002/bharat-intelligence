@@ -438,7 +438,7 @@ const computePortfolioAlerts = (portfolio) => {
 
 // ─── ATOMS ───────────────────────────────────────────────────────────────────
 const Tag=({children,color=C.accent,small=false})=>(
-  <span style={{background:color+"22",color,border:`1px solid ${color}44`,borderRadius:4,padding:small?"1px 5px":"2px 7px",fontSize:small?9:11,fontWeight:700,letterSpacing:.3,whiteSpace:"nowrap"}}>{children}</span>
+  <span style={{display:"inline-flex",alignItems:"center",background:color+"14",color,borderRadius:4,padding:small?"1px 6px":"2px 8px",fontSize:small?10.5:11.5,fontWeight:700,letterSpacing:".03em",whiteSpace:"nowrap",fontFamily:SANS}}>{children}</span>
 );
 const Bar=({pct,color=C.accent,h=5})=>(
   <div style={{background:C.border,borderRadius:4,height:h,overflow:"hidden"}}>
@@ -449,11 +449,13 @@ const Dot=({color=C.green,pulse=false})=>(
   <span style={{display:"inline-block",width:7,height:7,borderRadius:"50%",background:color,animation:pulse?"pulse 2s infinite":undefined,flexShrink:0}}/>
 );
 /** Empty-state placeholder shown instead of mock data when API is live but has no rows yet. */
-const EmptyState=({icon="📡",title,sub,mono=false})=>(
-  <div style={{textAlign:"center",padding:"52px 24px",color:C.muted}}>
-    <div style={{fontSize:34,marginBottom:10}}>{icon}</div>
-    <div style={{fontSize:13,fontWeight:600,color:C.textDim,marginBottom:6}}>{title}</div>
-    {sub&&<div style={{fontSize:12,color:C.muted,maxWidth:380,margin:"0 auto",lineHeight:1.7,fontFamily:mono?MONO:undefined}}>{sub}</div>}
+// `icon` is accepted for old call sites but no longer drawn: the Editorial
+// style uses a single neutral line icon instead of emoji.
+const EmptyState=({title,sub,mono=false})=>(
+  <div style={{textAlign:"center",padding:"40px 20px",color:C.textDim,border:`1px dashed ${C.borderHi}`,borderRadius:8,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 8v4M12 16h.01"/></svg>
+    <div style={{fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.text}}>{title}</div>
+    {sub&&<div style={{fontSize:13,maxWidth:460,lineHeight:1.6,fontFamily:mono?MONO:undefined}}>{sub}</div>}
   </div>
 );
 const GovShield=({size=18})=>(
@@ -1577,8 +1579,8 @@ function DiscoveryRecsTable({universe}){
   const ac=s=>BULL_SIGNALS.has(s)?C.green:BEAR_SIGNALS.has(s)?C.red:C.accent;
   return(
     <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,marginTop:14,marginBottom:14}}>
-      <div onClick={()=>setCollapsed(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 14px",cursor:"pointer"}}>
-        <span style={{fontSize:12.5,fontWeight:700,color:C.cyan}}>📋 All Discovery Recs</span>
+      <div role="button" tabIndex={0} aria-expanded={!collapsed} onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();e.currentTarget.click();}}} onClick={()=>setCollapsed(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"12px 14px",cursor:"pointer",minHeight:48}}>
+        <span style={{fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.text}}>All discovery calls</span>
         <span style={{fontSize:11,color:C.muted,marginLeft:2}}>{total} unique ideas · sorted by date</span>
         <span style={{marginLeft:"auto",fontSize:12.5,color:C.muted}}>{collapsed?"▶":"▼"}</span>
       </div>
@@ -1599,7 +1601,7 @@ function DiscoveryRecsTable({universe}){
                 return(
                   <tr key={s.id} style={{borderBottom:`1px solid ${C.border}22`,opacity:isStale?0.55:1,background:isCrit?C.green+"08":"transparent"}}>
                     <td style={{padding:"5px 8px",fontFamily:MONO,color:C.text,fontWeight:700,whiteSpace:"nowrap"}}>
-                      {isCrit&&<span style={{color:C.green,marginRight:3}}>🚀</span>}{s.symbol}
+                      {s.symbol}{isCrit&&<span style={{marginLeft:6}}><Tag color={C.accent} small>Critical</Tag></span>}
                     </td>
                     <td style={{padding:"5px 8px"}}><span style={{color:ac(s.action),fontWeight:700}}>{s.action}</span></td>
                     <td style={{padding:"5px 8px"}}><span style={{color:isCrit?C.green:C.cyan,fontSize:10.5}}>{s.opportunityTier||"STANDARD"}</span></td>
@@ -1656,9 +1658,9 @@ function DiscoveryRunsPanel({runs,apiLoaded}){
   return(
     <div style={panelStyle}>
       {/* Header — always visible, click to expand */}
-      <div style={headerStyle} onClick={()=>setOpen(o=>!o)}>
+      <div role="button" tabIndex={0} aria-expanded={open} onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();e.currentTarget.click();}}} style={headerStyle} onClick={()=>setOpen(o=>!o)}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <span style={{fontSize:14}}>🔭</span>
+          
           <span style={{fontSize:12.5,fontWeight:700,color:C.text}}>Daily Screened Stocks</span>
           {hasRuns&&(
             <span style={{fontSize:11,color:C.muted,fontFamily:MONO,marginLeft:4}}>
@@ -1765,6 +1767,7 @@ function DiscoveryRunsPanel({runs,apiLoaded}){
 // ─── GOVERNANCE RESEARCH AGENT TAB ───────────────────────────────────────────
 export function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded, liveAttribution}){
   const _feed   = Array.isArray(_rf) ? _rf : [];
+  const govNarrow = useNarrow(900);
   // Agent debate log entries live inside each research proposal's debate_log JSONB field.
   // We extract and flatten them from the live feed — no separate mock array needed.
   const _debate = _feed.flatMap(r=>(r.debateLog||r.debate_log||[]));
@@ -1778,7 +1781,6 @@ export function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded,
   return(
     <div style={{animation:"fadeUp .3s ease"}}>
       <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:16}}>
-        <div style={{width:34,height:34,borderRadius:8,background:C.purple+"18",border:`1px solid ${C.purple}44`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🧬</div>
         <div>
           <h1 style={{fontFamily:SERIF,fontSize:28,fontWeight:600,color:C.text,letterSpacing:-.3,lineHeight:1.2,margin:0}}>Governance Research & Self-Improvement Agent</h1>
           <div style={{fontSize:11,color:C.muted}}>Continuously monitors AI research, whitepapers, and market analysis literature to propose system upgrades · Agent debate before user review</div>
@@ -1799,7 +1801,7 @@ export function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded,
         IS_LIVE && apiLoaded && _feed.length===0
           ? <EmptyState icon="🧬" title="No research proposals yet"
               sub="The governance research agent scans arXiv, SSRN, and finance journals daily at 04:00 IST. Proposals appear here after the first successful scheduler run." />
-          : <div style={{display:"grid",gridTemplateColumns:"340px 1fr",gap:16}}>
+          : <div style={{display:"grid",gridTemplateColumns:govNarrow?"minmax(0,1fr)":"340px minmax(0,1fr)",gap:16,alignItems:"start"}}>
           <div>
             <div style={{fontSize:12,color:C.muted,marginBottom:8}}>Sources monitored: arXiv, SSRN, Google Scholar, Anthropic blog, Morgan Stanley Research, SEBI circulars, RBI papers, DeepMind, OpenAI, academic finance journals</div>
             {_feed.map(r=>{
@@ -1820,9 +1822,9 @@ export function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded,
                   <div style={{fontSize:12.5,fontWeight:600,color:C.text,marginBottom:2,lineHeight:1.4}}>{r.title}</div>
                   <div style={{fontSize:11,color:C.muted,marginBottom:5}}>{r.source} · Relevance: <span style={{color:C.accent,fontWeight:700}}>{r.relevance}%</span></div>
                   <div style={{display:"flex",gap:10}}>
-                    <span style={{fontSize:11,color:C.green}}>👍 {r.votes.for}</span>
-                    <span style={{fontSize:11,color:C.red}}>👎 {r.votes.against}</span>
-                    <span style={{fontSize:11,color:C.muted}}>🤷 {r.votes.abstain}</span>
+                    <span style={{fontSize:12,color:C.green}}>For {r.votes.for}</span>
+                    <span style={{fontSize:12,color:C.red}}>Against {r.votes.against}</span>
+                    <span style={{fontSize:12,color:C.textDim}}>Abstain {r.votes.abstain}</span>
                   </div>
                 </div>
               );
@@ -1853,7 +1855,7 @@ export function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded,
               </div>
 
               <div style={{background:C.purple+"08",border:`1px solid ${C.purple}33`,borderRadius:7,padding:10,marginBottom:10}}>
-                <div style={{fontSize:12,fontWeight:700,color:C.purple,marginBottom:4}}>🔧 Proposed System Change</div>
+                <div style={{fontFamily:SERIF,fontSize:16,fontWeight:600,color:C.text,marginBottom:4}}>Proposed system change</div>
                 <div style={{fontSize:12.5,color:C.text,lineHeight:1.65,marginBottom:7}}>{paper.proposedChange}</div>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                   <div>
@@ -1910,12 +1912,12 @@ export function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded,
                 )}
                 {paper.debateStatus==="debating"&&(
                   <button onClick={()=>onOpenARIA("research_debate",paper)} style={{background:`linear-gradient(135deg,${C.accent},${C.accentDim})`,border:"none",borderRadius:6,padding:"8px 14px",color:C.bg,fontSize:12.5,fontWeight:700,cursor:"pointer",flex:1}}>
-                    ⚡ Cast Your Vote / Approve
+                    Cast your vote
                   </button>
                 )}
                 {paper.debateStatus==="approved"&&(
                   <button onClick={()=>onOpenARIA("research_approved",paper)} style={{background:`${C.green}`,border:"none",borderRadius:6,padding:"8px 14px",color:C.onFill,fontSize:12.5,fontWeight:700,cursor:"pointer",flex:1}}>
-                    📋 View Implementation Steps
+                    View implementation steps
                   </button>
                 )}
               </div>
@@ -1943,7 +1945,7 @@ export function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded,
               ))}
               {_feed.some(r=>r.debateStatus==="debating")&&(
                 <button onClick={()=>onOpenARIA("research_debate",_feed.find(r=>r.debateStatus==="debating"))} style={{background:`linear-gradient(135deg,${C.accent},${C.accentDim})`,border:"none",borderRadius:6,padding:"8px 14px",color:C.bg,fontSize:12.5,fontWeight:700,cursor:"pointer",width:"100%",marginTop:6}}>
-                  ⚡ You are the Tiebreaker — Discuss with ARIA to Decide
+                  You're the tiebreaker: discuss with ARIA to decide
                 </button>
               )}
             </div>
@@ -2020,7 +2022,7 @@ function OptionsSignalPanel({signal}){
   return(
     <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:16,marginBottom:16}}>
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
-        <span style={{fontSize:18}}>📊</span>
+        
         <span style={{fontWeight:700,color:C.text}}>NIFTY Options Sentiment</span>
         {src==='fallback'&&<span style={{fontSize:12.5,color:C.muted,background:C.surface,padding:'2px 6px',borderRadius:4}}>VIX-estimated</span>}
       </div>
@@ -2067,7 +2069,7 @@ function PortfolioRiskPanel({risk}){
   return(
     <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-        <span style={{fontSize:12.5,fontWeight:700,color:C.accent}}>⚡ Portfolio Risk Dashboard</span>
+        <span style={{fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.text}}>Portfolio risk</span>
         <span style={{fontSize:11,color:C.muted}}>{risk.snapshot_date} · {risk.holdings_count} holdings</span>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(96px,1fr))",gap:7,marginBottom:10}}>
@@ -2884,11 +2886,11 @@ ${agentLines||"—"}`;
         </div>
         {ariaContext&&(
           <div style={{display:"flex",gap:5,marginTop:5,flexWrap:"wrap",alignItems:"center"}}>
-            {ariaContext.type==="discovery"&&discoveryStock&&<Tag color={C.cyan} small>🔍 {discoveryStock.symbol}</Tag>}
-            {ariaContext.type?.includes("research")&&ariaContext.paper&&<Tag color={C.purple} small>📄 Research</Tag>}
-            {ariaContext.type==="holding"&&ariaContext.holding&&<Tag color={C.teal} small>💼 {ariaContext.holding.symbol}</Tag>}
-            {ariaContext.type==="portfolio"&&<Tag color={C.teal} small>💼 Portfolio</Tag>}
-            {ariaContext.type==="daily_run"&&<Tag color={C.orange} small>📊 Today's Run</Tag>}
+            {ariaContext.type==="discovery"&&discoveryStock&&<Tag color={C.cyan} small>Discovery · {discoveryStock.symbol}</Tag>}
+            {ariaContext.type?.includes("research")&&ariaContext.paper&&<Tag color={C.purple} small>Research</Tag>}
+            {ariaContext.type==="holding"&&ariaContext.holding&&<Tag color={C.teal} small>Holding · {ariaContext.holding.symbol}</Tag>}
+            {ariaContext.type==="portfolio"&&<Tag color={C.teal} small>Portfolio</Tag>}
+            {ariaContext.type==="daily_run"&&<Tag color={C.orange} small>Today's run</Tag>}
             <button onClick={onClearContext} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:12,marginLeft:"auto"}}>✕</button>
           </div>
         )}
@@ -2982,7 +2984,7 @@ function SystemHealthPanel({health}){
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           <span style={{fontSize:12.5,fontWeight:700,color:hasIssues?(errors>0?C.red:C.accent):C.green}}>
-            🔌 Data Source Health
+            Data source health
           </span>
           {errors>0 && <span style={{background:C.red,color:C.onFill,borderRadius:8,padding:"0 5px",fontSize:11,fontWeight:700}}>{errors} error{errors>1?"s":""}</span>}
           {warnings>0 && <span style={{background:C.accent,color:C.onFill,borderRadius:8,padding:"0 5px",fontSize:11,fontWeight:700}}>{warnings} warning{warnings>1?"s":""}</span>}
@@ -3012,7 +3014,7 @@ function SystemHealthPanel({health}){
                 <Tag color={col} small>{c.severity.toUpperCase()}</Tag>
               </div>
               <div style={{fontSize:11,color:C.textDim,marginLeft:16,marginBottom:c.action?3:0}}>{c.detail}</div>
-              {c.action && <div style={{fontSize:10.5,color:col,background:col+"10",borderRadius:3,padding:"2px 7px",marginLeft:16}}>⚡ {c.action}</div>}
+              {c.action && <div style={{fontSize:10.5,color:col,background:col+"10",borderRadius:3,padding:"2px 7px",marginLeft:16}}>{c.action}</div>}
             </div>
           );
         })}
@@ -3035,12 +3037,13 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
   return(
     <div style={{border:`1px solid ${C.border}`,borderRadius:8,marginTop:14,overflow:"hidden"}}>
       <button
+        aria-expanded={expanded}
         onClick={()=>setExpanded(e=>!e)}
         style={{width:"100%",background:C.surface,border:"none",padding:"9px 12px",
           display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}
       >
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <span style={{fontSize:12,fontWeight:700,color:C.purple}}>📋 Paper Portfolio (Simulation)</span>
+          <span style={{fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.text}}>Paper portfolio <span style={{fontFamily:SANS,fontSize:12,fontWeight:400,color:C.textDim}}>simulation</span></span>
           <span style={{fontSize:10.5,color:C.muted}}>auto-follows BUY signals · validates system before live trading</span>
         </div>
         <div style={{display:"flex",gap:12,alignItems:"center"}}>
@@ -3121,8 +3124,8 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
                 <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase"}}>Open Positions ({open.length})</div>
                 {open.length>15&&<button onClick={()=>setExpanded(e=>!e)} style={{fontSize:10,color:C.purple,background:"none",border:"none",cursor:"pointer",padding:0}}>showing all {open.length}</button>}
               </div>
-              <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"hidden",maxHeight:400,overflowY:"auto"}}>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 55px 65px 65px 70px 80px",background:C.panel,padding:"5px 9px",gap:4,position:"sticky",top:0,zIndex:1}}>
+              <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"auto",maxHeight:400}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 55px 65px 65px 70px 80px",minWidth:460,background:C.panel,padding:"5px 9px",gap:4,position:"sticky",top:0,zIndex:1}}>
                   {["Symbol","Qty","Entry","Current","P&L%","Tier"].map(h=>(
                     <div key={h} style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</div>
                   ))}
@@ -3131,7 +3134,7 @@ function PaperPortfolioPanel({data, history, apiLoaded}){
                   const pct = p.unrealized_pnl_pct??0;
                   return(
                     <div key={p.id} style={{
-                      display:"grid",gridTemplateColumns:"1fr 55px 65px 65px 70px 80px",
+                      display:"grid",gridTemplateColumns:"1fr 55px 65px 65px 70px 80px",minWidth:460,
                       padding:"5px 9px",gap:4,alignItems:"center",
                       background:i%2===0?C.bg:C.surface,
                       borderTop:`1px solid ${C.border}`,
@@ -3460,7 +3463,7 @@ function ConfidenceCalibrationChart({ calibration }) {
 
       {!anyData ? (
         <div style={{textAlign:"center",padding:"16px 0"}}>
-          <div style={{fontSize:11,color:C.muted}}>📐 Calibration data will appear once</div>
+          <div style={{fontSize:12,color:C.textDim}}>Calibration data will appear once</div>
           <div style={{fontSize:11,color:C.muted}}>the first 90-day outcomes are resolved.</div>
           <div style={{fontSize:10.5,color:C.textDim,marginTop:4}}>First results ~90 days after the system starts generating recommendations.</div>
         </div>
@@ -3625,7 +3628,7 @@ function BacktestPanel({ backtestData, apiLoaded }) {
 
       {splitRows.length === 0 ? (
         <div style={{textAlign:"center",padding:"20px 0"}}>
-          <div style={{fontSize:11,color:C.muted}}>📊 Backtest runs on the 1st of each month.</div>
+          <div style={{fontSize:12,color:C.textDim}}>Backtest runs on the 1st of each month.</div>
           <div style={{fontSize:10.5,color:C.textDim,marginTop:4}}>
             {apiLoaded
               ? "First results available after the next monthly backtest run."
@@ -3638,7 +3641,7 @@ function BacktestPanel({ backtestData, apiLoaded }) {
       ) : (
         <>
           {/* Summary tiles */}
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:8,marginBottom:12}}>
             {[
               { label:"Avg Hit Rate", value: avgHR!=null ? avgHR.toFixed(1)+"%":"-", good: avgHR!=null&&avgHR>=55, icon:"🎯" },
               { label:"Avg Alpha 90d", value: avgAlpha!=null ? (avgAlpha>=0?"+":"")+avgAlpha.toFixed(2)+"%":"-", good: avgAlpha!=null&&avgAlpha>=3, icon:"📈" },
@@ -3646,7 +3649,6 @@ function BacktestPanel({ backtestData, apiLoaded }) {
               { label:"Avg Max DD", value: avgDD!=null ? (avgDD*100).toFixed(1)+"%":"-", good: avgDD!=null&&avgDD>-0.15, icon:"🛡️" },
             ].map(({label,value,good,icon})=>(
               <div key={label} style={{background:C.bg,borderRadius:7,padding:9,textAlign:"center",border:`1px solid ${good?C.green+"44":C.border}`}}>
-                <div style={{fontSize:13,marginBottom:3}}>{icon}</div>
                 <div style={{fontSize:13,fontWeight:800,color:good?C.green:value==="-"?C.muted:C.orange,fontFamily:MONO}}>{value}</div>
                 <div style={{fontSize:10,color:C.muted,marginTop:2}}>{label}</div>
               </div>
@@ -3734,7 +3736,7 @@ function AgentAttributionPanel({attribution, liveAttribution}){
         {isLiveMode ? liveAttribution?.note : attribution?.note}
       </div>
       <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"auto",maxHeight:"60vh"}}>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 70px 80px",background:C.panel,padding:"5px 9px",gap:4,position:"sticky",top:0,zIndex:1}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 70px 80px",minWidth:400,background:C.panel,padding:"5px 9px",gap:4,position:"sticky",top:0,zIndex:1}}>
           {["Agent","Signals","Bullish",
             isLiveMode?"Live Alpha":"Hit Rate",
             isLiveMode?"Beat NIFTY%":"Avg Alpha"
@@ -3760,7 +3762,7 @@ function AgentAttributionPanel({attribution, liveAttribution}){
             : (alp!=null?`${alp>=0?"+":""}${alp.toFixed(1)}%`:"—");
           return(
             <div key={a.agent_name} style={{
-              display:"grid",gridTemplateColumns:"1fr 60px 60px 70px 80px",
+              display:"grid",gridTemplateColumns:"1fr 60px 60px 70px 80px",minWidth:400,
               padding:"5px 9px",gap:4,alignItems:"center",
               background:i%2===0?C.bg:C.surface,
               borderTop:`1px solid ${C.border}`,
@@ -3791,7 +3793,7 @@ function LivePerformancePanel({livePerf}){
   if(!livePerf || !livePerf.has_live_data) return(
     <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:14}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-        <div style={{fontSize:12,fontWeight:700,color:C.accent}}>📈 Live Open Positions</div>
+        <div style={{fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.text}}>Live open positions</div>
         <span style={{fontSize:10,background:C.orange+"22",color:C.orange,borderRadius:4,padding:"2px 7px"}}>awaiting 16:30 IST poller</span>
       </div>
       <div style={{fontSize:11,color:C.textDim}}>
@@ -3817,7 +3819,7 @@ function LivePerformancePanel({livePerf}){
       {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
         <div>
-          <div style={{fontSize:12,fontWeight:700,color:C.accent}}>📈 Live Open Positions</div>
+          <div style={{fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.text}}>Live open positions</div>
           <div style={{fontSize:10.5,color:C.muted,marginTop:1}}>{open} recs tracked · {posC} beating NIFTY · updates 16:30 IST</div>
         </div>
         <div style={{display:"flex",gap:12}}>
@@ -3861,7 +3863,7 @@ function LivePerformancePanel({livePerf}){
         <div>
           <div style={{fontSize:10.5,fontWeight:700,color:C.muted,marginBottom:5,textTransform:"uppercase"}}>Top Open Recs by Live Alpha</div>
           <div style={{border:`1px solid ${C.border}`,borderRadius:6,overflow:"auto",maxHeight:"60vh"}}>
-            <div style={{display:"grid",gridTemplateColumns:"80px 50px 55px 55px 60px 50px",gap:0,padding:"5px 10px",borderBottom:`1px solid ${C.border}`,background:C.bg,position:"sticky",top:0,zIndex:1}}>
+            <div style={{display:"grid",gridTemplateColumns:"150px 100px 72px 72px 96px 56px",gap:10,minWidth:596,padding:"5px 10px",borderBottom:`1px solid ${C.border}`,background:C.bg,position:"sticky",top:0,zIndex:1}}>
               {["Symbol","Action","Return","Alpha","Entry","Days"].map(h=>(
                 <span key={h} style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</span>
               ))}
@@ -3874,8 +3876,8 @@ function LivePerformancePanel({livePerf}){
               const aCol = r.action==="BUY"?C.green:r.action==="SELL"?C.red:r.action==="HOLD"?C.teal:C.orange;
               return(
                 <div key={r.id||i} style={{
-                  display:"grid",gridTemplateColumns:"80px 50px 55px 55px 60px 50px",
-                  gap:0,padding:"5px 10px",
+                  display:"grid",gridTemplateColumns:"150px 100px 72px 72px 96px 56px",minWidth:596,
+                  gap:10,padding:"5px 10px",
                   borderBottom:i<recs.length-1?`1px solid ${C.border}33`:"none",
                   background:i%2===0?"transparent":C.bg+"44",
                 }}>
@@ -3929,7 +3931,7 @@ function PerformanceTab({accuracy, outcomes, alphaChart, attribution, livePerf, 
       {IS_LIVE && apiLoaded && !accuracy && !livePerf?.has_live_data && (
         <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:14}}>
           <div style={{fontSize:11,color:C.muted}}>
-            📊 <strong style={{color:C.text}}>90-day outcomes</strong> will appear here once the first recommendations are 90+ days old.
+            <strong style={{color:C.text}}>90-day outcomes</strong> will appear here once the first recommendations are 90+ days old.
             Live alpha data above updates daily at 16:30 IST.
           </div>
         </div>
@@ -4319,7 +4321,7 @@ export default function App(){
           // Mark the row as failed so the user can see it didn't save
           console.error("Portfolio save failed:", err);
           setPortfolio(p=>p.map(h=>h.id===tempId
-            ? {...h, _saving:false, _error:true, notes:"⚠️ Not saved — check connection"}
+            ? {...h, _saving:false, _error:true, notes:"Not saved. Check the connection and try again."}
             : h));
         });
       }
@@ -4372,7 +4374,7 @@ export default function App(){
             }).catch(err=>{
               console.error("Portfolio exit save failed:",err);
               setPortfolio(p=>p.map(h=>h.symbol===action.symbol&&h.status==="exited"
-                ?{...h,_saving:false,_error:true,notes:"⚠️ Exit not saved — check connection"}:h));
+                ?{...h,_saving:false,_error:true,notes:"Exit not saved. Check the connection and try again."}:h));
             });
           }
           return prev.map(h=>h.symbol===action.symbol&&h.status==="holding"
@@ -4622,14 +4624,14 @@ export default function App(){
                         <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}><div style={{display:"flex",gap:5,alignItems:"center"}}><Tag color={sc}>{(a.severity||"info").toUpperCase()}</Tag><span style={{fontSize:11,color:C.muted}}>{a.module} · {a.time}</span></div><Tag color={a.resolved?C.green:C.red}>{a.resolved?"RESOLVED":"OPEN"}</Tag></div>
                         <div style={{fontSize:12.5,fontWeight:600,color:C.text,marginBottom:3}}>{a.title}</div>
                         <div style={{fontSize:11,color:C.textDim,lineHeight:1.6,marginBottom:4}}>{a.detail}</div>
-                        {a.action&&<div style={{fontSize:10.5,color:sc,background:sc+"0f",borderRadius:3,padding:"2px 6px"}}>⚡ {a.action}</div>}
+                        {a.action&&<div style={{fontSize:10.5,color:sc,background:sc+"0f",borderRadius:3,padding:"2px 6px"}}>{a.action}</div>}
                       </div>
                     );})}
                   </div>
                 ) : (
                   <div style={{background:C.green+"0a",border:`1px solid ${C.green}22`,borderRadius:7,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:8}}>
                     <Dot color={C.green}/>
-                    <span style={{fontSize:12,color:C.green}}>✅ All systems nominal — no governance alerts</span>
+                    <span style={{fontSize:13,color:C.green}}>All systems normal. No governance alerts.</span>
                   </div>
                 )}
                 <div style={{fontSize:12.5,fontWeight:700,color:C.accent,marginBottom:8}}>Enhancement Proposals</div>
