@@ -428,11 +428,12 @@ const computePortfolioAlerts = (portfolio) => {
         holding:h,
       });
     }
-    if(toStop < 8 && toStop > 0) alerts.push({id:`stop-${h.id}`,symbol:h.symbol,severity:"critical",type:"stoploss_proximity",title:`${h.symbol} approaching stop-loss`,detail:`Current ₹${h.currentPrice} is ${toStop.toFixed(1)}% above stop ₹${h.stoplossPrice}.`,action:"Review or reduce position",portfolioId:h.id});
-    if(toTarget < 12 && toTarget > 0) alerts.push({id:`tgt-${h.id}`,symbol:h.symbol,severity:"info",type:"target_proximity",title:`${h.symbol} approaching target`,detail:`${toTarget.toFixed(1)}% from target ₹${h.targetPrice}. Consider partial profits.`,action:"Review profit booking",portfolioId:h.id});
+    if(toStop < 8 && toStop > 0) alerts.push({id:`stop-${h.id}`,symbol:h.symbol,severity:"critical",type:"stoploss_proximity",title:`${h.symbol} approaching stop-loss`,detail:`Price ${inr(h.currentPrice)} is ${toStop.toFixed(1)}% above the stop-loss at ${inr(h.stoplossPrice)}.`,action:"Review or reduce position",portfolioId:h.id});
+    if(toTarget < 12 && toTarget > 0) alerts.push({id:`tgt-${h.id}`,symbol:h.symbol,severity:"info",type:"target_proximity",title:`${h.symbol} approaching target`,detail:`${toTarget.toFixed(1)}% below the target of ${inr(h.targetPrice)}. Consider booking partial profits.`,action:"Review profit booking",portfolioId:h.id});
     if(pnlPct > 15 && h.linkedRecId) alerts.push({id:`mile-${h.id}`,symbol:h.symbol,severity:"info",type:"rec_milestone",title:`${h.symbol} +${pnlPct.toFixed(1)}% since recommendation`,detail:`P&L: ₹${((h.currentPrice-h.avgBuy)*h.qty).toLocaleString("en-IN",{maximumFractionDigits:0})}. Original target still ahead.`,action:"Review thesis validity",portfolioId:h.id});
   });
-  return alerts;
+  const rank={critical_danger:0,critical:1,warning:2,info:3};
+  return alerts.sort((a,b)=>(rank[a.severity]??9)-(rank[b.severity]??9));
 };
 
 // ─── ATOMS ───────────────────────────────────────────────────────────────────
@@ -730,79 +731,6 @@ function CriticalOpportunityBanner({stocks, onSelect, onOpenARIA}){
 }
 
 // ─── CRITICAL DANGER BANNER ───────────────────────────────────────────────────
-function CriticalDangerBanner({holdings, onOpenARIA}){
-  if(!holdings.length) return null;
-  return(
-    <div className="critical-danger" style={{
-      background:`${C.red}0d`,
-      border:`1.5px solid ${C.red}99`,
-      borderRadius:10,padding:14,marginBottom:14,
-    }}>
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-        <div style={{width:28,height:28,borderRadius:6,background:C.red,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0,animation:"criticalBadge 1.5s ease-in-out infinite"}}>🚨</div>
-        <div style={{flex:1}}>
-          <div style={{display:"flex",alignItems:"center",gap:7}}>
-            <span style={{fontSize:14,fontWeight:800,color:C.red,letterSpacing:-.2}}>CRITICAL DANGER</span>
-            <span style={{background:C.red,color:C.onFill,borderRadius:4,padding:"1px 7px",fontSize:12,fontWeight:800,animation:"criticalBadge 1.5s ease-in-out infinite"}}>
-              ACT NOW — HIGH CONFIDENCE DROP ALERT
-            </span>
-          </div>
-          <div style={{fontSize:12,color:C.red,marginTop:1}}>
-            {holdings.length} holding{holdings.length>1?"s":""} flagged with 70%+ predicted drop in 2–3 months at ≥65% confidence — immediate review required
-          </div>
-        </div>
-        <button onClick={()=>onOpenARIA("portfolio_danger")} style={{background:C.red+"22",border:`1px solid ${C.red}55`,borderRadius:6,padding:"5px 11px",color:C.red,fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-          ✦ Get ARIA Advice
-        </button>
-      </div>
-      {holdings.map(h=>(
-        <div key={h.id} style={{background:C.bg,border:`1px solid ${C.red}55`,borderRadius:8,padding:12,marginBottom:8}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-            <div>
-              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:2}}>
-                <span style={{fontSize:14,fontWeight:800,color:C.text,fontFamily:MONO}}>{h.symbol}</span>
-                <span style={{background:C.red+"22",color:C.red,border:`1px solid ${C.red}44`,borderRadius:4,padding:"1px 7px",fontSize:12.5,fontWeight:800}}>-{h.dangerDropPct}% PREDICTED</span>
-                <span style={{background:C.red+"15",color:C.red,borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:700}}>{h.dangerWindow}</span>
-              </div>
-              <div style={{fontSize:12,color:C.textDim}}>{h.name} · {h.qty} shares @ avg ₹{h.avgBuy} · Current ₹{h.currentPrice}</div>
-              <div style={{fontSize:11,color:C.red,marginTop:1}}>
-                Predicted floor: ~₹{Math.round(h.currentPrice*(1-h.dangerDropPct/100)).toLocaleString()} · Portfolio at risk: ₹{(h.currentPrice*h.qty).toLocaleString("en-IN",{maximumFractionDigits:0})}
-              </div>
-            </div>
-            <div style={{textAlign:"right",flexShrink:0}}>
-              <div style={{fontSize:16,fontWeight:800,color:C.red,fontFamily:MONO}}>{h.dangerConfidence}%</div>
-              <div style={{fontSize:10.5,color:C.muted}}>confidence</div>
-            </div>
-          </div>
-          {/* Danger detail */}
-          <div style={{background:C.red+"09",border:`1px solid ${C.red}22`,borderRadius:6,padding:"8px 10px",marginBottom:8}}>
-            <div style={{fontSize:11,fontWeight:700,color:C.red,marginBottom:3}}>Why the agents flagged this:</div>
-            <div style={{fontSize:12,color:C.red,lineHeight:1.65}}>{h.dangerTrigger}</div>
-          </div>
-          {/* Sources */}
-          {h.dangerSources&&(
-            <div style={{marginBottom:8}}>
-              <div style={{fontSize:11,color:C.muted,marginBottom:3}}>Verified sources:</div>
-              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                {h.dangerSources.map(src=>(
-                  <span key={src} style={{background:C.red+"0f",border:`1px solid ${C.red}22`,borderRadius:3,padding:"1px 6px",fontSize:10.5,color:C.red}}>{src}</span>
-                ))}
-              </div>
-            </div>
-          )}
-          {/* Confidence bar */}
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <span style={{fontSize:10.5,color:C.muted,whiteSpace:"nowrap"}}>Danger confidence</span>
-            <div style={{flex:1,background:C.border,borderRadius:3,height:5,overflow:"hidden"}}>
-              <div style={{width:`${h.dangerConfidence}%`,height:"100%",background:C.red,borderRadius:3}}/>
-            </div>
-            <span style={{fontSize:11,fontWeight:700,color:C.red,fontFamily:MONO}}>{h.dangerConfidence}%</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 // Shared signal-category sets (used in cards + deep dive)
 const BULL_SIGNALS=new Set(["BULLISH","BUY","POSITIVE","STRONG_BUY","BULLISH_ANALOGUE"]);
 const BEAR_SIGNALS=new Set(["BEARISH","SELL","NEGATIVE","AVOID","BEARISH_ANALOGUE","STRONG_SELL"]);
@@ -2072,113 +2000,6 @@ export function GovernanceResearchTab({onOpenARIA, researchFeed: _rf, apiLoaded,
 
 // ─── PORTFOLIO TAB ────────────────────────────────────────────────────────────
 // ─── BROKEN SYMBOLS BANNER ────────────────────────────────────────────────────
-function BrokenSymbolsBanner({broken, onFixed}){
-  const [fixing, setFixing] = useState({});    // symbol → loading|done|error
-  const [edits,  setEdits]  = useState({});    // symbol → custom yf_symbol input
-
-  if(!IS_LIVE || !broken || broken.length===0) return null;
-
-  const applyFix = async (item) => {
-    const yf = (edits[item.symbol] || item.suggested_yf || "").trim();
-    if(!yf){ alert("Enter a valid Yahoo Finance ticker (e.g. INDHOTEL.NS)"); return; }
-    setFixing(f=>({...f,[item.symbol]:"loading"}));
-    try {
-      await apiFetch("/api/symbol/override", {
-        method:"POST",
-        body: JSON.stringify({symbol: item.symbol, yf_symbol: yf}),
-      });
-      setFixing(f=>({...f,[item.symbol]:"done"}));
-      // Notify parent to re-fetch portfolio prices
-      if(onFixed) onFixed();
-    } catch(e) {
-      setFixing(f=>({...f,[item.symbol]:"error"}));
-    }
-  };
-
-  return(
-    <div style={{
-      background:`${C.accent}0d`,border:`1px solid ${C.accent}55`,
-      borderRadius:8,padding:"10px 13px",marginBottom:14,
-      borderLeft:`3px solid ${C.accent}`,
-    }}>
-      <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8}}>
-        <span style={{fontSize:14}}>⚠️</span>
-        <div>
-          <div style={{fontSize:12.5,fontWeight:700,color:C.accent}}>
-            {broken.length} holding{broken.length>1?"s":""} not updating prices
-          </div>
-          <div style={{fontSize:11,color:C.textDim}}>
-            The symbol name doesn't match Yahoo Finance. Apply the suggested fix below or enter the correct ticker.
-          </div>
-        </div>
-      </div>
-      <div style={{display:"flex",flexDirection:"column",gap:7}}>
-        {broken.map(item=>{
-          const st = fixing[item.symbol];
-          const suggested = item.suggested_yf;
-          const editVal = edits[item.symbol] ?? (suggested || "");
-          return(
-            <div key={item.symbol} style={{
-              background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,
-              padding:"7px 10px",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",
-            }}>
-              <div style={{flex:1,minWidth:120}}>
-                <div style={{display:"flex",alignItems:"center",gap:5}}>
-                  <span style={{fontSize:12,fontWeight:700,color:C.text,fontFamily:MONO}}>{item.symbol}</span>
-                  <span style={{fontSize:11,color:C.muted}}>({item.name})</span>
-                  {item.yf_symbol && (
-                    <span style={{fontSize:10.5,color:C.red,background:C.red+"15",borderRadius:3,padding:"1px 5px"}}>
-                      ❌ {item.yf_symbol} (broken)
-                    </span>
-                  )}
-                </div>
-                {item.avg_buy && <div style={{fontSize:10.5,color:C.muted}}>Avg buy: ₹{item.avg_buy.toLocaleString()}</div>}
-              </div>
-              {st==="done" ? (
-                <span style={{fontSize:11,color:C.green,fontWeight:700}}>✓ Fixed!</span>
-              ) : (
-                <>
-                  <input
-                    value={editVal}
-                    onChange={e=>setEdits(ed=>({...ed,[item.symbol]:e.target.value}))}
-                    placeholder={suggested || "e.g. INDHOTEL.NS"}
-                    style={{
-                      background:C.surface,border:`1px solid ${suggested?C.green+"55":C.border}`,
-                      borderRadius:4,padding:"3px 8px",color:C.text,fontSize:12,
-                      fontFamily:MONO,width:140,outline:"none",
-                    }}
-                  />
-                  {suggested && editVal===suggested && (
-                    <span style={{fontSize:10.5,color:C.green}}>💡 auto-suggested</span>
-                  )}
-                  <button
-                    onClick={()=>applyFix(item)}
-                    disabled={st==="loading"}
-                    style={{
-                      background:`${C.teal}`,border:"none",
-                      borderRadius:4,padding:"4px 10px",color:C.onFill,fontSize:11,
-                      fontWeight:700,cursor:st==="loading"?"wait":"pointer",whiteSpace:"nowrap",
-                    }}
-                  >
-                    {st==="loading"?"Fixing...":"Apply Fix"}
-                  </button>
-                  {st==="error" && (
-                    <span style={{fontSize:10.5,color:C.red}}>✗ Ticker not found — check it's correct</span>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <div style={{fontSize:10.5,color:C.muted,marginTop:7}}>
-        Tip: Fixes are saved permanently — you won't need to do this again for the same symbol.
-        To find the correct ticker, search <a href="https://finance.yahoo.com" target="_blank" rel="noreferrer" style={{color:C.accent}}>finance.yahoo.com</a>.
-      </div>
-    </div>
-  );
-}
-
 // ── Options Market Signal Panel ───────────────────────────────────────────────
 function OptionsSignalPanel({signal}){
   if(!signal) return null;
@@ -2284,194 +2105,458 @@ function PortfolioRiskPanel({risk}){
   );
 }
 
-function PortfolioTab({portfolio,setPortfolio,onOpenARIA,brokenSymbols,onFixBroken,portfolioRisk,optionsSignal,paperPortfolio,paperHistory,apiLoaded}){
-  const alerts=computePortfolioAlerts(portfolio);
-  const dangerHoldings=portfolio.filter(isCriticalDanger);
-  // Sort portfolio: danger holdings first
-  const sortedPortfolio=[...portfolio].sort((a,b)=>{
-    const ad=isCriticalDanger(a)?1:0, bd=isCriticalDanger(b)?1:0;
-    if(bd!==ad) return bd-ad;
-    // then by exit urgency: EXIT → BOOK PARTIAL → REVIEW → TRAIL → HOLD
-    return (EXIT_META[a.exitSignal]?.rank??9)-(EXIT_META[b.exitSignal]?.rank??9);
-  });
-  const exitCounts=portfolio.reduce((m,h)=>{if(h.exitSignal)m[h.exitSignal]=(m[h.exitSignal]||0)+1;return m;},{});
-  const totalInvested=portfolio.reduce((s,h)=>s+(h.avgBuy*h.qty),0);
-  const totalCurrent=portfolio.reduce((s,h)=>s+(h.currentPrice*h.qty),0);
-  const totalPnL=totalCurrent-totalInvested;
-  const totalPnLPct=totalInvested>0?(totalPnL/totalInvested)*100:0;
-  const sectorMap={};
-  portfolio.forEach(h=>{const v=h.currentPrice*h.qty;sectorMap[h.sector]=(sectorMap[h.sector]||0)+v;});
-  const sectorColors=[C.accent,C.blue,C.teal,C.purple,C.orange,C.green,C.cyan];
+// ─── PORTFOLIO ────────────────────────────────────────────────────────────────
+const EXIT_TONE={EXIT:"sell",BOOK_PARTIAL:"warn",REVIEW:"hold",TRAIL:"buy",HOLD:"mute"};
+const EXIT_LABEL={EXIT:"Exit",BOOK_PARTIAL:"Book partial",REVIEW:"Review",TRAIL:"Trail",HOLD:"Hold"};
+const RATCHET_LABEL={
+  TRAIL:["Trailing stop","Follows 15% below the price and only moves up"],
+  LOCK_20:["Stop locks +20%","Stop-loss raised to lock in a 20% gain"],
+  BREAKEVEN:["Stop at breakeven","Stop-loss raised to your buy price, so this position can't lose money"],
+};
+const SECTOR_SWATCH=[C.accent,C.blue,C.green,C.purple,C.orange,C.teal,C.cyan,C.lime,C.textDim];
+const holdingNumbers=h=>{
+  const price=h.currentPrice||0, avg=h.avgBuy||0, qty=h.qty||0;
+  const value=price*qty, cost=avg*qty, pnl=value-cost;
+  const pnlPct=cost>0?pnl/cost*100:0;
+  const toStop=h.stoplossPrice&&price?(price-h.stoplossPrice)/price*100:null;
+  const toTarget=h.targetPrice&&price?(h.targetPrice-price)/price*100:null;
+  return {price,value,cost,pnl,pnlPct,toStop,toTarget};
+};
+const needsAction=(h,n)=>isCriticalDanger(h)||["EXIT","BOOK_PARTIAL","REVIEW"].includes(h.exitSignal)||(n.toStop!=null&&n.toStop<8);
+
+function BrokenSymbolsBanner({broken, onFixed}){
+  const [fixing,setFixing]=useState({});   // symbol → loading|done|error|empty
+  const [edits,setEdits]=useState({});     // symbol → typed ticker
+  if(!IS_LIVE||!broken||broken.length===0) return null;
+  const applyFix=async item=>{
+    const yf=(edits[item.symbol]??item.suggested_yf??"").trim();
+    if(!yf){ setFixing(f=>({...f,[item.symbol]:"empty"})); return; }
+    setFixing(f=>({...f,[item.symbol]:"loading"}));
+    try{
+      await apiFetch("/api/symbol/override",{method:"POST",body:JSON.stringify({symbol:item.symbol,yf_symbol:yf})});
+      setFixing(f=>({...f,[item.symbol]:"done"}));
+      if(onFixed) onFixed();
+    }catch(e){ setFixing(f=>({...f,[item.symbol]:"error"})); }
+  };
   return(
-    <div style={{animation:"fadeUp .3s ease"}}>
-      {/* Critical danger banner — always first */}
-      <CriticalDangerBanner holdings={dangerHoldings} onOpenARIA={onOpenARIA}/>
-      {/* Broken symbol fix banner — shown when prices can't be fetched */}
-      <BrokenSymbolsBanner broken={brokenSymbols} onFixed={onFixBroken}/>
-
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-        <div>
-          <h1 style={{fontFamily:SERIF,fontSize:28,fontWeight:600,color:C.text,letterSpacing:-.3,lineHeight:1.2,margin:0}}>My Portfolio</h1>
-          <div style={{fontSize:11,color:C.muted,marginTop:1}}>System monitors holdings against agent signals · Critical danger detection active</div>
-        </div>
-        <div style={{display:"flex",gap:7}}>
-          <button onClick={()=>onOpenARIA("portfolio")} style={{background:C.teal+"22",border:`1px solid ${C.teal}44`,borderRadius:7,padding:"6px 12px",color:C.teal,fontSize:12.5,fontWeight:700,cursor:"pointer"}}>+ Add Holding</button>
-          <button onClick={()=>onOpenARIA("portfolio")} style={{background:C.purple+"22",border:`1px solid ${C.purple}44`,borderRadius:7,padding:"6px 12px",color:C.purple,fontSize:12.5,fontWeight:700,cursor:"pointer"}}>✦ Tell ARIA</button>
-        </div>
-      </div>
-
-      {/* Non-danger alerts */}
-      {alerts.filter(a=>a.severity!=="critical_danger").length>0&&(
-        <div style={{marginBottom:14}}>
-          <div style={{fontSize:12,fontWeight:700,color:C.accent,marginBottom:6}}>⚡ Portfolio Alerts ({alerts.filter(a=>a.severity!=="critical_danger").length})</div>
-          {alerts.filter(a=>a.severity!=="critical_danger").map(a=>{
-            const sc={critical:C.red,info:C.blue,warning:C.accent}[a.severity];
-            return(
-              <div key={a.id} style={{background:sc+"0d",border:`1px solid ${sc}44`,borderRadius:6,padding:"8px 11px",marginBottom:5,display:"flex",gap:8,alignItems:"flex-start"}}>
-                <Tag color={sc} small>{a.severity.toUpperCase()}</Tag>
-                <div style={{flex:1}}><div style={{fontSize:12,fontWeight:600,color:C.text}}>{a.title}</div><div style={{fontSize:11,color:C.textDim}}>{a.detail}</div></div>
-                <button onClick={()=>onOpenARIA("holding",portfolio.find(h=>h.id===a.portfolioId))} style={{background:C.purple+"22",border:`1px solid ${C.purple}44`,borderRadius:4,padding:"2px 7px",color:C.purple,fontSize:11,cursor:"pointer"}}>✦ ARIA</button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:9,marginBottom:14}}>
-        {[["Invested",`₹${totalInvested.toLocaleString("en-IN",{maximumFractionDigits:0})}`,C.text],["Current",`₹${totalCurrent.toLocaleString("en-IN",{maximumFractionDigits:0})}`,C.text],["P&L",`${totalPnL>=0?"+":""}₹${Math.abs(totalPnL).toLocaleString("en-IN",{maximumFractionDigits:0})}`,totalPnL>=0?C.green:C.red],["Return",`${totalPnLPct>=0?"+":""}${totalPnLPct.toFixed(1)}%`,totalPnLPct>=0?C.green:C.red]].map(([l,v,col])=>(
-          <div key={l} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:7,padding:"9px 12px"}}>
-            <div style={{fontSize:10.5,color:C.muted,textTransform:"uppercase",marginBottom:3}}>{l}</div>
-            <div style={{fontSize:15,fontWeight:800,color:col,fontFamily:MONO}}>{v}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Options market signal panel */}
-      <OptionsSignalPanel signal={optionsSignal}/>
-
-      {/* Portfolio risk panel */}
-      <PortfolioRiskPanel risk={portfolioRisk}/>
-
-      <div style={{display:"grid",gridTemplateColumns:"180px 1fr",gap:14}}>
-        <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:8,padding:11}}>
-          <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",marginBottom:8}}>Allocation</div>
-          {Object.entries(sectorMap).sort((a,b)=>b[1]-a[1]).map(([sector,val],i)=>{
-            const pct=(val/totalCurrent*100);
-            return(<div key={sector} style={{marginBottom:7}}>
-              <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}><span style={{fontSize:11,color:C.textDim}}>{sector}</span><span style={{fontSize:11,color:C.text,fontFamily:MONO}}>{pct.toFixed(0)}%</span></div>
-              <Bar pct={pct} color={sectorColors[i%sectorColors.length]} h={4}/>
-            </div>);
-          })}
-        </div>
-        <div>
-          {Object.keys(exitCounts).length>0&&(
-            <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:8}}>
-              <span style={{fontSize:10.5,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>Exit markers</span>
-              {Object.entries(EXIT_META).filter(([k])=>exitCounts[k]).map(([k,m])=>(
-                <span key={k} title={m.hint} style={{background:m.color+"18",border:`1px solid ${m.color}55`,color:m.color,borderRadius:4,padding:"1px 7px",fontSize:10.5,fontWeight:700,cursor:"help"}}>
-                  {m.icon} {m.label} {exitCounts[k]}
-                </span>
-              ))}
-              <span style={{fontSize:10,color:C.muted}}>rules-based · hover a marker for its reason · nothing is sold automatically</span>
-            </div>
-          )}
-          <div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:"auto",maxHeight:"60vh"}}>
-            <div style={{display:"grid",gridTemplateColumns:"1.4fr 50px 65px 65px 75px 80px 55px",background:C.panel,padding:"6px 11px",gap:4,position:"sticky",top:0,zIndex:1}}>
-              {["Symbol","Qty","Avg Buy","Current","P&L%","Status / Risk","Action"].map(h=><div key={h} style={{fontSize:10.5,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</div>)}
-            </div>
-            {sortedPortfolio.length===0&&(
-              <div style={{padding:"28px 11px",textAlign:"center",color:C.muted,fontSize:12}}>
-                No holdings yet — click <b style={{color:C.teal}}>+ Add Holding</b> or tell ARIA: "I bought RELIANCE 50 shares at ₹2,800"
-              </div>
-            )}
-            {sortedPortfolio.map((h,i)=>{
-              const pnlPct=((h.currentPrice-h.avgBuy)/h.avgBuy)*100;
-              const toTarget=((h.targetPrice-h.currentPrice)/h.currentPrice)*100;
-              const toStop=((h.currentPrice-h.stoplossPrice)/h.currentPrice)*100;
-              const isDanger=isCriticalDanger(h);
+    <div style={{border:`1px solid ${C.orange}`,background:C.orange+"10",borderRadius:8,padding:"14px 16px"}}>
+      <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+        <Icon name="info" style={{color:C.orange,marginTop:2}}/>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontWeight:600}}>{broken.length} holding{broken.length>1?"s aren't":" isn't"} getting live prices</div>
+          <div style={{fontSize:13,color:C.textDim,marginTop:2,lineHeight:1.5}}>The symbol doesn't match a Yahoo Finance ticker, so its value uses your buy price. Enter the right ticker (NSE code + .NS, BSE + .BO). Fixes are saved for good.</div>
+          <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:12}}>
+            {broken.map(item=>{
+              const st=fixing[item.symbol];
+              const val=edits[item.symbol]??(item.suggested_yf||"");
+              const id=`fix-${item.symbol}`;
               return(
-                <div key={h.id} className={isDanger?"critical-danger":""} style={{
-                  display:"grid",gridTemplateColumns:"1.4fr 50px 65px 65px 75px 80px 55px",
-                  padding:"8px 11px",
-                  background:isDanger?`${C.red}0d`:i%2===0?C.bg:C.surface,
-                  borderTop:`1px solid ${isDanger?C.red+"55":C.border}`,
-                  gap:4,alignItems:"center",
-                  borderLeft:isDanger?`3px solid ${C.red}`:toStop<8?`2px solid ${C.red}`:toTarget<12&&toTarget>0?`2px solid ${C.green}`:"2px solid transparent",
-                }}>
-                  <div>
-                    <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
-                      <span style={{fontSize:12,fontWeight:700,color:isDanger?C.red:C.onFill,fontFamily:MONO}}>{h.symbol}</span>
-                      {isDanger&&<span style={{background:C.red,color:C.onFill,borderRadius:3,padding:"0px 4px",fontSize:10.5,fontWeight:800,animation:"criticalBadge 1.5s ease-in-out infinite"}}>🚨</span>}
-                      {h.earningsAlert?.warning_level==="CRITICAL"&&<span title={`Earnings ${h.earningsAlert.days_until}d away${h.earningsAlert.quarter?" ("+h.earningsAlert.quarter+")":""} — CRITICAL`} style={{fontSize:12.5,cursor:"default"}}>🗓</span>}
-                      {h.earningsAlert?.warning_level==="WARNING"&&<span title={`Earnings ${h.earningsAlert.days_until}d away${h.earningsAlert.quarter?" ("+h.earningsAlert.quarter+")":""} — WARNING`} style={{fontSize:12.5,cursor:"default",opacity:0.75}}>🗓</span>}
-                      {EXIT_META[h.exitSignal]&&h.exitSignal!=="HOLD"&&(()=>{const m=EXIT_META[h.exitSignal];return(
-                        <span title={h.exitReason||m.hint}
-                          style={{background:m.color+"22",border:`1px solid ${m.color}66`,color:m.color,borderRadius:3,padding:"0px 5px",fontSize:10,fontWeight:800,cursor:"help"}}>
-                          {m.icon} {m.label}
-                        </span>);})()}
-                      {/* P7-A: dynamic target badges */}
-                      {(h.targetUpdateCount>0)&&<span
-                        title={`Target raised ${h.targetUpdateCount}× by AI (original: ₹${h.originalTarget?.toLocaleString()||'—'})`}
-                        style={{background:C.green+"22",border:`1px solid ${C.green}55`,color:C.green,borderRadius:3,padding:"0px 4px",fontSize:10,fontWeight:800,cursor:"default"}}>
-                        📈 ×{h.targetUpdateCount}
-                      </span>}
-                      {h.protectGainsFlag&&<span
-                        title="Steam detected — valuation extended. Target locked; protect profits."
-                        style={{background:C.accent+"22",border:`1px solid ${C.accent}55`,color:C.accent,borderRadius:3,padding:"0px 4px",fontSize:10,fontWeight:800,cursor:"default",animation:"criticalBadge 2s ease-in-out infinite"}}>
-                        🛡 Protect
-                      </span>}
-                      {h.stoplossRatchetLevel==="LOCK_20"&&<span
-                        title="Stoploss ratcheted to lock in 20% gain"
-                        style={{background:C.purple+"22",border:`1px solid ${C.purple}55`,color:C.purple,borderRadius:3,padding:"0px 4px",fontSize:10,fontWeight:700,cursor:"default"}}>
-                        🔒 +20%SL
-                      </span>}
-                      {h.stoplossRatchetLevel==="BREAKEVEN"&&<span
-                        title="Stoploss ratcheted to breakeven — position protected from loss"
-                        style={{background:C.teal+"22",border:`1px solid ${C.teal}55`,color:C.teal,borderRadius:3,padding:"0px 4px",fontSize:10,fontWeight:700,cursor:"default"}}>
-                        🔒 BE
-                      </span>}
-                      {h.stoplossRatchetLevel==="TRAIL"&&<span
-                        title="Trailing stop — follows 15% below the price and only moves up"
-                        style={{background:C.purple+"22",border:`1px solid ${C.purple}55`,color:C.purple,borderRadius:3,padding:"0px 4px",fontSize:10,fontWeight:700,cursor:"default"}}>
-                        🔒 TRAIL
-                      </span>}
-                    </div>
-                    <div style={{fontSize:10.5,color:C.muted}}>{h.sector}</div>
-                  </div>
-                  <span style={{fontSize:12,color:C.textDim,fontFamily:MONO}}>{h.qty}</span>
-                  <span style={{fontSize:12,color:C.textDim,fontFamily:MONO}}>₹{h.avgBuy.toLocaleString()}</span>
-                  <span style={{fontSize:12,color:isDanger?C.red:C.onFill,fontFamily:MONO}}>₹{h.currentPrice.toLocaleString()}</span>
-                  <div>
-                    <div style={{fontSize:12,fontWeight:700,color:pnlPct>=0?C.green:C.red,fontFamily:MONO}}>{pnlPct>=0?"+":""}{pnlPct.toFixed(1)}%</div>
-                    <div style={{fontSize:10.5,color:C.muted}}>₹{Math.round((h.currentPrice-h.avgBuy)*h.qty).toLocaleString()}</div>
-                  </div>
-                  <div>
-                    {isDanger
-                      ? <div><div style={{fontSize:11,fontWeight:700,color:C.red}}>-{h.dangerDropPct}% risk</div><div style={{fontSize:10.5,color:C.red}}>{h.dangerWindow}</div></div>
-                      : <div>
-                          <div style={{fontSize:11,color:toTarget>0?C.textDim:C.green}}>{toTarget>0?`+${toTarget.toFixed(0)}% to tgt`:"✓ past tgt"}</div>
-                          {/* Show original target if it's been raised */}
-                          {h.originalTarget&&h.originalTarget!==h.targetPrice&&(
-                            <div style={{fontSize:10,color:C.muted,textDecoration:"line-through"}}>was ₹{h.originalTarget?.toLocaleString()}</div>
-                          )}
-                          <div style={{fontSize:10.5,color:toStop<8?C.red:C.muted}}>{toStop.toFixed(0)}% to stop</div>
-                        </div>
-                    }
-                  </div>
-                  <button onClick={()=>onOpenARIA("holding",h)} style={{
-                    background:isDanger?C.red+"22":C.purple+"22",
-                    border:`1px solid ${isDanger?C.red:C.purple}33`,
-                    borderRadius:4,padding:"3px 6px",
-                    color:isDanger?C.red:C.purple,fontSize:11,cursor:"pointer",fontWeight:isDanger?800:400,
-                  }}>{isDanger?"🚨 ACT":"✦ ARIA"}</button>
+                <div key={item.symbol} style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                  <label htmlFor={id} style={{minWidth:130,fontSize:13}}>
+                    <span style={{fontFamily:SERIF,fontWeight:600,fontSize:16}}>{item.symbol}</span>
+                    {item.name&&<span style={{color:C.textDim}}> · {item.name}</span>}
+                  </label>
+                  {st==="done"?<span style={{color:C.green,fontWeight:600,fontSize:13}}>Fixed. Prices will refresh.</span>:(
+                    <>
+                      <input id={id} value={val} onChange={e=>{setEdits(ed=>({...ed,[item.symbol]:e.target.value}));if(st==="empty"||st==="error")setFixing(f=>({...f,[item.symbol]:null}));}}
+                        placeholder="e.g. BHARATSE.NS" aria-invalid={st==="empty"||st==="error"}
+                        style={{fontFamily:MONO,fontSize:13,minHeight:38,padding:"0 10px",width:170,borderRadius:6,background:C.surface,color:C.text,
+                          border:`1px solid ${st==="empty"||st==="error"?C.red:C.borderHi}`}}/>
+                      <button onClick={()=>applyFix(item)} disabled={st==="loading"} style={{...edBtn(),minHeight:38,cursor:st==="loading"?"wait":"pointer"}}>
+                        {st==="loading"?"Checking…":"Fix price"}
+                      </button>
+                      {item.suggested_yf&&val===item.suggested_yf&&<span style={{fontSize:12,color:C.textDim}}>Suggested</span>}
+                      {st==="empty"&&<span role="alert" style={{fontSize:12,color:C.red}}>Enter a ticker first.</span>}
+                      {st==="error"&&<span role="alert" style={{fontSize:12,color:C.red}}>That ticker wasn't found. Check it on finance.yahoo.com.</span>}
+                    </>
+                  )}
                 </div>
               );
             })}
           </div>
         </div>
       </div>
+    </div>
+  );
+}
 
-      {/* Paper Portfolio Panel (P5-B) */}
+function DangerCard({h,onAsk}){
+  const [open,setOpen]=useState(false);
+  return(
+    <div role="alert" style={{border:`1px solid ${C.red}`,background:C.red+"0c",borderRadius:8,padding:"14px 16px"}}>
+      <div style={{display:"flex",gap:10,alignItems:"flex-start",flexWrap:"wrap"}}>
+        <Icon name="info" style={{color:C.red,marginTop:2}}/>
+        <div style={{flex:"1 1 260px",minWidth:0}}>
+          <div style={{fontWeight:600}}>{h.symbol}: agents predict a fall of about {h.dangerDropPct}%{h.dangerWindow?` within ${h.dangerWindow}`:""}</div>
+          <div style={{fontSize:13,color:C.textDim,marginTop:2,lineHeight:1.5}}>
+            {h.dangerConfidence}% confidence · {inr(h.currentPrice*h.qty,0)} at risk · predicted floor about {inr(h.currentPrice*(1-h.dangerDropPct/100),0)}
+          </div>
+          {open&&(
+            <div style={{marginTop:10,fontSize:13,lineHeight:1.55}}>
+              {h.dangerTrigger&&<p style={{margin:0}}>{h.dangerTrigger}</p>}
+              {(h.dangerSources||[]).length>0&&<p style={{margin:"8px 0 0",color:C.textDim}}>Sources: {h.dangerSources.join(" · ")}</p>}
+            </div>
+          )}
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:10}}>
+            <button onClick={onAsk} style={{...edBtn(),minHeight:36}}>Review with ARIA</button>
+            {(h.dangerTrigger||(h.dangerSources||[]).length>0)&&
+              <button onClick={()=>setOpen(o=>!o)} aria-expanded={open} style={{...edBtn("ghost"),minHeight:36}}>{open?"Hide reasons":"Why?"}</button>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AddHoldingForm({portfolio,onSubmit,onCancel}){
+  const [sym,setSym]=useState(""); const [qty,setQty]=useState(""); const [avg,setAvg]=useState("");
+  const [tried,setTried]=useState(false);
+  const symU=sym.trim().toUpperCase();
+  const errs={};
+  if(!symU) errs.sym="Enter a symbol.";
+  else if(!/^[A-Z0-9&.-]{2,24}$/.test(symU)) errs.sym="Use the NSE symbol: letters and numbers only.";
+  const q=Number(qty), a=Number(avg);
+  if(!qty.trim()) errs.qty="Enter a quantity.";
+  else if(!Number.isInteger(q)||q<=0) errs.qty="Must be a whole number above 0.";
+  if(!avg.trim()) errs.avg="Enter your average price.";
+  else if(!(a>0)) errs.avg="Must be more than ₹0.";
+  const existing=symU&&(portfolio||[]).find(h=>h.status!=="exited"&&h.symbol.toUpperCase()===symU);
+  const submit=()=>{
+    setTried(true);
+    if(Object.keys(errs).length) return;
+    onSubmit({symbol:symU,qty:q,avgBuy:a});
+  };
+  const field=(label,key,val,set,props={})=>(
+    <label style={{display:"flex",flexDirection:"column",gap:6,fontSize:12.5,color:C.textDim,fontWeight:500,minWidth:0,...(props.wrap||{})}}>
+      {label}
+      <input value={val} onChange={e=>set(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")submit();}}
+        aria-invalid={tried&&!!errs[key]} placeholder={props.placeholder} inputMode={props.inputMode}
+        style={{fontFamily:key==="sym"?SANS:MONO,fontSize:14,minHeight:42,padding:"0 12px",borderRadius:6,background:C.surface,color:C.text,width:"100%",
+          border:`1px solid ${tried&&errs[key]?C.red:C.borderHi}`}}/>
+      {tried&&errs[key]&&<span role="alert" style={{color:C.red,fontSize:12}}>{errs[key]}</span>}
+      {key==="sym"&&existing&&!errs.sym&&<span style={{color:C.blue,fontSize:12}}>You hold {existing.qty} {symU}. This will be averaged into that position.</span>}
+    </label>
+  );
+  return(
+    <section style={{...edBox,padding:"18px 20px"}} aria-label="Add a holding">
+      <h3 style={{...edH3,fontSize:18}}>Add a holding <span style={{fontFamily:SANS,fontSize:12.5,color:C.textDim,fontWeight:400}}>The live price is fetched after you save.</span></h3>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,alignItems:"start"}}>
+        {field("Symbol","sym",sym,setSym,{placeholder:"e.g. RELIANCE or IHCL",wrap:{gridColumn:"span 2"}})}
+        {field("Quantity","qty",qty,setQty,{placeholder:"0",inputMode:"numeric"})}
+        {field("Average buy price (₹)","avg",avg,setAvg,{placeholder:"0.00",inputMode:"decimal"})}
+      </div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:14,alignItems:"center"}}>
+        <button onClick={submit} style={edBtn("accent")}>Save holding</button>
+        <button onClick={onCancel} style={edBtn("ghost")}>Cancel</button>
+        <span style={{fontSize:12.5,color:C.textDim}}>Or tell ARIA “I bought 15 Reliance at 2850”.</span>
+      </div>
+    </section>
+  );
+}
+
+function HoldingDetail({h,n,rec,onAsk,onViewRec,narrow}){
+  const has=h.targetPrice>0&&h.stoplossPrice>0&&n.price>0;
+  let nowPos=50;
+  if(has) nowPos=Math.max(2,Math.min(98,4+(n.price-h.stoplossPrice)/(h.targetPrice-h.stoplossPrice)*92));
+  const ratchet=RATCHET_LABEL[h.stoplossRatchetLevel];
+  const facts=[
+    ["Sector",h.sector||"—"],
+    ["Invested",inr(n.cost,0)],["Value now",inr(n.value,0)],
+    ["Plan",h.exitReason||(EXIT_META[h.exitSignal]?.hint)||"—"],
+    ...(ratchet?[["Stop-loss",ratchet[1]]]:[]),
+    ...(h.targetUpdateCount>0?[["Target",`Raised ${h.targetUpdateCount}× by the target updater${h.originalTarget?` (was ${inr(h.originalTarget)})`:""}`]]:[]),
+    ...(h.protectGainsFlag?[["Protect gains","Valuation looks stretched. Target locked; consider protecting profits."]]:[]),
+    ...(h.earningsAlert?.days_until!=null?[["Earnings",`In ${h.earningsAlert.days_until} day${h.earningsAlert.days_until===1?"":"s"}${h.earningsAlert.quarter?` (${h.earningsAlert.quarter})`:""}`]]:[]),
+    ...(h.fairValue?[["Fair value",inr(h.fairValue)]]:[]),
+    ...(h.notes?[["Notes",h.notes]]:[]),
+  ];
+  return(
+    <div style={{display:"grid",gridTemplateColumns:narrow?"minmax(0,1fr)":"minmax(0,1.2fr) minmax(0,1fr)",gap:24,padding:narrow?"14px 12px 18px":"18px 20px 20px",background:C.bg,borderTop:`1px solid ${C.border}`}}>
+      <div>
+        <h3 style={{...edH3,fontSize:16}}>Stop-loss to target</h3>
+        {has?(
+          <>
+            <div aria-hidden="true" style={{position:"relative",height:10,borderRadius:5,background:C.panel,margin:"14px 6px 18px"}}>
+              <span style={{position:"absolute",top:-7,left:"4%",width:4,height:24,borderRadius:2,background:C.red,transform:"translateX(-50%)"}}/>
+              <span style={{position:"absolute",top:-7,left:`${nowPos}%`,width:4,height:24,borderRadius:2,background:C.text,transform:"translateX(-50%)"}}/>
+              <span style={{position:"absolute",top:-7,left:"96%",width:4,height:24,borderRadius:2,background:C.green,transform:"translateX(-50%)"}}/>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:10,fontSize:12,color:C.textDim}}>
+              <div><div>Stop-loss</div><div style={{fontFamily:MONO,fontSize:14,fontWeight:600,color:C.text}}>{inr(h.stoplossPrice)}</div>{n.toStop>=0?<div>{n.toStop.toFixed(1)}% below the price</div>:<div style={{color:C.red,fontWeight:600}}>Price is {Math.abs(n.toStop).toFixed(1)}% under it</div>}</div>
+              <div><div>Now</div><div style={{fontFamily:MONO,fontSize:14,fontWeight:600,color:C.text}}>{inr(n.price)}</div></div>
+              <div><div>Target</div><div style={{fontFamily:MONO,fontSize:14,fontWeight:600,color:C.text}}>{inr(h.targetPrice)}</div><div>{n.toTarget>0?`${signedPct(n.toTarget)} away`:"Past target"}</div></div>
+            </div>
+          </>
+        ):<p style={{margin:0,fontSize:13,color:C.textDim}}>No target or stop-loss is set for this holding yet.</p>}
+        {isCriticalDanger(h)&&h.dangerTrigger&&<p style={{margin:"14px 0 0",fontSize:13,lineHeight:1.5,color:C.red}}>{h.dangerTrigger}</p>}
+      </div>
+      <div>
+        {facts.map(([k,v])=>(
+          <div key={k} style={{display:"flex",justifyContent:"space-between",gap:16,padding:"8px 0",borderTop:`1px solid ${C.border}`,fontSize:13}}>
+            <span style={{color:C.textDim,flexShrink:0}}>{k}</span><span style={{textAlign:"right"}}>{v}</span>
+          </div>
+        ))}
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}>
+          <button onClick={onAsk} style={{...edBtn(),minHeight:36}}><Icon name="spark"/>Ask ARIA</button>
+          {rec&&<button onClick={onViewRec} style={{...edBtn("ghost"),minHeight:36,color:C.accent}}>Latest call: {rec.action} →</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const PF_COLS=[
+  ["sym","Holding",""],["qty","Qty","r opt"],["avg","Avg buy","r opt"],["ltp","Price","r"],
+  ["value","Value","r opt"],["pnl","P&L","r opt"],["pnlPct","P&L %","r"],["plan","Plan","r opt"],
+];
+function PortfolioTab({portfolio,onOpenARIA,brokenSymbols,onFixBroken,portfolioRisk,optionsSignal,paperPortfolio,paperHistory,apiLoaded,onAddHolding,recs,onViewRec}){
+  const narrow=useNarrow(760);
+  const [showAdd,setShowAdd]=useState(false);
+  const [filter,setFilter]=useState("all");
+  const [query,setQuery]=useState("");
+  const [sortK,setSortK]=useState("plan");
+  const [sortDir,setSortDir]=useState(1);
+  const [expanded,setExpanded]=useState(null);
+  const [showAllAlerts,setShowAllAlerts]=useState(false);
+  const [flash,setFlash]=useState(null);
+
+  const holdings=(portfolio||[]).filter(h=>h.status!=="exited");
+  const rows=holdings.map(h=>({h,n:holdingNumbers(h)}));
+  const recByTicker=new Map();
+  (recs||[]).forEach(r=>{ if(!r.isDiscovery) recByTicker.set(cleanSym(r.symbol).toUpperCase(),r); });
+  const recFor=h=>{
+    const s=cleanSym(h.symbol).toUpperCase();
+    return recByTicker.get(s)||recByTicker.get(HOLDING_TICKER_ALIASES[s])||(h.yfSymbol&&recByTicker.get(cleanSym(h.yfSymbol).toUpperCase()))||null;
+  };
+
+  const invested=rows.reduce((a,r)=>a+r.n.cost,0), current=rows.reduce((a,r)=>a+r.n.value,0);
+  const pnl=current-invested, pnlPct=invested>0?pnl/invested*100:0;
+  const exitCounts=holdings.reduce((m,h)=>{if(h.exitSignal&&h.exitSignal!=="HOLD")m[h.exitSignal]=(m[h.exitSignal]||0)+1;return m;},{});
+  const danger=holdings.filter(isCriticalDanger);
+  const alerts=computePortfolioAlerts(holdings).filter(a=>a.severity!=="critical_danger");
+  const shownAlerts=showAllAlerts?alerts:alerts.slice(0,4);
+
+  const filters=[
+    ["all","All",()=>true],
+    ["action","Needs action",r=>needsAction(r.h,r.n)],
+    ["gain","Gainers",r=>r.n.pnl>0],
+    ["loss","Losers",r=>r.n.pnl<0],
+  ];
+  const fFn=(filters.find(f=>f[0]===filter)||filters[0])[2];
+  const q=query.trim().toLowerCase();
+  const urgency=r=>isCriticalDanger(r.h)?-1:(EXIT_META[r.h.exitSignal]?.rank??9);
+  const key={sym:r=>r.h.symbol,qty:r=>r.h.qty,avg:r=>r.h.avgBuy,ltp:r=>r.n.price,value:r=>r.n.value,pnl:r=>r.n.pnl,pnlPct:r=>r.n.pnlPct,plan:urgency}[sortK];
+  const view=rows.filter(fFn)
+    .filter(r=>!q||[r.h.symbol,r.h.name,r.h.sector].some(v=>v&&String(v).toLowerCase().includes(q)))
+    .sort((a,b)=>{const x=key(a),y=key(b);return (x<y?-1:x>y?1:0)*sortDir||b.n.value-a.n.value;});
+  const sortBy=k=>{ if(k===sortK) setSortDir(d=>-d); else {setSortK(k); setSortDir(k==="sym"||k==="plan"?1:-1);} };
+
+  const secMap={};
+  rows.forEach(r=>{const s=r.h.sector||"Unclassified";secMap[s]=(secMap[s]||0)+r.n.value;});
+  const secs=Object.entries(secMap).sort((a,b)=>b[1]-a[1]);
+  const top=secs[0];
+  const topPct=top&&current>0?top[1]/current*100:0;
+
+  const cols=narrow?"minmax(0,1fr) auto auto 20px":"minmax(170px,1.6fr) 64px 96px 96px 112px 112px 80px 112px 20px";
+  const loading=IS_LIVE&&!apiLoaded&&holdings.length===0;
+
+  return(
+    <div style={{animation:"fadeUp .3s ease",maxWidth:1440,margin:"0 auto",display:"flex",flexDirection:"column",gap:20}}>
+      <header style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",gap:12,flexWrap:"wrap"}}>
+        <div>
+          <h1 style={{fontFamily:SERIF,fontSize:narrow?26:32,fontWeight:600,margin:0,letterSpacing:-.3,lineHeight:1.15}}>My portfolio</h1>
+          <p style={{margin:"4px 0 0",fontSize:14,color:C.textDim}}>{holdings.length?`${holdings.length} holdings · prices refresh on every visit · nothing is sold automatically`:"Track live prices, P&L, stop-losses and agent signals"}</p>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button onClick={()=>setShowAdd(s=>!s)} aria-expanded={showAdd} style={edBtn("accent")}><Icon name="plus"/>Add holding</button>
+          <button onClick={()=>onOpenARIA("portfolio")} style={edBtn()}><Icon name="spark"/>Tell ARIA</button>
+        </div>
+      </header>
+
+      {flash&&(
+        <div role="status" style={{display:"flex",gap:10,alignItems:"center",padding:"10px 14px",borderRadius:6,background:C.green+"12",fontSize:13.5}}>
+          <span style={{flex:1}}>{flash}</span>
+          <button onClick={()=>setFlash(null)} aria-label="Dismiss" style={{border:0,background:"transparent",cursor:"pointer",color:C.textDim,width:32,height:32,display:"inline-grid",placeItems:"center"}}><Icon name="close" size={14}/></button>
+        </div>
+      )}
+
+      {showAdd&&<AddHoldingForm portfolio={holdings} onCancel={()=>setShowAdd(false)} onSubmit={v=>{
+        const how=onAddHolding(v);
+        setShowAdd(false);
+        setFlash(how==="averaged"?`Added ${v.qty} more ${v.symbol} to your position.`:`${v.symbol} added. Fetching its live price…`);
+      }}/>}
+
+      {loading&&(
+        <div aria-busy="true" style={{display:"flex",flexDirection:"column",gap:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:12}}>{[0,1,2,3].map(i=><div key={i} style={{height:92,borderRadius:8,background:C.panel,animation:"pulse 1.4s ease-in-out infinite"}}/>)}</div>
+          <div style={{height:320,borderRadius:8,background:C.panel,animation:"pulse 1.4s ease-in-out infinite"}}/>
+        </div>
+      )}
+
+      {!loading&&holdings.length===0&&!showAdd&&(
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center",gap:10,padding:"48px 20px",border:`1px dashed ${C.borderHi}`,borderRadius:8,color:C.textDim}}>
+          <div style={{fontFamily:SERIF,fontSize:20,fontWeight:600,color:C.text}}>No holdings yet</div>
+          <p style={{margin:0,maxWidth:440,fontSize:13.5,lineHeight:1.55}}>Add the stocks you own and the agents will track prices, P&amp;L, stop-losses and fresh signals for each one.</p>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center"}}>
+            <button onClick={()=>setShowAdd(true)} style={edBtn("accent")}>Add your first holding</button>
+            <button onClick={()=>onOpenARIA("portfolio")} style={edBtn()}>Tell ARIA instead</button>
+          </div>
+        </div>
+      )}
+
+      {holdings.length>0&&(
+        <>
+          {(danger.length>0||(brokenSymbols||[]).length>0||alerts.length>0)&&(
+            <section aria-label="Needs attention" style={{display:"flex",flexDirection:"column",gap:10}}>
+              <h2 style={{...edH3,fontSize:20,margin:0}}>Needs attention</h2>
+              {danger.map(h=><DangerCard key={h.id} h={h} onAsk={()=>onOpenARIA("holding",h)}/>)}
+              <BrokenSymbolsBanner broken={brokenSymbols} onFixed={onFixBroken}/>
+              {alerts.length>0&&(
+                <div style={{border:`1px solid ${C.border}`,borderRadius:8,background:C.surface}}>
+                  {shownAlerts.map((a,i)=>{
+                    const tone=a.severity==="critical"?C.red:a.severity==="warning"?C.orange:C.blue;
+                    return(
+                      <div key={a.id} style={{display:"flex",gap:12,alignItems:"center",padding:"11px 14px",borderTop:i?`1px solid ${C.border}`:"none",flexWrap:"wrap"}}>
+                        <span aria-hidden="true" style={{width:8,height:8,borderRadius:"50%",background:tone,flexShrink:0}}/>
+                        <div style={{flex:"1 1 240px",minWidth:0}}>
+                          <div style={{fontWeight:600,fontSize:13.5}}>{a.title}</div>
+                          <div style={{fontSize:12.5,color:C.textDim}}>{a.detail}</div>
+                        </div>
+                        <button onClick={()=>onOpenARIA("holding",holdings.find(h=>h.id===a.portfolioId))} style={{...edBtn("ghost"),minHeight:34,color:C.accent}}>Ask ARIA</button>
+                      </div>
+                    );
+                  })}
+                  {alerts.length>4&&(
+                    <button onClick={()=>setShowAllAlerts(s=>!s)} style={{...edBtn("ghost"),width:"100%",borderTop:`1px solid ${C.border}`,borderRadius:0,color:C.accent}}>
+                      {showAllAlerts?"Show fewer":`Show all ${alerts.length} alerts`}
+                    </button>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+
+          <div style={{display:"grid",gridTemplateColumns:narrow?"repeat(2,minmax(0,1fr))":"repeat(4,minmax(0,1fr))",gap:12}}>
+            {[
+              ["Invested",inr(invested,0),`${holdings.length} holdings`,null],
+              ["Current value",inr(current,0),(brokenSymbols||[]).length?`${brokenSymbols.length} price${brokenSymbols.length>1?"s":""} unavailable`:"Live prices",null],
+              ["Total P&L",(pnl>=0?"+":"−")+inr(Math.abs(pnl),0),signedPct(pnlPct),dirColor(pnl)],
+              ["Plan",Object.keys(exitCounts).length?Object.entries(exitCounts).sort((a,b)=>(EXIT_META[a[0]]?.rank??9)-(EXIT_META[b[0]]?.rank??9)).map(([k,c])=>`${c} ${EXIT_LABEL[k]||k}`).join(" · "):"All on plan","Rules-based markers · advisory only",null],
+            ].map(([k,v,sub,color])=>(
+              <div key={k} style={{...edBox,padding:"14px 16px",minWidth:0}}>
+                <div style={{fontSize:11,color:C.textDim,textTransform:"uppercase",letterSpacing:".06em"}}>{k}</div>
+                <div style={{fontFamily:k==="Plan"?SANS:SERIF,fontSize:k==="Plan"?16:narrow?21:28,fontWeight:600,marginTop:4,color:color||C.text,lineHeight:1.2}}>{v}</div>
+                <div style={{fontSize:12.5,marginTop:4,color:color||C.textDim,fontFamily:k==="Total P&L"?MONO:SANS}}>{sub}</div>
+              </div>
+            ))}
+          </div>
+
+          <section aria-label="Holdings">
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
+              <div role="group" aria-label="Filter holdings" style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {filters.map(([id,label,fn])=>(
+                  <button key={id} onClick={()=>{setFilter(id);setExpanded(null);}} aria-pressed={filter===id} style={edChip(filter===id)}>
+                    {label}<span style={{fontFamily:MONO,fontSize:11,color:C.textDim}}>{rows.filter(fn).length}</span>
+                  </button>
+                ))}
+              </div>
+              <label style={{display:"flex",alignItems:"center",gap:8,flex:"1 1 200px",maxWidth:narrow?"none":300,minHeight:38,padding:"0 4px 0 12px",border:`1px solid ${C.border}`,borderRadius:6,background:C.surface,color:C.textDim}}>
+                <Icon name="search" size={15}/>
+                <span style={{position:"absolute",width:1,height:1,overflow:"hidden",clip:"rect(0 0 0 0)"}}>Search holdings</span>
+                <input type="search" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search holdings"
+                  style={{flex:1,minWidth:0,border:0,background:"transparent",color:C.text,fontSize:13.5,outline:"none",height:36}}/>
+                {query&&<button onClick={()=>setQuery("")} aria-label="Clear search" style={{width:32,height:32,display:"inline-grid",placeItems:"center",border:0,background:"transparent",color:C.textDim,cursor:"pointer"}}><Icon name="close" size={14}/></button>}
+              </label>
+              {!narrow&&<span style={{fontSize:12.5,color:C.textDim,marginLeft:"auto"}}>Select a row for targets and reasons</span>}
+            </div>
+
+            <div style={{border:`1px solid ${C.borderHi}`,borderRadius:8,background:C.surface,overflowX:"auto"}}>
+              <div style={{minWidth:narrow?0:980}}>
+                <div style={{display:"grid",gridTemplateColumns:cols,gap:10,alignItems:"center",padding:"0 16px",minHeight:42,borderBottom:`1px solid ${C.text}`,position:"sticky",top:0,background:C.surface,zIndex:1}}>
+                  {PF_COLS.filter(c=>!narrow||!c[2].includes("opt")).map(([k,label,cls])=>{
+                    const on=sortK===k;
+                    return(
+                      <button key={k} onClick={()=>sortBy(k)} aria-label={`Sort by ${label}${on?(sortDir<0?", descending":", ascending"):""}`}
+                        style={{border:0,background:"transparent",cursor:"pointer",padding:0,minHeight:40,display:"flex",gap:4,alignItems:"center",
+                          justifyContent:cls.includes("r")?"flex-end":"flex-start",fontSize:11,fontWeight:600,letterSpacing:".05em",textTransform:"uppercase",
+                          color:on?C.accent:C.textDim,fontFamily:SANS,whiteSpace:"nowrap"}}>
+                        {label}{on&&<span aria-hidden="true">{sortDir<0?"↓":"↑"}</span>}
+                      </button>
+                    );
+                  })}
+                  <span/>
+                </div>
+                {view.length===0&&(
+                  <div style={{padding:"32px 16px",textAlign:"center",color:C.textDim,display:"flex",flexDirection:"column",gap:10,alignItems:"center"}}>
+                    <div style={{fontFamily:SERIF,fontSize:18,fontWeight:600,color:C.text}}>Nothing in this view</div>
+                    <p style={{margin:0,fontSize:13}}>No holdings match{q?` “${query.trim()}”`:" this filter"}.</p>
+                    <button onClick={()=>{setFilter("all");setQuery("");}} style={edBtn()}>Show all holdings</button>
+                  </div>
+                )}
+                {view.map(({h,n})=>{
+                  const open=expanded===h.id, dangerous=isCriticalDanger(h);
+                  const exit=h.exitSignal&&h.exitSignal!=="HOLD"?h.exitSignal:null;
+                  const pc=dirColor(n.pnl);
+                  return(
+                    <div key={h.id} style={{borderTop:`1px solid ${C.border}`}}>
+                      <button onClick={()=>setExpanded(open?null:h.id)} aria-expanded={open} className="ed-card"
+                        style={{display:"grid",gridTemplateColumns:cols,gap:10,alignItems:"center",width:"100%",textAlign:"left",border:0,cursor:"pointer",
+                          padding:"0 16px",minHeight:narrow?64:58,background:open?C.bg:"transparent",color:C.text,fontFamily:SANS}}>
+                        <span style={{display:"flex",flexDirection:"column",minWidth:0,padding:"8px 0"}}>
+                          <span style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                            <span style={{fontFamily:SERIF,fontSize:17,fontWeight:600,color:dangerous?C.red:C.text}}>{h.symbol}</span>
+                            {dangerous&&<EdTag tone="sell">Danger</EdTag>}
+                            {narrow&&exit&&<EdTag tone={EXIT_TONE[exit]}>{EXIT_LABEL[exit]}</EdTag>}
+                            {h.earningsAlert?.warning_level&&<EdTag tone={h.earningsAlert.warning_level==="CRITICAL"?"warn":"mute"} title={`Results in ${h.earningsAlert.days_until} days`}>Results {h.earningsAlert.days_until}d</EdTag>}
+                            {h._saving&&<EdTag tone="mute">Saving…</EdTag>}
+                            {h._error&&<EdTag tone="sell">Not saved</EdTag>}
+                          </span>
+                          <span style={{fontSize:12,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                            {narrow?`${h.qty} sh · avg ${inr(h.avgBuy)}`:(h.name&&h.name!==h.symbol?h.name:h.sector)}
+                          </span>
+                        </span>
+                        {!narrow&&<span style={{fontFamily:MONO,fontSize:13,textAlign:"right"}}>{h.qty?.toLocaleString("en-IN")}</span>}
+                        {!narrow&&<span style={{fontFamily:MONO,fontSize:13,textAlign:"right"}}>{inr(h.avgBuy)}</span>}
+                        <span style={{fontFamily:MONO,fontSize:13,textAlign:"right"}}>{inr(n.price)}</span>
+                        {!narrow&&<span style={{fontFamily:MONO,fontSize:13,textAlign:"right"}}>{inr(n.value,0)}</span>}
+                        {!narrow&&<span style={{fontFamily:MONO,fontSize:13,textAlign:"right",color:pc}}>{(n.pnl>=0?"+":"−")+inr(Math.abs(n.pnl),0)}</span>}
+                        <span style={{fontFamily:MONO,fontSize:13,textAlign:"right",color:pc,fontWeight:600}}>{signedPct(n.pnlPct)}</span>
+                        {!narrow&&<span style={{textAlign:"right"}}>{exit?<EdTag tone={EXIT_TONE[exit]} title={h.exitReason}>{EXIT_LABEL[exit]}</EdTag>:<span style={{fontSize:12,color:C.textDim}}>On plan</span>}</span>}
+                        <Icon name="chevron" size={15} style={{color:C.textDim,transform:open?"rotate(90deg)":"none",transition:"transform .15s"}}/>
+                      </button>
+                      {open&&<HoldingDetail h={h} n={n} rec={recFor(h)} narrow={narrow}
+                        onAsk={()=>onOpenARIA("holding",h)} onViewRec={()=>onViewRec(recFor(h))}/>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+
+          {secs.length>0&&current>0&&(
+            <section style={edBox} aria-label="Sector allocation">
+              <h3 style={edH3}>Sector allocation <span style={{fontFamily:SANS,fontSize:12,color:C.textDim,fontWeight:400}}>by current value</span></h3>
+              <div aria-hidden="true" style={{display:"flex",height:12,borderRadius:6,overflow:"hidden",gap:2}}>
+                {secs.map(([s,v],i)=><span key={s} title={s} style={{width:`${v/current*100}%`,background:SECTOR_SWATCH[i%SECTOR_SWATCH.length]}}/>)}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:"8px 20px",marginTop:14}}>
+                {secs.map(([s,v],i)=>(
+                  <div key={s} style={{display:"flex",alignItems:"center",gap:8,fontSize:13,minWidth:0}}>
+                    <span style={{width:10,height:10,borderRadius:2,flexShrink:0,background:SECTOR_SWATCH[i%SECTOR_SWATCH.length]}}/>
+                    <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s}</span>
+                    <span style={{marginLeft:"auto",fontFamily:MONO,color:C.textDim}}>{(v/current*100).toFixed(1)}%</span>
+                  </div>
+                ))}
+              </div>
+              {topPct>30&&<div style={{marginTop:14}}><DetailNote tone="warn">{top[0]} is {topPct.toFixed(0)}% of your portfolio, above the 30% concentration guideline.</DetailNote></div>}
+            </section>
+          )}
+
+          <PortfolioRiskPanel risk={portfolioRisk}/>
+          <OptionsSignalPanel signal={optionsSignal}/>
+        </>
+      )}
+
       <PaperPortfolioPanel data={paperPortfolio} history={paperHistory} apiLoaded={apiLoaded}/>
       <LongHorizonPanel C={C} apiFetch={apiFetch} isLive={IS_LIVE}/>
     </div>
@@ -4214,6 +4299,22 @@ export default function App(){
     }
   },[]);
 
+  // Add-holding form on the Portfolio tab. A symbol you already hold is averaged
+  // in (qty + weighted avg); current_price is sent so the backend doesn't reset
+  // it to the new average until the next price refresh.
+  const addOrAverageHolding=useCallback(({symbol,qty,avgBuy})=>{
+    const ex=portfolio.find(h=>h.status==="holding"&&String(h.symbol).toUpperCase()===symbol);
+    if(!ex){ handlePortfolioUpdate({action:"add",symbol,qty,avgBuy,notes:"Added from the Portfolio tab"}); return "added"; }
+    const newQty=ex.qty+qty, newAvg=(ex.qty*ex.avgBuy+qty*avgBuy)/newQty;
+    setPortfolio(p=>p.map(h=>h.id===ex.id?{...h,qty:newQty,avgBuy:newAvg,_saving:!!API_URL,_error:false}:h));
+    if(API_URL){
+      apiFetch("/api/portfolio",{method:"POST",body:JSON.stringify({symbol:ex.symbol,qty:newQty,avg_buy:newAvg,current_price:ex.currentPrice||undefined})})
+        .then(()=>setPortfolio(p=>p.map(h=>h.id===ex.id?{...h,_saving:false}:h)))
+        .catch(err=>{ console.error("Average-in save failed:",err); setPortfolio(p=>p.map(h=>h.id===ex.id?{...h,_saving:false,_error:true}:h)); });
+    }
+    return "averaged";
+  },[portfolio,handlePortfolioUpdate]);
+
   const TABS=[
     {id:"discovery",icon:"🔍",label:"Discovery",badge:(discoveryUniverse||[]).length,badgeColor:C.cyan},
     {id:"recommendations",icon:"🎯",label:"Portfolio Recs"},
@@ -4356,8 +4457,10 @@ export default function App(){
 
             {tab==="portfolio"&&<PortfolioTab
               portfolio={portfolio}
-              setPortfolio={setPortfolio}
               onOpenARIA={openARIA}
+              onAddHolding={addOrAverageHolding}
+              recs={portfolioRecs}
+              onViewRec={rec=>{ if(!rec) return; setSelRecId(rec.id); setTab("recommendations"); }}
               brokenSymbols={brokenSymbols}
               portfolioRisk={portfolioRisk}
               optionsSignal={optionsSignal}
