@@ -7,8 +7,8 @@ Plan: `workplan.yaml` · Review: `REVIEW.md` · Target: `TARGET_ARCHITECTURE.md`
 
 | WP | State | PR | Date | Note |
 |---|---|---|---|---|
-| WP-001 | TODO | — | — | Confirm the portfolio pipeline publishes on the next run |
-| WP-002 | NEEDS_HUMAN | — | — | Apply `add_danger_drop_pct_column.sql` in Supabase |
+| WP-001 | IN_PROGRESS | — (branch `wp/WP-001-verify-pipeline-publish`, local) | 2026-11-15 | `scripts/verify_pipeline_publish.py` added. 2026-11-13 and 2026-11-14 → PUBLISHED, 24/24 holdings each, 0 suppressed, 0 errors (output below). Awaiting owner OK to push |
+| WP-002 | MERGED | — | 2026-11-15 | Verified by read: `recommendations.danger_drop_pct` exists in production (written 2026-11-14) and `daily_runs.pipeline/details` exist; no SCHEMA_DRIFT in run errors |
 | WP-003 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-15 | Equal weights via `data/decision_config.py`; regime multipliers off; discovery weights routed through config; outcome_tracker writes %. NEEDS-PROD: worker log shows `Agent weights: equal (7 × 0.1429)`; watch discovery pass counts for a week |
 | WP-004 | TODO | — | — | Persist score, gate result and source on outcome rows (backfill run is manual) |
 | WP-005 | TODO | — | — | Record every worker job run in the job ledger |
@@ -31,3 +31,21 @@ Plan: `workplan.yaml` · Review: `REVIEW.md` · Target: `TARGET_ARCHITECTURE.md`
 | WP-022 | TODO | — | — | Label the backtest honestly in the API |
 | WP-023 | TODO | — | — | Report ADR signals and ledger evaluation in the evidence pack |
 | WP-024 | TODO | — | — | Refresh the docs and remove the deprecated Breeze job |
+
+## WP-001 — production check output
+
+`python scripts/verify_pipeline_publish.py --date 2026-11-14` (exit 0):
+
+```
+daily_runs (orchestrator): status=OK symbols_processed=24 errors=0
+  details.reasons = {'agent_run_failed': 0, 'synthesis_failed': 0, 'synthesis_fallback': 0, 'suppressed_by_judges': 0}
+  details.errors  = []
+recommendations (is_discovery=false): 24 rows
+  AVOID        6
+  HOLD         16
+  SELL         2
+VERDICT: PUBLISHED
+```
+
+2026-11-13: same shape: 24 rows (AVOID 3, HOLD 17, SELL 4), PUBLISHED, exit 0.
+`daily_runs where pipeline='orchestrator'` = 2 rows; non-discovery non-SUPPRESSED recommendations = 48.
