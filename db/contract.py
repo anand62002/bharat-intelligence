@@ -104,4 +104,10 @@ CONTRACT: dict[str, set[str]] = {
         "stop_price", "unrealized_pnl_pct", "status", "exit_date", "exit_price",
         "exit_reason", "realized_pnl_pct", "alpha_pct",
     },
+    # WP-012 / ADR-002 — written by data/candidate_ledger.py (WP-013) and the labeller (WP-014).
+    "candidates": {
+        "run_date", "symbol", "yf_symbol", "source", "stage", "price", "nifty",
+        "features", "agent_signals", "signal_score", "gate_score", "data_quality",
+        "tier", "rec_id", "feature_version", "labelled_at",
+    } | _horizon_cols((30, 90), ("price", "nifty", "alpha")),
 }
