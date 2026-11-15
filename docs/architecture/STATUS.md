@@ -17,7 +17,7 @@ Plan: `workplan.yaml` · Review: `REVIEW.md` · Target: `TARGET_ARCHITECTURE.md`
 | WP-008 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-15 | CI uses dummy keys + `-m "not integration"`; conftest guard fails any test building a live Supabase/Anthropic/OpenAI client; 80 offending tests fixed. Suite passes with keys unset (3612). NEEDS-HUMAN: delete repo secrets `SUPABASE_SERVICE_KEY`, `ANTHROPIC_API_KEY`, `SUPABASE_URL`; optionally delete 3 test rows from `forward_estimates_cache` |
 | WP-009 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-15 | AST policy test + allowlist of 173 silent broad handlers (only shrinks); new silent handlers fail CI. Test-only |
 | WP-010 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-15 | 29 silent handlers → WARNING (orchestrator, discovery, target updater, outcome tracker, paper book, portfolio monitor); synthesis failures reach the run ledger; allowlist 173 → 144 |
-| WP-011 | IN_PROGRESS | — (branch `wp/WP-011-regime-before-orchestrator`, local) | 2026-11-16 | Regime detector 06:30 → 05:45 IST so the 06:00 orchestrator reads today's regime; schedule-order test added. NEEDS-PROD: today's market_regime row exists at the 06:00 run |
+| WP-011 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-16 | Regime detector 06:30 → 05:45 IST so the 06:00 orchestrator reads today's regime; schedule-order test added. NEEDS-PROD: today's market_regime row exists at the 06:00 run |
 | WP-012 | NEEDS_HUMAN | — | — | Create the candidates ledger table (migration) |
 | WP-013 | TODO | — | — | Write every screened symbol to the candidates ledger |
 | WP-014 | TODO | — | — | Label candidate rows with 30- and 90-day alpha |
