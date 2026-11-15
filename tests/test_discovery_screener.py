@@ -1067,7 +1067,7 @@ class TestRunDiscovery:
         # prescreen always passes
         monkeypatch.setattr(
             "agents.discovery_screener.prescreen",
-            lambda sym, fii_data=None: (passes, ["RSI ok", "PE ok", "EMA200 ok", "Revenue ok"]),
+            lambda sym, fii_data=None, features=None: (passes, ["RSI ok", "PE ok", "EMA200 ok", "Revenue ok"]),
         )
         # portfolio: empty
         monkeypatch.setattr(
@@ -1099,6 +1099,12 @@ class TestRunDiscovery:
         # no DB
         monkeypatch.setattr("agents.discovery_screener._save_discovery", lambda d: None)
         monkeypatch.setattr("agents.discovery_screener._log_daily_run",  lambda **kw: None)
+        # candidate ledger (WP-013): no live client, no Nifty fetch
+        self.ledger_writes = []
+        monkeypatch.setattr("data.candidate_ledger.get_client", lambda: object())
+        monkeypatch.setattr("data.candidate_ledger.nifty_level", lambda: 24000.0)
+        monkeypatch.setattr("data.candidate_ledger.record_candidates",
+                            lambda client, rows: self.ledger_writes.append(list(rows)) or len(self.ledger_writes[-1]))
 
         # No live LLM. The CRITICAL path runs validate_discovery_synthesis, which
         # was NOT mocked here — so these "unit" tests were making real, paid,

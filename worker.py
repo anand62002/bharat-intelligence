@@ -653,7 +653,8 @@ def job_discovery_screener() -> dict:
             "  [%s] %s upside=%.1f%% conf=%.1f",
             dr.opportunity_tier, dr.symbol, dr.upside_pct, dr.upside_confidence,
         )
-    return {"count": len(results), "symbols": [dr.symbol for dr in results]}
+    return {"count": len(results), "symbols": [dr.symbol for dr in results],
+            "candidates_written": getattr(results, "ledger_rows", 0)}
 
 
 @tracked_job("portfolio_monitor")

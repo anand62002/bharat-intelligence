@@ -226,7 +226,8 @@ def run_screen(symbols: Optional[list[str]] = None, dry_run: bool = True, client
     client = client or _supabase()
     symbols = symbols or (_todays_slice(client) if client else [])
     summary = {"screened": 0, "prefilter_passed": 0, "deep_checked": 0, "picks": [],
-               "near_misses": [], "errors": [], "dry_run": dry_run}
+               "near_misses": [], "errors": [], "dry_run": dry_run, "candidates_written": 0}
+    ledger_rows: list[dict] = []
 
     active: set[str] = set()
     if client:
@@ -286,11 +287,40 @@ def run_screen(symbols: Optional[list[str]] = None, dry_run: bool = True, client
                 client.table("long_horizon_picks").insert(pick).execute()
             except Exception as exc:
                 summary["errors"].append(f"{base} insert: {exc}")
+                continue
+            ledger_rows.append(_ledger_row(base, pick, warren))
+
+    # WP-013 (ADR-002): saved picks also go to the candidate ledger. Nifty fetched once.
+    if ledger_rows:
+        from data import candidate_ledger
+        nifty = candidate_ledger.nifty_level()
+        for row in ledger_rows:
+            row["nifty"] = nifty
+        summary["candidates_written"] = candidate_ledger.record_candidates(client, ledger_rows)
 
     log.info("multibagger screen%s — screened=%d prefilter=%d deep=%d picks=%d errors=%d",
              " (DRY RUN)" if dry_run else "", summary["screened"], summary["prefilter_passed"],
              summary["deep_checked"], len(summary["picks"]), len(summary["errors"]))
     return summary
+
+
+def _ledger_row(base: str, pick: dict, warren: Optional[dict]) -> dict:
+    """A saved pick as a candidates row (source='multibagger', stage PROMOTED)."""
+    from data import candidate_ledger
+    row = candidate_ledger.screen_row(
+        date.fromisoformat(pick["pick_date"]), base, "multibagger", passed=True,
+        features={"price": pick.get("entry_price"), "score": pick.get("score"),
+                  "components": pick.get("components"),
+                  "market_cap_cr": pick.get("market_cap_cr")},
+        nifty=None,
+    )
+    row.update(
+        stage="PROMOTED",
+        signal_score=pick.get("score"),
+        agent_signals={"warren_bot": {"signal": (warren or {}).get("signal"),
+                                      "score": (warren or {}).get("score")}},
+    )
+    return row
 
 
 def review_picks(dry_run: bool = True, client: Any = None) -> dict:

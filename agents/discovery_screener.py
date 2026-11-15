@@ -44,6 +44,7 @@ if _ROOT not in sys.path:
 
 from data.fetchers import get_ohlcv, get_nse_fii_dii, get_screener_data  # noqa: E402
 from data import run_cache as _run_cache  # noqa: E402  — P7-H
+from data import candidate_ledger  # noqa: E402  — WP-013 (ADR-002)
 from agents.base import DataCompletenessValidator  # noqa: E402
 from agents.call_calibration import CALL_HORIZON_DAYS  # noqa: E402
 
@@ -314,6 +315,12 @@ class DiscoveryResult:
         return asdict(self)
 
 
+class DiscoveryList(list):
+    """run_discovery()'s result: a plain list of DiscoveryResult, plus the number
+    of candidate-ledger rows written this run (WP-013) for the job ledger."""
+    ledger_rows: int = 0
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Pre-screen helpers (fast — yfinance + screener only, no LLM calls)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -442,6 +449,7 @@ def _get_sector_pe(sector: str) -> float:
 def prescreen(
     symbol: str,
     fii_data: Optional[dict] = None,   # kept for API compatibility; no longer used for Filter 3
+    features: Optional[dict] = None,   # WP-013: filled in place with what the screen computed
 ) -> tuple[bool, list[str]]:
     """
     Run the 6 quick pre-screen filters against a single symbol.
@@ -473,12 +481,19 @@ def prescreen(
 
     Returns:
         (passes: bool, triggers: list[str])
+
+    features (WP-013): when a dict is passed it is filled with the values the
+    screen computed (price, RSI, EMA200, PE, sector PE, revenue growth,
+    institutional holding, DVM, filters passed, skip reason) for the
+    candidate ledger. The return value is unchanged.
     """
     triggers: list[str] = []
+    feat: dict = features if features is not None else {}
 
     # ── Fetch OHLCV ───────────────────────────────────────────────────────────
     df = get_ohlcv(symbol, period="1y")
     if df is None or len(df) < 30:
+        feat.update(passed=False, skip_reason="NO_OHLCV")
         return False, []
 
     # ── Data completeness check (skip symbol cleanly, no hallucinated screen) ─
@@ -487,6 +502,7 @@ def prescreen(
     _close_series = df["Close"].dropna() if "Close" in df.columns else None
     _close_val    = float(_close_series.iloc[-1]) if (_close_series is not None and not _close_series.empty) else None
     _vol_avg      = float(df["Volume"].fillna(0).mean()) if "Volume" in df.columns and not df.empty else None
+    feat["price"] = _close_val
     _chk = _dcv.validate({
         "symbol":     symbol,
         "ohlcv_rows": len(df),
@@ -497,6 +513,7 @@ def prescreen(
         log.debug(
             "prescreen(%s): INSUFFICIENT_DATA — %s", symbol, _chk.summary()
         )
+        feat.update(passed=False, skip_reason="INSUFFICIENT_DATA")
         return False, []
 
     # ── Earnings guard: skip symbols with earnings ≤5 days away ─────────────
@@ -508,6 +525,8 @@ def prescreen(
                 "prescreen(%s): skipped — earnings in %s days (%s)",
                 symbol, eg.get("days_until"), eg.get("earnings_date"),
             )
+            feat.update(passed=False, skip_reason="EARNINGS_WINDOW",
+                        earnings_days_until=eg.get("days_until"))
             return False, []
     except Exception as exc:
         log.warning("prescreen(%s): earnings guard failed — screening without it: %s", symbol, exc)
@@ -521,6 +540,8 @@ def prescreen(
                 "prescreen(%s): skipped — ILLIQUID (impact_cost=%.2f%%, daily_vol=₹%.0f)",
                 symbol, liq.get("impact_cost_pct") or 0, liq.get("avg_daily_volume_inr") or 0,
             )
+            feat.update(passed=False, skip_reason="ILLIQUID",
+                        impact_cost_pct=liq.get("impact_cost_pct"))
             return False, []
     except Exception as exc:
         log.warning("prescreen(%s): liquidity check failed — screening without it: %s", symbol, exc)
@@ -529,11 +550,13 @@ def prescreen(
 
     # Filter 1: RSI 40–65
     rsi_val = _rsi(close)
+    feat["rsi"] = rsi_val
     if rsi_val is not None and _RSI_LOW <= rsi_val <= _RSI_HIGH:
         triggers.append(f"RSI {rsi_val:.1f} in 40–65 sweet spot")
 
     # Filter 5: Price above 200 EMA
     above_200 = _price_above_ema200(close)
+    feat["above_ema200"] = bool(above_200)
     if above_200:
         triggers.append("Price above 200-day EMA (uptrend confirmed)")
 
@@ -545,6 +568,8 @@ def prescreen(
         revenue_growth = raw.get("revenue_growth")
         sector_str     = raw.get("sector") or ""
         sector_pe      = _get_sector_pe(sector_str)
+        feat.update(pe=pe, sector=sector_str or None, sector_pe=sector_pe,
+                    revenue_growth=revenue_growth)
 
         # Filter 2: Sector-relative PE valuation (three tiers + hard cap)
         # ────────────────────────────────────────────────────────────────
@@ -624,6 +649,7 @@ def prescreen(
         except (TypeError, ValueError):
             inst_pct = None
 
+        feat["institutional_pct"] = inst_pct
         if inst_pct is not None and inst_pct >= _MIN_INSTITUTIONAL_HOLDING_PCT:
             triggers.append(
                 f"Institutional holding {inst_pct:.1f}% ≥ 5% (smart money present)"
@@ -651,6 +677,7 @@ def prescreen(
             dvm = get_trendlyne_dvm(symbol)
             if dvm is not None and dvm.get("composite_dvm") is not None:
                 comp = dvm["composite_dvm"]
+                feat["dvm_composite"] = comp
                 if comp >= _MIN_DVM_SCORE:
                     dur = dvm.get("durability_score") or 0
                     val = dvm.get("valuation_score")  or 0
@@ -674,6 +701,8 @@ def prescreen(
     threshold = _MIN_PRESCREEN_PASS
     real_hits = sum(1 for t in triggers if not t.startswith("["))
     passes = real_hits >= threshold
+    feat.update(passed=passes, filters_passed=real_hits, triggers=list(triggers),
+                fundamentals_available=raw is not None)
     return passes, triggers
 
 
@@ -1578,18 +1607,39 @@ def run_discovery(
     # are never evaluated.  Only the deep 7-agent analysis is capped.
     log.info("Pre-screening %d symbols …", len(slice_symbols))
     screened: list[tuple[str, list[str]]] = []
+    features_by_symbol: dict[str, dict] = {}
 
     for symbol in slice_symbols:
+        feats: dict = {}
+        features_by_symbol[symbol] = feats
         try:
-            passes, triggers = prescreen(symbol, fii_data=fii_data)
+            passes, triggers = prescreen(symbol, fii_data=fii_data, features=feats)
+            feats.setdefault("passed", bool(passes))
             if passes:
                 screened.append((symbol, triggers))
                 log.info("  PASS %-25s triggers=%d", symbol, len(triggers))
         except Exception as exc:
+            feats.update(passed=False, skip_reason="ERROR", error=str(exc)[:200])
             log.warning("  prescreen error for %s: %s", symbol, exc)
         time.sleep(inter_delay)
 
     log.info("Pre-screen complete: %d/%d passed", len(screened), len(slice_symbols))
+
+    # ── 5b. Candidate ledger: one row per screened symbol (WP-013, ADR-002) ──
+    # Dry runs (--no-save) write nothing. The Nifty level is fetched once.
+    ledger_client = None
+    ledger_rows_written = 0
+    if save_to_db:
+        ledger_client = candidate_ledger.get_client()
+        ledger_nifty = candidate_ledger.nifty_level()
+        ledger_rows_written = candidate_ledger.record_candidates(ledger_client, [
+            candidate_ledger.screen_row(today, sym, "discovery", passed=bool(f.get("passed")),
+                                        features=f, nifty=ledger_nifty)
+            for sym, f in features_by_symbol.items()
+        ])
+        log.info("Candidate ledger: %d/%d screened rows recorded",
+                 ledger_rows_written, len(features_by_symbol))
+    deep_rows: dict[str, dict] = {}
 
     # Cap deep analysis at max_candidates (most-recently screened first is fine;
     # the pre-screen itself has no ranking so order = position in rotated slice)
@@ -1610,6 +1660,17 @@ def run_discovery(
             # ── Classify ──────────────────────────────────────────────────────
             fund_res = agent_results.get("fundamental", {})
             fund_data_quality = fund_res.get("data_quality") or ""
+
+            # Ledger row for the deep pass; tier/rec_id are filled in below.
+            deep_rows[symbol] = candidate_ledger.deep_row(
+                today, symbol, "discovery",
+                features={**features_by_symbol.get(symbol, {}),
+                          "composite_score": comp_score, "upside_pct": round(upside_pct, 2),
+                          "valuation_gap_pct": round(valuation_gap, 2)},
+                agent_signals={k: {"signal": v.get("signal"), "score": v.get("score")}
+                               for k, v in agent_results.items()},
+                signal_score=upside_conf, data_quality=fund_data_quality, tier=None, rec_id=None,
+            )
 
             # CRITICAL data quality gate: only promote to CRITICAL when we have
             # real data (not estimated/proxy FCF yield). High upside from
@@ -1794,9 +1855,12 @@ def run_discovery(
                     )
 
             # ── Persist ───────────────────────────────────────────────────────
+            deep_rows[symbol]["tier"] = tier
             if save_to_db:
                 rec_id = _save_discovery(dr)
                 dr.saved_rec_id = rec_id
+                if rec_id:
+                    deep_rows[symbol].update(rec_id=rec_id, stage="PROMOTED")
                 if rec_id:
                     log.info("  ✅ Saved discovery %s → rec_id=%s", symbol, rec_id)
                 else:
@@ -1823,6 +1887,10 @@ def run_discovery(
             log.error("Full analysis failed for %s: %s", symbol, exc, exc_info=True)
 
         time.sleep(inter_delay)
+
+    # ── 6b. Candidate ledger: update the deep-analysed rows (same key) ───────
+    if save_to_db and deep_rows:
+        ledger_rows_written += candidate_ledger.record_candidates(ledger_client, deep_rows.values())
 
     # ── 7. Sort: CRITICAL first, then by upside_pct desc ─────────────────────
     discoveries.sort(
@@ -1852,9 +1920,12 @@ def run_discovery(
         passed_symbols     = passed_syms,
         discovery_symbols  = discovery_syms,
         run_date           = today,
+        details            = {"candidates_written": ledger_rows_written},
     )
 
-    return discoveries
+    out = DiscoveryList(discoveries)
+    out.ledger_rows = ledger_rows_written
+    return out
 
 
 def _log_daily_run(
@@ -1866,6 +1937,7 @@ def _log_daily_run(
     passed_symbols:    Optional[list]  = None,
     discovery_symbols: Optional[list]  = None,
     run_date:          Optional[date]  = None,
+    details:           Optional[dict]  = None,
 ) -> None:
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -1886,7 +1958,7 @@ def _log_daily_run(
         log_daily_run(
             client, "discovery",
             symbols_processed=symbols_processed, errors=0, duration_seconds=duration,
-            status="OK", run_date=run_date or date.today(),
+            status="OK", details=details, run_date=run_date or date.today(),
         )
     except Exception as exc:
         log.warning("daily_runs log failed: %s", exc)
