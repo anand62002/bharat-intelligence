@@ -1055,6 +1055,13 @@ def _mock_agent(signal="BUY", score=75, upside=45.0, confidence=0.75):
 
 
 class TestRunDiscovery:
+    @pytest.fixture(autouse=True)
+    def _no_live_judges(self, monkeypatch):
+        """CRITICAL candidates run the judge panel when ANTHROPIC_API_KEY is set —
+        with a real .env these tests called the live Anthropic API (WP-008).
+        Without the key the check is skipped and the tier is kept."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
     def _patch_all(self, monkeypatch, passes=True, upside=45.0, conf=68.0):
         """Patch all external dependencies for run_discovery."""
         # prescreen always passes

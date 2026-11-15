@@ -47,6 +47,14 @@ from agents.historical_rag import (
 )
 
 
+
+
+@pytest.fixture(autouse=True)
+def _no_live_rag_db(monkeypatch):
+    """analyse() logs to agent_performance through a live Supabase client; stub
+    it (WP-008). Tests that patch it, or supabase.create_client, are unaffected."""
+    monkeypatch.setattr("agents.historical_rag._write_agent_performance", lambda *a, **k: None)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Sample events
 # ──────────────────────────────────────────────────────────────────────────────

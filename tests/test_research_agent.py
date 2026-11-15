@@ -25,8 +25,15 @@ Coverage areas
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
+
+# Fixture papers must fall inside the agent's 7-day lookback (DAYS_LOOKBACK).
+# They were hard-coded to 22 Apr 2026, so these tests went stale a week later.
+_RECENT = datetime.now(timezone.utc) - timedelta(days=1)
+_RECENT_RFC822 = _RECENT.strftime("%a, %d %b %Y %H:%M:%S +0000")
+_RECENT_ISO = _RECENT.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 import pytest
 
@@ -391,7 +398,7 @@ class TestFetchArxivRss:
             summary   = summary,
             id        = url,
             link      = url,
-            published = published or "Wed, 22 Apr 2026 00:00:00 +0000",
+            published = published or _RECENT_RFC822,
             updated   = None,
             authors   = [],
         )
@@ -459,13 +466,13 @@ class TestFetchArxivRss:
 class TestFetchArxivApi:
 
     def _arxiv_atom_response(self):
-        atom = """<?xml version="1.0"?>
+        atom = f"""<?xml version="1.0"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry>
     <id>https://arxiv.org/abs/2506.99999</id>
     <title>Multi-agent LLM System for NSE Stock Prediction</title>
     <summary>Abstract about multi-agent LLM stock prediction...</summary>
-    <published>2026-04-22T00:00:00Z</published>
+    <published>{_RECENT_ISO}</published>
     <author><name>Alice Smith</name></author>
   </entry>
 </feed>"""

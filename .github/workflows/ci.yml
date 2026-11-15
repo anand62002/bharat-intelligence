@@ -15,11 +15,19 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Provide stub env vars so modules that call load_dotenv() don't crash
-      SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-      ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
-      GITHUB_TOKEN_GH:      ${{ secrets.GH_PAT }}
+      # WP-008 (ADR-005): fixed dummy values, never production secrets. Pull-request
+      # test runs used to get the production service-role key and Anthropic key, so
+      # any test that forgot a mock read (or wrote) the live database. The URL
+      # points at a closed local port so an unmocked call fails fast, and
+      # tests/conftest.py fails any non-integration test that builds a real
+      # Supabase / Anthropic / OpenAI client.
+      # The service key must be JWT-shaped: supabase-py validates the format when
+      # api/main.py builds its client at import. Payload: {"role":"ci-dummy",
+      # "iss":"ci-not-a-real-key"}; the signature is not real.
+      SUPABASE_URL:         http://127.0.0.1:9
+      SUPABASE_SERVICE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiY2ktZHVtbXkiLCJpc3MiOiJjaS1ub3QtYS1yZWFsLWtleSJ9.ci-dummy-signature
+      ANTHROPIC_API_KEY:    ci-dummy-not-a-key
+      OPENAI_API_KEY:       ci-dummy-not-a-key
 
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
@@ -42,7 +50,9 @@ jobs:
         id: pytest
         run: |
           set +e   # don't exit on failure — we want to capture the output first
-          pytest tests/ -v --tb=short \
+          # Integration tests need live services and credentials — run them by hand:
+          #   pytest -m integration -v
+          pytest tests/ -v --tb=short -m "not integration" \
             --json-report --json-report-file=pytest-report.json \
             2>&1 | tee pytest-output.txt
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"

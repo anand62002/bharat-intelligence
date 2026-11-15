@@ -37,6 +37,17 @@ from agents.fundamental import (  # noqa: E402
     _score_realestate,
 )
 
+
+
+@pytest.fixture(autouse=True)
+def _no_agent_performance_write(monkeypatch):
+    """analyse() reaches Supabase twice: the agent_performance write and the
+    forward-estimates cache (data/forward_estimates.py). With a real .env these
+    tests read — and wrote TEST/TEST_BANK/TEST_ENERGY rows into — the production
+    forward_estimates_cache table. Stub both (WP-008). Tests that patch them win."""
+    monkeypatch.setattr("agents.fundamental._write_agent_performance", lambda *a, **k: None)
+    monkeypatch.setattr("data.forward_estimates._supabase_client", lambda: None)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Representative mock datasets
 # ──────────────────────────────────────────────────────────────────────────────

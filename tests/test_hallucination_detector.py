@@ -110,7 +110,10 @@ class TestGetAgentTrustScores:
         assert scores == {}
 
     def test_no_client_returns_empty_dict(self):
-        scores = get_agent_trust_scores(client=None)
+        # client=None makes the function build its own client; with a real .env
+        # this test read production agent_performance and failed (WP-008).
+        with patch("governance.hallucination_detector._supabase", return_value=None):
+            scores = get_agent_trust_scores(client=None)
         assert scores == {}
 
     def test_uses_most_recent_row_per_agent(self):
