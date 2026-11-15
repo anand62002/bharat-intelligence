@@ -354,6 +354,23 @@ def job_outcome_tracker() -> dict:
         log.error("Outcome tracker failed: %s", exc, exc_info=True)
         track_exc = exc
 
+    # ── WP-014 (ADR-002): label candidate-ledger rows with 30/90-day alpha ────
+    try:
+        from data import candidate_ledger
+        client = candidate_ledger.get_client()
+        labels = [candidate_ledger.label_candidates(client, h)
+                  for h in candidate_ledger.LABEL_HORIZONS]
+        out["candidates_labelled"] = sum(l["labelled"] for l in labels)
+        out["candidates_label_failed"] = sum(l["failed"] for l in labels)
+        out["candidate_labels"] = labels
+        for l in labels:
+            out["errors"].extend(f"candidates t{l['horizon']}: {e}" for e in l["errors"])
+        log.info("Candidate labels done — labelled=%d failed=%d",
+                 out["candidates_labelled"], out["candidates_label_failed"])
+    except Exception as exc:
+        log.warning("Candidate labelling failed: %s", exc, exc_info=True)
+        out["errors"].append(f"candidate_labels: {exc}")
+
     # ── P6-D-8: Sentiment signal validation ───────────────────────────────────
     try:
         from agents.outcome_tracker import run_sentiment_validation

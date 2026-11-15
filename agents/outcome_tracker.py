@@ -112,6 +112,42 @@ def _supabase():
 # Price helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _close_near(hist, target_date: date, window: int = WINDOW_DAYS) -> float | None:
+    """
+    Close on or nearest to `target_date` (within ±window days) from a price
+    history (DataFrame with a Close column, or a Close Series). None if none.
+
+    The one definition of "price on a date", shared by the per-symbol lookup
+    and the batched one (WP-014).
+
+    yfinance returns a tz-AWARE index for NSE symbols (Asia/Kolkata).
+    Comparing it with tz-naive Timestamps raises
+      TypeError: Cannot subtract tz-naive and tz-aware datetime-like objects
+    which used to be swallowed into a silent None: every nifty_entry lookup
+    failed, seed_pending_outcome wrote NULL for all 148 rows, and both the
+    tracker and the forward poller skipped them forever. The tz is stripped
+    first.
+    """
+    import pandas as pd
+    if hist is None:
+        return None
+    close = hist["Close"] if isinstance(hist, pd.DataFrame) else hist
+    # Drop yfinance's partial current-session bar (Volume present, OHLC NaN)
+    # so the closest-date match can never resolve to a NaN price.
+    close = close.dropna()
+    if close.empty:
+        return None
+    idx = close.index
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    idx = pd.DatetimeIndex(idx).normalize()
+    deltas = [abs((d - pd.Timestamp(target_date)).days) for d in idx]
+    best = min(range(len(deltas)), key=deltas.__getitem__)
+    if deltas[best] <= window:
+        return float(close.iloc[best])
+    return None
+
+
 def _fetch_price_on_date(yf_symbol: str, target_date: date, window: int = WINDOW_DAYS) -> float | None:
     """
     Returns the closing price of `yf_symbol` on or near `target_date` (±window days).
@@ -123,38 +159,7 @@ def _fetch_price_on_date(yf_symbol: str, target_date: date, window: int = WINDOW
         hist  = yf.Ticker(yf_symbol).history(start=str(start), end=str(end), auto_adjust=True)
         if hist.empty:
             return None
-        # Drop yfinance's partial current-session bar (Volume present, OHLC NaN)
-        # so the "closest available date" match can never resolve to a NaN price.
-        hist = hist.dropna(subset=["Close"])
-        if hist.empty:
-            return None
-        # Find closest available date.
-        # yfinance returns a tz-AWARE index for NSE symbols (Asia/Kolkata).
-        # Every comparison below builds tz-naive pd.Timestamps from `target_date`,
-        # and subtracting the two raises
-        #   TypeError: Cannot subtract tz-naive and tz-aware datetime-like objects
-        # which the except clause then swallowed into a silent None. That made
-        # EVERY nifty_entry lookup fail, so seed_pending_outcome wrote NULL for
-        # all 148 rows and both the tracker and the forward poller skipped them
-        # on `if not entry_price or not nifty_entry: continue`.
-        if getattr(hist.index, "tz", None) is not None:
-            hist.index = hist.index.tz_localize(None)
-        hist.index = hist.index.normalize()   # strip time component
-        target_dt  = datetime.combine(target_date, datetime.min.time())
-        # Filter to window
-        mask   = (hist.index >= str(start)) & (hist.index <= str(end))
-        subset = hist.loc[mask]
-        if subset.empty:
-            return None
-        # Pick the row closest to target_date
-        import pandas as pd
-        subset = subset.copy()
-        subset["date_obj"] = pd.to_datetime(subset.index)
-        subset["delta"]    = (subset["date_obj"] - pd.Timestamp(target_date)).abs()
-        closest = subset.sort_values("delta").iloc[0]
-        if abs((pd.Timestamp(closest["date_obj"]) - pd.Timestamp(target_date)).days) <= window:
-            return float(closest["Close"])
-        return None
+        return _close_near(hist, target_date, window)
     except Exception as exc:
         # WARNING, not DEBUG: a failure here silently NULLs nifty_entry, which
         # then makes the tracker and poller skip the row forever. That went
@@ -162,6 +167,41 @@ def _fetch_price_on_date(yf_symbol: str, target_date: date, window: int = WINDOW
         log.warning("Price fetch failed for %s on %s: %s: %s",
                     yf_symbol, target_date, type(exc).__name__, exc)
         return None
+
+
+def _batch_prices_on_date(yf_symbols: list[str], target_date: date,
+                          window: int = WINDOW_DAYS) -> dict[str, float]:
+    """
+    Close on or near `target_date` for many symbols in ONE yfinance download
+    (WP-014: ~200 candidate rows share each run date). Symbols with no close in
+    the window are absent from the result — callers count them as failed.
+    """
+    syms = sorted(set(yf_symbols))
+    if not syms:
+        return {}
+    start = target_date - timedelta(days=window + 5)
+    end   = target_date + timedelta(days=window + 5)
+    try:
+        import pandas as pd
+        df = yf.download(syms, start=str(start), end=str(end), interval="1d", auto_adjust=True)
+        if df is None or df.empty:
+            log.warning("Batch price download empty for %d symbols around %s", len(syms), target_date)
+            return {}
+        close = df["Close"] if "Close" in df.columns else df.xs("Close", axis=1, level=0)
+        if isinstance(close, pd.Series):          # single symbol, flat columns
+            close = close.to_frame(syms[0])
+    except Exception as exc:
+        log.warning("Batch price download failed for %d symbols around %s: %s",
+                    len(syms), target_date, exc)
+        return {}
+    out: dict[str, float] = {}
+    for sym in syms:
+        if sym not in close.columns:
+            continue
+        px = _close_near(close[sym], target_date, window)
+        if px is not None:
+            out[sym] = px
+    return out
 
 
 def _resolve_yf_symbol(symbol: str) -> str:

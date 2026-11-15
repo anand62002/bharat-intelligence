@@ -159,3 +159,118 @@ def record_candidates(client: Any, rows: Iterable[dict]) -> int:
                     return 0
                 log.warning("candidate ledger: upsert of %d rows failed: %s", len(batch), exc)
     return written
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Labelling (WP-014): 30- and 90-day alpha on every candidate row
+# ─────────────────────────────────────────────────────────────────────────────
+
+LABEL_HORIZONS = (30, 90)
+LABEL_PAGE = 500
+# Rows still unlabelled this many days after their horizon are not retried
+# (delisted / renamed symbols would otherwise be re-fetched every evening).
+LABEL_GIVE_UP_DAYS = 60
+_LABEL_COLS = "id,run_date,symbol,yf_symbol,source,stage,price,nifty"
+
+
+def _due_rows(client: Any, horizon_days: int, today: date) -> list[dict]:
+    """Rows whose horizon has passed and whose label is null, paged LABEL_PAGE at a time."""
+    from datetime import timedelta
+    cutoff = today - timedelta(days=horizon_days)
+    oldest = cutoff - timedelta(days=LABEL_GIVE_UP_DAYS)
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = (client.table(TABLE).select(_LABEL_COLS)
+                .is_(f"alpha_t{horizon_days}", "null")
+                .lte("run_date", cutoff.isoformat())
+                .gte("run_date", oldest.isoformat())
+                .order("run_date").order("symbol")
+                .range(offset, offset + LABEL_PAGE - 1)
+                .execute().data or [])
+        rows.extend(page)
+        if len(page) < LABEL_PAGE:
+            return rows
+        offset += LABEL_PAGE
+
+
+def label_candidates(client: Any, horizon_days: int, today: Optional[date] = None) -> dict:
+    """
+    Write price/nifty/alpha at `horizon_days` onto every due candidate row.
+
+    alpha = symbol return − Nifty return over the row's own window
+    (run_date → run_date + horizon), as a fraction — the same formula
+    recommendation_outcomes uses. Prices come from the outcome tracker's
+    price-on-date helpers; one batch download per run date. A row with no
+    price is counted as failed and left null — never labelled 0.
+
+    Returns {"horizon", "due", "labelled", "failed", "errors"}. Never raises.
+    """
+    from collections import defaultdict
+    from datetime import datetime, timedelta, timezone
+
+    today = today or date.today()
+    out = {"horizon": horizon_days, "due": 0, "labelled": 0, "failed": 0, "errors": []}
+    if client is None:
+        out["errors"].append("no Supabase client")
+        log.warning("label_candidates(t%d): no client", horizon_days)
+        return out
+    try:
+        due = _due_rows(client, horizon_days, today)
+    except Exception as exc:
+        if is_missing_table(exc):
+            out["errors"].append(f"candidates table missing — run {MIGRATION}")
+        else:
+            out["errors"].append(f"select failed: {exc}")
+        log.warning("label_candidates(t%d): could not read due rows: %s", horizon_days, exc)
+        return out
+    out["due"] = len(due)
+    if not due:
+        return out
+
+    from agents.outcome_tracker import (NIFTY_SYMBOL, _batch_prices_on_date,
+                                        _fetch_price_on_date, _resolve_yf_symbol)
+
+    by_date: dict[str, list[dict]] = defaultdict(list)
+    for r in due:
+        by_date[str(r["run_date"])[:10]].append(r)
+
+    now = datetime.now(timezone.utc).isoformat()
+    updates: list[dict] = []
+    failed_syms: list[str] = []
+    for run_date_s, rows in sorted(by_date.items()):
+        run_d = date.fromisoformat(run_date_s)
+        target = run_d + timedelta(days=horizon_days)
+        yf_of = {id(r): (r.get("yf_symbol") or _resolve_yf_symbol(r["symbol"])) for r in rows}
+        prices = _batch_prices_on_date(list(yf_of.values()) + [NIFTY_SYMBOL], target)
+        nifty_t = prices.get(NIFTY_SYMBOL)
+        nifty_entry_fallback: Optional[float] = None
+        if any(not _num(r.get("nifty")) for r in rows):
+            nifty_entry_fallback = _fetch_price_on_date(NIFTY_SYMBOL, run_d)
+        for r in rows:
+            entry = _num(r.get("price"))
+            nifty_entry = _num(r.get("nifty")) or nifty_entry_fallback
+            px = prices.get(yf_of[id(r)])
+            if not entry or not nifty_entry or px is None or nifty_t is None:
+                out["failed"] += 1
+                failed_syms.append(r["symbol"])
+                continue
+            alpha = (px / entry - 1.0) - (nifty_t / nifty_entry - 1.0)
+            updates.append({
+                "run_date": run_date_s, "symbol": r["symbol"], "source": r["source"],
+                "stage": r["stage"],                       # NOT NULL; unchanged
+                f"price_t{horizon_days}": round(px, 4),
+                f"nifty_t{horizon_days}": round(nifty_t, 4),
+                f"alpha_t{horizon_days}": round(alpha, 6),
+                "labelled_at": now,
+            })
+
+    out["labelled"] = record_candidates(client, updates)
+    if len(updates) != out["labelled"]:
+        out["errors"].append(f"{len(updates) - out['labelled']} label writes failed")
+    if failed_syms:
+        log.warning("label_candidates(t%d): %d rows had no price (e.g. %s)",
+                    horizon_days, len(failed_syms), ", ".join(failed_syms[:10]))
+    log.info("label_candidates(t%d): due=%d labelled=%d failed=%d",
+             horizon_days, out["due"], out["labelled"], out["failed"])
+    return out

@@ -109,10 +109,15 @@ def test_research_scan_failure_still_runs_gates_then_fails(ledger):
 
 def test_outcome_tracker_failure_still_runs_sentiment_validation(ledger):
     sv = MagicMock(return_value={"validated": 1})
+    labels = MagicMock(side_effect=lambda client, h: {"horizon": h, "due": 0, "labelled": 0,
+                                                      "failed": 0, "errors": []})
     with patch("agents.outcome_tracker.run_outcome_tracking", side_effect=RuntimeError("yf")), \
-         patch("agents.outcome_tracker.run_sentiment_validation", sv):
+         patch("agents.outcome_tracker.run_sentiment_validation", sv), \
+         patch("data.candidate_ledger.get_client", return_value=None), \
+         patch("data.candidate_ledger.label_candidates", labels):
         worker.job_outcome_tracker()
     sv.assert_called_once()
+    assert labels.call_count == 2          # candidate labels (WP-014) still run too
     assert _row(ledger)["status"] == "FAILED"
 
 

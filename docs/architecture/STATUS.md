@@ -20,7 +20,7 @@ Plan: `workplan.yaml` · Review: `REVIEW.md` · Target: `TARGET_ARCHITECTURE.md`
 | WP-011 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-16 | Regime detector 06:30 → 05:45 IST so the 06:00 orchestrator reads today's regime; schedule-order test added. NEEDS-PROD: today's market_regime row exists at the 06:00 run |
 | WP-012 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-16 | `candidates` table: migration applied by owner 2026-11-16 (count 0); mirrored in schema.sql; added to db/contract.py — check_schema exits 0 |
 | WP-013 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-16 | `data/candidate_ledger.py`; discovery writes one row per screened symbol (features from the pre-screen) and updates deep-analysed rows; multibagger picks recorded. NEEDS-PROD: ≥150 discovery rows after the next 10:30 run |
-| WP-014 | TODO | — | — | Label candidate rows with 30- and 90-day alpha |
+| WP-014 | IN_PROGRESS | — (branch `wp/WP-014-label-candidates`, local) | 2026-11-16 | `label_candidates()` at 18:30: t30/t90 alpha (same formula as recommendation_outcomes), one batch download per run date via a shared price-on-date helper; no-price rows counted failed. NEEDS-PROD: details.output.candidates_labelled; ≥100 labelled from ~2026-12-17 |
 | WP-015 | TODO | — | — | Store the gate score for every symbol, honestly named |
 | WP-016 | TODO | — | — | Define typed agent results with contract tests |
 | WP-017 | TODO | — | — | Fit a shadow probability model on the ledger (needs ≥300 labelled rows) |
