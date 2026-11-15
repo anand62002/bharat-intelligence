@@ -585,7 +585,22 @@ def job_gift_nifty_fetch() -> dict:
         signal.get("source", "?"),
     )
     log.info("  %s", signal.get("market_note", ""))
-    return {"count": 1 if signal.get("signal") else 0, **signal}
+    # UNAVAILABLE or a quote older than 3 days is a broken feed, not an OK run —
+    # the old code faked 0.00% from ^NSEI and the ledger showed OK every day.
+    errors: list[str] = []
+    if signal.get("signal") == "UNAVAILABLE":
+        errors.append(f"GIFT Nifty unavailable (source={signal.get('source')})")
+    else:
+        traded = signal.get("gift_traded_at")
+        try:
+            from datetime import datetime, timedelta
+            age = datetime.now(IST).replace(tzinfo=None) - datetime.strptime(traded, "%d-%b-%Y %H:%M:%S")
+            if age > timedelta(days=3):
+                errors.append(f"GIFT Nifty quote stale: last trade {traded} IST")
+        except (TypeError, ValueError):
+            pass   # fallback sources carry no trade time
+    ok = signal.get("signal") != "UNAVAILABLE"
+    return {"count": 1 if ok else 0, **signal, "errors": errors}
 
 
 @tracked_job("breeze_token_refresh")

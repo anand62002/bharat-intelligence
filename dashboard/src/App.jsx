@@ -4413,13 +4413,17 @@ export default function App(){
   const moreActive=!PRIMARY_TABS.some(([id])=>id===tab);
   const moreBadge=TABS.filter(t=>!PRIMARY_TABS.some(([id])=>id===t.id)).reduce((a,t)=>a+(t.badge||0),0);
   const goTab=id=>{setTab(id);setMoreOpen(false);};
-  const tickerItems=marketPulse.slice(0,6).map(m=>(
-    <div key={m.key} style={{display:"flex",gap:4,alignItems:"center",whiteSpace:"nowrap",flexShrink:0}}>
-      <span style={{fontSize:10.5,color:C.muted}}>{m.key}</span>
-      <span style={{fontSize:11,fontWeight:700,color:C.text,fontFamily:MONO}}>{m.value}</span>
-      <span style={{fontSize:10.5,color:m.up?C.green:C.red}}>{m.change}</span>
-    </div>
-  ));
+  const tickerItems=marketPulse.slice(0,6).map(m=>{
+    // Same flat rule as the Market tab cards: a 0.00% / "flat" move is neutral, not red.
+    const flat=!m.change||/^[+-]?0(\.0+)?%$/.test(m.change)||/flat|unch/i.test(m.change);
+    return(
+      <div key={m.key} title={m.note||undefined} style={{display:"flex",gap:4,alignItems:"center",whiteSpace:"nowrap",flexShrink:0}}>
+        <span style={{fontSize:10.5,color:C.muted}}>{m.key}</span>
+        <span style={{fontSize:11,fontWeight:700,color:C.text,fontFamily:MONO}}>{m.value}</span>
+        <span style={{fontSize:10.5,color:flat?C.textDim:m.up?C.green:C.red}}>{m.change}</span>
+      </div>
+    );
+  });
 
   return(
     <div style={{fontFamily:SANS,background:C.bg,color:C.text,height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden",position:"relative"}}>

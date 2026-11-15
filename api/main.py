@@ -1007,17 +1007,21 @@ async def _get_market_pulse() -> list[dict]:
         from data.gift_nifty_fetcher import get_gift_nifty_signal
         gift = get_gift_nifty_signal()
         if gift.get("signal") != "UNAVAILABLE" and gift.get("premium_pct") is not None:
-            arrow = "▲" if gift["signal"] == "POSITIVE_OPEN" else ("▼" if gift["signal"] == "NEGATIVE_OPEN" else "→")
-            strength_suffix = f" ({gift.get('signal_strength', '')})" if gift.get('signal_strength') != "WEAK" else ""
-            pulse.append({
+            # Same shape as the index cards (price + % vs NSE close) and placed
+            # right after NIFTY 50, so it falls inside the masthead ticker's first
+            # six items — appended last it was the 9th and never shown there.
+            card = {
                 "key":    "GIFT NIFTY",
-                "value":  f"{gift['premium_pct']:+.2f}% {arrow}{strength_suffix}",
-                "change": gift["signal"].lower(),
-                "up":     gift["signal"] == "POSITIVE_OPEN",
+                "value":  f"{gift['gift_price']:,.0f}" if gift.get("gift_price") else "—",
+                "change": f"{gift['premium_pct']:+.2f}%",
+                "up":     gift["premium_pct"] >= 0,
                 "note":   gift.get("market_note"),
-            })
+                "signal": gift.get("signal"),
+            }
+            at = next((i + 1 for i, m in enumerate(pulse) if m.get("key") == "NIFTY 50"), len(pulse))
+            pulse.insert(at, card)
     except Exception as exc:
-        log.debug("GIFT Nifty pulse integration skipped: %s", exc)
+        log.warning("GIFT Nifty pulse integration skipped: %s", exc)
 
     _market_cache    = pulse
     _market_cache_ts = time.time()
