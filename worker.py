@@ -1105,6 +1105,27 @@ def build_scheduler():
 # Entry point
 # =============================================================================
 
+def startup_schema_check() -> dict:
+    """
+    WP-007: compare production with db/contract.py once at start-up. A missing
+    column is logged at CRITICAL (one line each) and the worker carries on — the
+    writes that need it fail loudly on their own; this names the cause up front.
+    Never raises.
+    """
+    try:
+        from scripts.check_schema import check_schema, missing_only
+        gaps = missing_only(check_schema(_service_client()))
+    except Exception as exc:
+        log.error("Schema check could not run: %s", exc)
+        return {"error": str(exc)}
+    for table, cols in gaps.items():
+        for col in cols:
+            log.critical("SCHEMA DRIFT: production %s is missing %s — code writes it "
+                         "(see db/contract.py; apply the matching db/migrations file)", table, col)
+    if not gaps:
+        log.info("Schema check: production has every column in db/contract.py")
+    return gaps
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bharat Intelligence Worker")
     parser.add_argument(
@@ -1113,6 +1134,8 @@ def main() -> None:
         help="Fire all jobs once immediately (for smoke-testing Railway env), then start scheduler",
     )
     args = parser.parse_args()
+
+    startup_schema_check()
 
     if args.now:
         log.info("--now flag: running all jobs once before starting scheduler...")

@@ -560,6 +560,22 @@ def check_job_invariants(client, days: int = 7) -> dict[str, Any]:
     }
 
 
+def check_schema_contract(client) -> dict[str, Any]:
+    """WP-007: production has every column the code writes (db/contract.py)."""
+    try:
+        from scripts.check_schema import check_schema, missing_only
+        gaps = missing_only(check_schema(client))
+    except Exception as exc:
+        return {"status": WARN, "detail": f"Schema check failed: {exc}"}
+    if not gaps:
+        return {"status": PASS, "detail": "Every contract column exists in production", "missing": {}}
+    return {
+        "status": FAIL,
+        "detail": "Missing: " + "; ".join(f"{t}.{', '.join(c)}" for t, c in gaps.items()),
+        "missing": gaps,
+    }
+
+
 # =============================================================================
 # Main audit runner
 # =============================================================================
@@ -575,6 +591,7 @@ CHECKS = [
     ("forward_poller",       "Forward Poller Recency",       check_forward_poller_recency),
     ("outcome_seeder",       "Outcome Seeder Coverage",      check_outcome_seeder),
     ("job_invariants",       "Job Invariants (WP-006)",      check_job_invariants),
+    ("schema_contract",      "Schema Contract (WP-007)",     check_schema_contract),
 ]
 
 

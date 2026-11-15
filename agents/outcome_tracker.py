@@ -1171,17 +1171,18 @@ def run_sentiment_validation(dry_run: bool = False) -> dict:
             if degrading and not dry_run:
                 try:
                     from datetime import date as _d2
-                    client.table("agent_performance").upsert({
+                    # Plain insert like every other agent_performance writer. This was an
+                    # upsert with a "notes" column (agent_performance has none) on an
+                    # (agent_name, audit_date) conflict target with no unique constraint,
+                    # so it failed every time (found by scripts/check_schema.py, WP-007).
+                    # The explanation stays in the WARNING below.
+                    client.table("agent_performance").insert({
                         "agent_name":        "sentiment",
                         "accuracy_90d":      accuracy_30d,  # percentage, like every other writer (ADR-003)
                         "hallucination_rate": 0.0,
                         "trend":             "DEGRADING",
                         "audit_date":        _d2.today().isoformat(),
-                        "notes":             (
-                            f"P6-D-8: sentiment direction accuracy {accuracy_30d:.1f}% "
-                            f"< 52% threshold (near-random). Review event classifier."
-                        ),
-                    }, on_conflict="agent_name,audit_date").execute()
+                    }).execute()
                     log.warning(
                         "P6-D-8: sentiment agent flagged DEGRADING (accuracy=%.1f%%)",
                         accuracy_30d,

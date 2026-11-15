@@ -321,7 +321,9 @@ def _create_alert(client, symbol: str, holding_id: str, severity: str,
             "title":       title,
             "detail":      detail,
             "resolved":    False,
-            "portfolio_id": holding_id,
+            # Was "portfolio_id", a column portfolio_alerts never had — every
+            # target-updater alert failed to insert (found by scripts/check_schema.py).
+            "holding_id":  holding_id,
         }).execute()
     except Exception as e:
         log.warning("_create_alert(%s) failed: %s", symbol, e)

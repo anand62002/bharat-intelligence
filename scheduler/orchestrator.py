@@ -1878,7 +1878,8 @@ async def log_run_node(state: OrchestratorState) -> dict:
                     f"Action: refresh TRENDLYNE_SESSION/CSRF cookies on Railway."
                 ),
                 "resolved":   False,
-                "portfolio_id": None,
+                # "portfolio_id": None removed — portfolio_alerts has no such column,
+                # so this alert never landed (found by scripts/check_schema.py, WP-007).
             }).execute()
         except Exception as _aq_exc:
             log.warning("Could not write data quality alert: %s", _aq_exc)
