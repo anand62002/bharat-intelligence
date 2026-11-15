@@ -737,6 +737,32 @@ def job_backtest() -> dict:
     return {"count": result.get("symbols_processed", 0), **result}
 
 
+@tracked_job("job_watchdog")
+def job_watchdog() -> dict:
+    """
+    19:00 IST — WP-006: check today's daily_runs against scheduler/invariants.py
+    and raise one CRITICAL portfolio_alerts row (alert_type JOB_INVARIANT) per
+    missing, failed or zero-output job. Absence of output is the alarm.
+    """
+    log.info("-" * 50)
+    log.info("  JOB START: Job Invariant Watchdog (19:00 IST)")
+    from scheduler.invariants import check_invariants, raise_alerts
+    client = _service_client()
+    breaches = check_invariants(client)
+    for b in breaches:
+        log.error("JOB INVARIANT BREACH %s [%s]: %s", b.job, b.kind, b.message)
+    alerts = raise_alerts(client, breaches)
+    log.info("Watchdog done — breaches=%d alerts_inserted=%d duplicates=%d",
+             len(breaches), alerts["inserted"], alerts["duplicates"])
+    return {
+        "count": len(breaches),
+        "breaches": [b.as_dict() for b in breaches],
+        "alerts": alerts,
+        # Breaches make the watchdog's own row WARNING, so it is visible in the ledger too.
+        "errors": [f"{b.job}: {b.kind}" for b in breaches] + alerts["errors"],
+    }
+
+
 # =============================================================================
 # Scheduler setup
 # =============================================================================
@@ -1056,6 +1082,17 @@ def build_scheduler():
         CronTrigger(day=1, hour=8, minute=15, timezone=IST),
         id="rag_refresh_monthly",
         name="Monthly RAG Corpus Refresh (08:15 IST, 1st)",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+
+    # ── WP-006: job invariant watchdog — after the last daily job (18:30) ─────
+    scheduler.add_job(
+        job_watchdog,
+        CronTrigger(hour=19, minute=0, timezone=IST),
+        id="job_watchdog",
+        name="Job Invariant Watchdog (19:00 IST)",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,

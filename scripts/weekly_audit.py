@@ -536,6 +536,30 @@ def check_outcome_seeder(client) -> dict[str, Any]:
     }
 
 
+def check_job_invariants(client, days: int = 7) -> dict[str, Any]:
+    """WP-006: every due job ran and produced output on each of the last `days` days.
+
+    Ends yesterday — today's jobs are not all due when the Sunday audit runs.
+    """
+    try:
+        from scheduler.invariants import check_range
+        breaches = check_range(client, end=date.today() - timedelta(days=1), days=days)
+    except Exception as exc:
+        return {"status": WARN, "detail": f"Invariant check failed: {exc}"}
+    if not breaches:
+        return {"status": PASS, "detail": f"No job invariant breaches in the last {days} days",
+                "breaches": []}
+    by_job: dict[str, int] = {}
+    for b in breaches:
+        by_job[b.job] = by_job.get(b.job, 0) + 1
+    return {
+        "status": FAIL,
+        "detail": f"{len(breaches)} breaches in {days} days: "
+                  + ", ".join(f"{j} ×{n}" for j, n in sorted(by_job.items())),
+        "breaches": [b.as_dict() for b in breaches],
+    }
+
+
 # =============================================================================
 # Main audit runner
 # =============================================================================
@@ -550,6 +574,7 @@ CHECKS = [
     ("agent_performance",    "Agent Performance Trends",     check_agent_performance),
     ("forward_poller",       "Forward Poller Recency",       check_forward_poller_recency),
     ("outcome_seeder",       "Outcome Seeder Coverage",      check_outcome_seeder),
+    ("job_invariants",       "Job Invariants (WP-006)",      check_job_invariants),
 ]
 
 

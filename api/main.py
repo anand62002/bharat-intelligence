@@ -2117,6 +2117,29 @@ async def get_system_health(
         checks.append(_warn("Discovery Screener", f"Could not read discovery_runs: {exc}",
                             "Verify discovery_runs table exists (run db/migrations/create_discovery_runs.sql)"))
 
+    # ── WP-006: job invariants for the last complete day ─────────────────────
+    # Yesterday, because today's jobs are not all due until 18:30 IST. Weekday
+    # calendar only (no live Nifty lookup) to keep this endpoint DB-only.
+    job_breaches: list[dict] = []
+    try:
+        from scheduler.invariants import check_invariants
+        from datetime import date as _date, timedelta as _td
+        day = _date.today() - _td(days=1)
+        job_breaches = [b.as_dict() for b in check_invariants(
+            db, day, trading_day=lambda d: d.weekday() < 5)]
+        if job_breaches:
+            checks.append(_err(
+                "Job invariants",
+                f"{day}: " + "; ".join(f"{b['job']} {b['kind']} — {b['message']}"
+                                       for b in job_breaches),
+                "See portfolio_alerts (alert_type JOB_INVARIANT) and the job's daily_runs row",
+            ))
+        else:
+            checks.append(_ok("Job invariants", f"{day}: every due job ran and produced output"))
+    except Exception as exc:
+        checks.append(_warn("Job invariants", f"Could not evaluate: {exc}",
+                            "Check scheduler/invariants.py and the daily_runs table"))
+
     # Sort: errors first, then warnings, then info, then ok
     _sev_order = {"error": 0, "warning": 1, "info": 2, "ok": 3}
     checks.sort(key=lambda c: _sev_order.get(c["severity"], 99))
@@ -2125,6 +2148,7 @@ async def get_system_health(
         "errors":     sum(1 for c in checks if c["severity"] == "error"),
         "warnings":   sum(1 for c in checks if c["severity"] == "warning"),
         "ok":         sum(1 for c in checks if c["severity"] == "ok"),
+        "job_breaches": job_breaches,
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
