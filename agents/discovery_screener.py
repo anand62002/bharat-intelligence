@@ -1911,6 +1911,15 @@ def run_discovery(
     # on dr.saved_rec_id being truthy (fixed in the loop above).
     discovery_syms = [d.symbol for d in discoveries]
 
+    # A dry run (--no-save) writes nothing. It used to log here, which added a
+    # fake discovery row to daily_runs and, because discovery_runs upserts on
+    # run_date, overwrote that day's real screened/passed/discovery lists.
+    if not save_to_db:
+        log.info("Dry run: daily_runs / discovery_runs not written")
+        out = DiscoveryList(discoveries)
+        out.ledger_rows = 0
+        return out
+
     _log_daily_run(
         symbols_processed  = len(candidates),
         discoveries        = len(discoveries),

@@ -211,6 +211,22 @@ def test_no_save_writes_no_ledger_rows(discovery_env, monkeypatch):
     assert client.rows == {} and nifty_calls == [] and out.ledger_rows == 0
 
 
+def test_no_save_writes_no_run_log(discovery_env, monkeypatch):
+    """--no-save must not add a daily_runs row or overwrite the day's discovery_runs row."""
+    ds, _, _, _ = discovery_env
+    monkeypatch.setattr(ds, "_log_daily_run", lambda **kw: pytest.fail("dry run wrote the run log"))
+    out = ds.run_discovery(max_candidates=25, max_prescreen=200, save_to_db=False, inter_delay=0,
+                           _run_date=RUN_DATE)
+    assert len(out) == 5
+
+
+def test_saved_run_still_writes_run_log(discovery_env):
+    ds, _, logged, _ = discovery_env
+    ds.run_discovery(max_candidates=25, max_prescreen=200, save_to_db=True, inter_delay=0,
+                     _run_date=RUN_DATE)
+    assert logged["run_date"] == RUN_DATE and len(logged["slice_symbols"]) == 200
+
+
 def test_prescreen_records_skip_reason(monkeypatch):
     from agents import discovery_screener as ds
     monkeypatch.setattr(ds, "get_ohlcv", lambda *a, **k: None)
