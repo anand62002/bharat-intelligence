@@ -62,7 +62,7 @@ class FundamentalResult(_Base, total=False):
 
 
 class SentimentResult(_Base, total=False):
-    pass
+    dominant_event_class: Optional[str]  # most frequent non-ROUTINE event class
 
 
 class InstitutionalResult(_Base, total=False):
@@ -107,6 +107,7 @@ class WarrenBotResult(_Base, total=False):
     why_buffett_would_pass: list
     key_risks: list
     data_gaps: list
+    years_available: Optional[int]      # years of annual history (None on failure)
     error: Optional[str]                # failure path only
 
 
@@ -138,12 +139,12 @@ _D = "agents/discovery_screener.py"
 CONSUMED_KEYS: dict[str, dict[str, frozenset[str]]] = {
     "technical": {
         f"{_O}::_composite_score": frozenset({"signal", "score"}),
-        f"{_O}::_build_recommendation": frozenset({"upside_pct", "detail",
-                                                   "detail.indicators.current_price"}),
+        f"{_O}::_build_recommendation": frozenset({"upside_pct", "detail", "atr_stoploss",
+                                                   "detail.indicators.target_price_used"}),
+        f"{_O}::_current_price": frozenset({"detail.indicators.current_price"}),
+        f"{_O}::_decision_meta": frozenset({"atr_14", "atr_stoploss", "atr_stoploss_pct"}),
         f"{_O}::_fallback_synthesis": frozenset({"upside_pct"}),
         f"{_O}::synthesise_node": frozenset({"atr_14", "atr_stoploss", "detail"}),
-        f"{_O}::save_recs_node": frozenset({"atr_14", "atr_stoploss", "atr_stoploss_pct"}),
-        f"{_O}::_portfolio_ledger_row": frozenset({"detail.indicators.current_price"}),
         f"{_O}::_build_rag_description": frozenset({"detail"}),
         f"{_D}::_best_upside": frozenset({"upside_pct", "confidence"}),
         f"{_D}::_upside_basis": frozenset({"signal"}),
@@ -156,19 +157,13 @@ CONSUMED_KEYS: dict[str, dict[str, frozenset[str]]] = {
     "fundamental": {
         f"{_O}::_composite_score": frozenset({"signal", "score"}),
         f"{_O}::_build_recommendation": frozenset({"upside_pct", "danger_drop_pct",
-                                                   "danger_confidence", "detail",
-                                                   "detail.valuation.current_price",
-                                                   "detail.valuation.entry_low",
-                                                   "detail.valuation.entry_high",
-                                                   "detail.valuation.target"}),
+                                                   "danger_confidence"}),
+        f"{_O}::_current_price": frozenset({"detail.raw_metrics.current_price"}),
+        f"{_O}::_decision_meta": frozenset({"data_quality"}),
         f"{_O}::_fallback_synthesis": frozenset({"upside_pct", "danger_drop_pct",
                                                  "danger_confidence"}),
-        f"{_O}::synthesise_node": frozenset({"data_quality", "detail",
-                                             "detail.valuation.current_price",
-                                             "detail.years_available", "detail.data_quality"}),
-        f"{_O}::save_recs_node": frozenset({"data_quality", "detail.years_available"}),
-        f"{_O}::_portfolio_ledger_row": frozenset({"data_quality",
-                                                   "detail.valuation.current_price"}),
+        f"{_O}::synthesise_node": frozenset({"data_quality", "detail"}),
+        f"{_O}::_portfolio_ledger_row": frozenset({"data_quality"}),
         f"{_D}::_best_upside": frozenset({"upside_pct", "score"}),
         f"{_D}::_upside_basis": frozenset({"signal", "upside_pct", "detail"}),
         f"{_D}::run_discovery": frozenset({"data_quality"}),
@@ -216,9 +211,7 @@ CONSUMED_KEYS: dict[str, dict[str, frozenset[str]]] = {
             "roce_avg_10yr", "promoter_quality", "india_consumption_play",
             "jhunjhunwala_cyclical_flag", "why_buffett_would_like", "why_buffett_would_pass",
             "key_risks", "data_gaps", "years_available"}),
-        f"{_O}::save_recs_node": frozenset({"score", "conviction_rating", "moat_type",
-                                            "intrinsic_value_per_share",
-                                            "margin_of_safety_pct", "years_available"}),
+        f"{_O}::_decision_meta": frozenset({"years_available"}),
         f"{_D}::_save_discovery": frozenset({"signal", "score", "margin_of_safety_pct",
                                              "error"}),
         "agents/target_updater.py::_intrinsic": frozenset({"intrinsic_value_per_share"}),
@@ -266,22 +259,17 @@ PATH_DEPENDENT: dict[tuple[str, str], str] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 KNOWN_MISSING: dict[tuple[str, str], str] = {
-    ("fundamental", "detail.valuation.current_price"):
-        "fundamental never emits detail.valuation, so the synthesis prompt's {current_price} "
-        "is 'N/A' for every holding and _build_recommendation's valuation fallbacks are empty",
-    ("fundamental", "detail.valuation.entry_low"): "no detail.valuation (see current_price)",
-    ("fundamental", "detail.valuation.entry_high"): "no detail.valuation (see current_price)",
-    ("fundamental", "detail.valuation.target"): "no detail.valuation (see current_price)",
-    ("fundamental", "detail.years_available"):
-        "P7-C data-density firewall reads it from fundamental.detail or warren_bot; neither "
-        "emits it, so the <5-year confidence cap never fires",
-    ("warren_bot", "years_available"): "see fundamental detail.years_available",
-    ("fundamental", "detail.data_quality"):
-        "data_quality is top-level on the fundamental result; synthesise_node's detail read "
-        "falls through to the top-level key, so this one is harmless",
-    ("sentiment", "dominant_event_class"):
-        "run_sentiment_validation reads it from stored agent_signals; sentiment never emits "
-        "it, so event_class is always NULL in the validation rows",
+    # Empty. The first run of this check (2026-11-16) found eight reads of keys no
+    # agent emitted, all fixed in the same change:
+    #   - fundamental detail.valuation.{current_price,entry_low,entry_high,target}:
+    #     the synthesis prompt said "Current price: ₹N/A" (and the ATR entry floor
+    #     "N/A") for every holding; level fallbacks were empty → orchestrator
+    #     _current_price() + technical target_price_used / atr_stoploss
+    #   - fundamental detail.years_available / warren_bot years_available: the P7-C
+    #     <5-year confidence cap never fired → warren_bot now emits years_available
+    #   - sentiment dominant_event_class: validation rows always had event_class
+    #     NULL → sentiment emits it and the stored agent_signals keep it
+    #   - fundamental detail.data_quality: harmless fall-through, read removed
 }
 
 

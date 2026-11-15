@@ -847,6 +847,7 @@ def analyse(symbol: str) -> dict:
             "danger_signals": [],
             "data_sources": [],
             "agent_name": AGENT_NAME,
+            "dominant_event_class": None,
         }
 
     # Deduplicate by title
@@ -965,6 +966,15 @@ def analyse(symbol: str) -> dict:
     event_class_breakdown = Counter(s.get("event_class", "UNKNOWN") for s in scored)
 
     breakdown = Counter(s.get("sentiment", "neutral") for s in scored)
+
+    # The most frequent classified event (ROUTINE/UNKNOWN only when nothing
+    # else was seen). The outcome tracker's sentiment validation groups by it;
+    # it was never emitted, so every validation row had event_class NULL (WP-016).
+    _material = [(c, n) for c, n in event_class_breakdown.most_common()
+                 if c not in ("ROUTINE", "UNKNOWN")]
+    dominant_event_class = (_material[0][0] if _material
+                            else (event_class_breakdown.most_common(1)[0][0]
+                                  if event_class_breakdown else None))
 
     # ── 4b. Insider / promoter signal (P3-C-P5) ──────────────────────────────
     # Promoter buying = +5 pts (institutional vote of confidence)
@@ -1091,6 +1101,7 @@ def analyse(symbol: str) -> dict:
         "danger_signals": danger_signals,
         "data_sources":   list(dict.fromkeys(data_sources)),  # dedup, preserve order
         "agent_name":     AGENT_NAME,
+        "dominant_event_class": dominant_event_class,
     }
 
     try:

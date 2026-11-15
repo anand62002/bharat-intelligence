@@ -12,7 +12,10 @@ embeddings) record their keyless path — the keys consumers read are the same.
 
 Re-record when an agent's output changes on purpose:
 
-    PYTHON_DOTENV_DISABLED=1 python scripts/record_agent_fixtures.py [SYMBOL]
+    PYTHON_DOTENV_DISABLED=1 python scripts/record_agent_fixtures.py [SYMBOL] [agent,...]
+
+Check the printed signals: a NO_DATA / INSUFFICIENT_DATA run (rate-limited
+source) records a degraded path — re-record that agent later.
 """
 from __future__ import annotations
 
@@ -49,7 +52,7 @@ def _clean(o):
     return str(o)
 
 
-def main(symbol: str = "TITAN") -> int:
+def main(symbol: str = "TITAN", only: str = "") -> int:
     from agents import (commodities, fundamental, historical_rag, institutional, macro,
                         mgmt_quality, sentiment, technical, warren_bot)
     yf = f"{symbol}.NS"
@@ -64,6 +67,8 @@ def main(symbol: str = "TITAN") -> int:
         "warren_bot":     lambda: warren_bot.analyse(symbol),
         "mgmt_quality":   lambda: mgmt_quality.analyse(symbol),
     }
+    if only:                                    # e.g. "sentiment,technical"
+        runs = {k: v for k, v in runs.items() if k in only.split(",")}
     OUT.mkdir(parents=True, exist_ok=True)
     failed = 0
     for name, fn in runs.items():
@@ -81,4 +86,5 @@ def main(symbol: str = "TITAN") -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(*(sys.argv[1:2] or ["TITAN"])))
+    # python scripts/record_agent_fixtures.py [SYMBOL] [agent1,agent2]
+    sys.exit(main(*(sys.argv[1:3] or ["TITAN"])))

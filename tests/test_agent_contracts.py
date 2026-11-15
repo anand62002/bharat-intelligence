@@ -87,3 +87,67 @@ def test_lookup_paths():
     assert c.lookup({"a": {"b": 1}}, "a.b") == (True, 1)
     assert c.lookup({"a": {"b": 1}}, "a.c") == (False, None)
     assert c.lookup({"a": None}, "a.b") == (False, None)
+
+
+# ── The gaps this check found, fixed (2026-11-16) ─────────────────────────────
+
+def test_known_missing_is_empty():
+    assert c.KNOWN_MISSING == {}, "new consumer/producer gap — fix it rather than allowlisting"
+
+
+def test_current_price_reaches_the_synthesis_inputs():
+    """Was always None → prompt said 'Current price: ₹N/A' and the ATR entry floor 'N/A'."""
+    from scheduler.orchestrator import _current_price
+    agents = {"fundamental": _fixture("fundamental"), "technical": _fixture("technical")}
+    assert _current_price(agents) == pytest.approx(
+        _fixture("fundamental")["detail"]["raw_metrics"]["current_price"])
+    no_fund = {"technical": _fixture("technical")}
+    assert _current_price(no_fund) == pytest.approx(
+        _fixture("technical")["detail"]["indicators"]["current_price"])
+    assert _current_price({}) is None
+
+
+def test_decision_meta_carries_years_quality_and_atr():
+    """save_recs_node read these from the compact stored signals and never saved them."""
+    from scheduler.orchestrator import _decision_meta
+    m = _decision_meta({"technical": _fixture("technical"), "fundamental": _fixture("fundamental"),
+                        "warren_bot": _fixture("warren_bot")})
+    assert m["data_years_available"] == _fixture("warren_bot")["years_available"]
+    assert m["data_quality"] == _fixture("fundamental")["data_quality"]
+    assert m["atr_14"] == _fixture("technical")["atr_14"]
+    assert m["atr_stoploss"] == _fixture("technical")["atr_stoploss"]
+
+
+def test_build_recommendation_level_fallbacks_use_real_technical_keys():
+    from scheduler.orchestrator import _build_recommendation
+    from unittest.mock import patch
+    agents = {"technical": _fixture("technical"), "fundamental": _fixture("fundamental")}
+    with patch("agents.governance_screener.screen_governance",
+               return_value={"flag_count": 0}):
+        rec = _build_recommendation("TITAN.NS", {"action": "HOLD"}, agents, {}, 55.0)
+    tech = _fixture("technical")
+    assert rec["target"] == pytest.approx(tech["detail"]["indicators"]["target_price_used"])
+    assert rec["stoploss"] == pytest.approx(tech["atr_stoploss"])
+    assert rec["decision_meta"]["atr_14"] == tech["atr_14"]
+
+
+def test_warren_failure_path_sets_error_and_years():
+    """Consumers detect a failed run with .get('error'); the fallback never set it."""
+    from unittest.mock import patch
+    from agents import warren_bot
+    with patch("agents.warren_bot.get_screener_data", side_effect=RuntimeError("blocked")), \
+         patch("agents.warren_bot.get_screener_history", side_effect=RuntimeError("blocked")):
+        out = warren_bot.analyse("TITAN")
+    assert out.get("error")
+    assert "years_available" in out
+
+
+def test_sentiment_stores_dominant_event_class_in_agent_signals():
+    from scheduler.orchestrator import _build_recommendation
+    from unittest.mock import patch
+    sent = {**_fixture("sentiment"), "dominant_event_class": "EARNINGS_SURPRISE"}
+    with patch("agents.governance_screener.screen_governance",
+               return_value={"flag_count": 0}):
+        rec = _build_recommendation("TITAN.NS", {"action": "HOLD"},
+                                    {"sentiment": sent, "technical": _fixture("technical")}, {}, 55.0)
+    assert rec["agent_signals"]["sentiment"]["dominant_event_class"] == "EARNINGS_SURPRISE"

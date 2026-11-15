@@ -547,6 +547,43 @@ def _log_suppressed_synthesis(
             log.warning("[%s] Failed to log suppressed rec: %s", symbol, exc)
 
 
+def _current_price(agent_results: dict) -> Optional[float]:
+    """
+    Latest price from the agents that actually carry one: fundamental
+    detail.raw_metrics.current_price, then technical detail.indicators.current_price.
+
+    Every caller used to read fundamental detail.valuation.current_price, a key
+    the fundamental agent never emits (found by the WP-016 contract test), so the
+    synthesis prompt said "Current price: ₹N/A" for every holding.
+    """
+    fund_detail = (agent_results.get("fundamental") or {}).get("detail") or {}
+    tech_detail = (agent_results.get("technical") or {}).get("detail") or {}
+    for v in ((fund_detail.get("raw_metrics") or {}).get("current_price"),
+              (tech_detail.get("indicators") or {}).get("current_price")):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f == f and f > 0:
+            return f
+    return None
+
+
+def _decision_meta(agent_results: dict) -> dict:
+    """P7-C/P7-D audit fields from the raw agent results, for recommendations.metadata."""
+    tech = agent_results.get("technical") or {}
+    wb = agent_results.get("warren_bot") or {}
+    fund = agent_results.get("fundamental") or {}
+    meta: dict = {"data_quality": fund.get("data_quality") or "FULL"}
+    if wb.get("years_available") is not None:
+        meta["data_years_available"] = int(wb["years_available"])
+    if tech.get("atr_14") is not None:
+        meta["atr_14"] = tech["atr_14"]
+        meta["atr_stoploss"] = tech.get("atr_stoploss")
+        meta["atr_stoploss_pct"] = tech.get("atr_stoploss_pct")
+    return meta
+
+
 def _portfolio_ledger_row(
     symbol: str,
     agent_results: dict,
@@ -564,12 +601,7 @@ def _portfolio_ledger_row(
     """
     from data import candidate_ledger
     fund = agent_results.get("fundamental") or {}
-    fund_detail = fund.get("detail") if isinstance(fund.get("detail"), dict) else {}
-    valuation = fund_detail.get("valuation") if isinstance(fund_detail.get("valuation"), dict) else {}
-    tech = agent_results.get("technical") or {}
-    tech_detail = tech.get("detail") if isinstance(tech.get("detail"), dict) else {}
-    tech_ind = tech_detail.get("indicators") if isinstance(tech_detail.get("indicators"), dict) else {}
-    price = valuation.get("current_price") or tech_ind.get("current_price")
+    price = _current_price(agent_results)
 
     v = outcome.to_dict() if outcome is not None else {}
     row = candidate_ledger.deep_row(
@@ -587,7 +619,7 @@ def _portfolio_ledger_row(
         agent_signals={k: {"signal": (a or {}).get("signal"), "score": (a or {}).get("score")}
                        for k, a in agent_results.items() if isinstance(a, dict)},
         signal_score=composite,
-        data_quality=fund.get("data_quality") or fund_detail.get("data_quality"),
+        data_quality=fund.get("data_quality"),
         tier=None,
         rec_id=None,
         gate_score=v.get("gate_score"),
@@ -631,10 +663,8 @@ def _build_recommendation(
     """
     fund        = agent_results.get("fundamental", {})
     tech        = agent_results.get("technical", {})
-    fund_detail = (fund.get("detail") or {})
-    valuation   = fund_detail.get("valuation", {}) if isinstance(fund_detail, dict) else {}
     tech_detail = (tech.get("detail") or {})
-    targets     = tech_detail.get("targets", {}) if isinstance(tech_detail, dict) else {}
+    tech_ind    = tech_detail.get("indicators", {}) if isinstance(tech_detail, dict) else {}
 
     action     = str(synthesis_data.get("action") or "HOLD").upper()
     confidence = _num(synthesis_data.get("confidence"), composite)
@@ -673,10 +703,16 @@ def _build_recommendation(
                 return f
         return None
 
-    entry_low   = _f("entry_low",  valuation.get("entry_low"))
-    entry_high  = _f("entry_high", valuation.get("entry_high"))
-    target      = _f("target",     valuation.get("target"), targets.get("target"))
-    stoploss    = _f("stoploss",   targets.get("stoploss"))
+    # Fallbacks used to read fundamental detail.valuation.{entry_low,entry_high,
+    # target} and technical detail.targets.{target,stoploss} — none of which any
+    # agent emits (WP-016 contract test), so a level the synthesis left null
+    # stayed null. They now read what the technical agent does produce: its
+    # target price (analyst mean, else 1.5×EMA200 — the basis of its upside_pct)
+    # and its 2×ATR stoploss floor. There is no agent entry zone to fall back to.
+    entry_low   = _f("entry_low")
+    entry_high  = _f("entry_high")
+    target      = _f("target",     tech_ind.get("target_price_used") if isinstance(tech_ind, dict) else None)
+    stoploss    = _f("stoploss",   tech.get("atr_stoploss"))
     # NOTE: every read below must use _num()/_f() — synthesis_data values can be
     # explicit JSON nulls, which dict.get(key, default) does NOT replace.
     horizon_days      = int(_num(synthesis_data.get("horizon_days"), 180) or 180)
@@ -692,9 +728,7 @@ def _build_recommendation(
     # the target rather than publishing a card that says "0% upside" next to a
     # concrete price target.
     if not upside_pct and target:
-        _tech_ind = tech_detail.get("indicators", {}) if isinstance(tech_detail, dict) else {}
-        _cur = _f("current_price", valuation.get("current_price"),
-                  _tech_ind.get("current_price") if isinstance(_tech_ind, dict) else None)
+        _cur = _f("current_price", _current_price(agent_results))
         if _cur and _cur > 0:
             upside_pct = round((target - _cur) / _cur * 100.0, 2)
 
@@ -714,6 +748,10 @@ def _build_recommendation(
             # agent's own numbers (no LLM call), rendered in the dashboard's
             # per-agent breakdown so a score is never shown without a reason.
             "reason": build_rationale(name, agent_results.get(name)),
+            # Sentiment validation (outcome_tracker) groups outcomes by event
+            # class and reads it from these stored signals (WP-016).
+            **({"dominant_event_class": (agent_results.get(name) or {}).get("dominant_event_class")}
+               if name == "sentiment" else {}),
         }
         for name in AGENT_NAMES
     }
@@ -738,6 +776,11 @@ def _build_recommendation(
         "bull_case":         synthesis_data.get("bull_case", []),
         "bear_case":         synthesis_data.get("bear_case", []),
         "composite_score":   round(composite, 2),
+        # Copied into recommendations.metadata by save_recs_node. It used to read
+        # these from the stored compact agent_signals (signal/score/weight/reason
+        # only), so data_years_available, data_quality and the ATR fields were
+        # never saved (WP-016 contract test).
+        "decision_meta":     _decision_meta(agent_results),
         "is_discovery":      False,
         # Governance red flags (from governance_screener)
         "gov_screen":        gov_screen,
@@ -1131,12 +1174,10 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             synthesis_data: dict = {}
 
             if ant_client and prompt_template:
-                # Resolve current price for the prompt
-                fund_detail = (agent_results.get("fundamental", {}).get("detail") or {})
-                valuation   = fund_detail.get("valuation", {}) if isinstance(fund_detail, dict) else {}
-                current_price = (
-                    valuation.get("current_price") if isinstance(valuation, dict) else None
-                ) or "N/A"
+                # Resolve current price for the prompt (was always "N/A": it read
+                # fundamental detail.valuation, which no agent emits — WP-016)
+                _cp = _current_price(agent_results)
+                current_price = f"{_cp:.2f}" if _cp else "N/A"
 
                 # Use explicit .replace() instead of str.format() so that the
                 # literal { } braces in the JSON example block inside the prompt
@@ -1148,25 +1189,16 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 _atr_14           = _tech_res.get("atr_14")
                 _atr_stoploss_str = f"₹{_atr_stoploss:.2f}" if _atr_stoploss else "N/A (no ATR data)"
                 # ATR entry zone = price − 1×ATR (1σ intraday support floor for entry_low)
-                try:
-                    _price_num = float(current_price) if current_price != "N/A" else None
-                except (TypeError, ValueError):
-                    _price_num = None
+                # (also always "N/A" until the price fix above — P7-D never reached the prompt)
+                _price_num = _cp
                 _atr_entry_zone = (
                     f"₹{(_price_num - _atr_14):.2f}" if (_price_num and _atr_14) else "N/A"
                 )
 
                 # P7-C: data years + quality for prompt injection
-                _fund_detail_pre = (agent_results.get("fundamental", {}).get("detail") or {})
-                _years_pre = (
-                    _fund_detail_pre.get("years_available")
-                    or (agent_results.get("warren_bot", {}) or {}).get("years_available")
-                )
-                _dq_pre = (
-                    _fund_detail_pre.get("data_quality")
-                    or (agent_results.get("fundamental", {}) or {}).get("data_quality")
-                    or "FULL"
-                )
+                # warren_bot is the only agent that reports years of history.
+                _years_pre = (agent_results.get("warren_bot") or {}).get("years_available")
+                _dq_pre = (agent_results.get("fundamental", {}) or {}).get("data_quality") or "FULL"
                 _data_years_str   = str(_years_pre) if _years_pre is not None else "unknown"
                 _data_quality_str = _dq_pre
 
@@ -1343,11 +1375,10 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             # Warren bot also tracks years_available with a hard <5yr disqualifier.
             # Action: cap confidence at 60 and inject a warning into synthesis so
             # judges penalise the data_provenance rubric appropriately.
-            _fund_detail  = (agent_results.get("fundamental", {}).get("detail") or {})
-            _years_avail  = _fund_detail.get("years_available") or \
-                            (agent_results.get("warren_bot", {}) or {}).get("years_available")
-            _data_quality = _fund_detail.get("data_quality") or \
-                            (agent_results.get("fundamental", {}) or {}).get("data_quality")
+            # warren_bot is the only agent that reports years of history (it read
+            # fundamental.detail first, which never has it — WP-016).
+            _years_avail  = (agent_results.get("warren_bot") or {}).get("years_available")
+            _data_quality = (agent_results.get("fundamental", {}) or {}).get("data_quality")
             if _years_avail is not None and _years_avail < 5:
                 _old_conf = _num(synthesis_data.get("confidence"), 50.0)
                 synthesis_data["confidence"] = min(_old_conf, 60.0)
@@ -1765,30 +1796,11 @@ async def save_recs_node(state: OrchestratorState) -> dict:
             # P7-D: store ATR fields in metadata for dashboard + audit trail
             row.setdefault("metadata", {})
             if isinstance(row["metadata"], dict):
-                ag_sigs = rec.get("agent_signals") or {}
-                tech_sig = ag_sigs.get("technical") or {}
-                fund_sig = ag_sigs.get("fundamental") or {}
-                fund_detail = fund_sig.get("detail") or {}
-                _yrs = (
-                    fund_detail.get("years_available")
-                    or (ag_sigs.get("warren_bot") or {}).get("years_available")
-                )
-                _dq  = (
-                    fund_detail.get("data_quality")
-                    or fund_sig.get("data_quality")
-                    or "FULL"
-                )
-                if _yrs is not None:
-                    row["metadata"]["data_years_available"] = int(_yrs)
-                row["metadata"]["data_quality"]  = _dq
+                row["metadata"].update(rec.get("decision_meta") or {"data_quality": "FULL"})
                 # WP-004: persist the composite the decision was made on, so the
                 # daily seeder and backfill can copy it onto the outcome row.
                 if rec.get("composite_score") is not None:
                     row["metadata"]["composite_score"] = rec["composite_score"]
-                if tech_sig.get("atr_14") is not None:
-                    row["metadata"]["atr_14"]           = tech_sig["atr_14"]
-                    row["metadata"]["atr_stoploss"]     = tech_sig.get("atr_stoploss")
-                    row["metadata"]["atr_stoploss_pct"] = tech_sig.get("atr_stoploss_pct")
             # Nest warren_bot output inside agent_signals JSONB before saving.
             # warren_bot is not a top-level DB column — it lives under agent_signals["warren_bot"].
             if "agent_signals" in row and isinstance(row["agent_signals"], dict):

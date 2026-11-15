@@ -632,6 +632,7 @@
     },
     "temporal_decay_applied": true
   },
+  "dominant_event_class": "UNKNOWN",
   "score": 50,
   "signal": "NEUTRAL"
 }

@@ -844,6 +844,11 @@ def analyse(symbol: str) -> dict:
             "confidence": 0,
             "data_sources": [],
             "data_gaps": [err],
+            # Consumers (discovery sizing, target updater, multibagger deep_check)
+            # detect a failed run with .get("error"); this fallback never set it,
+            # so a crash looked like a valid result (found by WP-016's contract test).
+            "error": err,
+            "years_available": None,
         }
 
     try:
@@ -1193,6 +1198,10 @@ def analyse(symbol: str) -> dict:
             "confidence":                  confidence,
             "data_sources":               data_sources,
             "data_gaps":                   data_gaps,
+            # Years of annual history behind the scores. The orchestrator's P7-C
+            # data-density firewall reads it (cap confidence at 60 below 5 years);
+            # it was never emitted, so that cap never fired (WP-016).
+            "years_available":             _years,
         }
 
     except Exception as exc:

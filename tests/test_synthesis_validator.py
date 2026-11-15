@@ -75,7 +75,7 @@ def test_transform_recommendation_exposes_gate_score():
 
 AGENTS = {
     "fundamental": {"signal": "HOLD", "score": 55, "data_quality": "FULL",
-                    "detail": {"valuation": {"current_price": 3250.0}}},
+                    "detail": {"raw_metrics": {"current_price": 3250.0}}},
     "technical": {"signal": "BUY", "score": 62},
 }
 
