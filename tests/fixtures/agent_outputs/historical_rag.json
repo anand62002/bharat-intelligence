@@ -1,0 +1,28 @@
+{
+  "_recorded": {
+    "by": "scripts/record_agent_fixtures.py",
+    "date": "2026-11-16",
+    "symbol": "TITAN"
+  },
+  "agent_name": "historical_rag",
+  "below_threshold_fields": [],
+  "completeness_score": 75,
+  "confidence": 0.0,
+  "data_sources": [],
+  "detail": {
+    "below_threshold": [],
+    "completeness_score": 75,
+    "error": "Critical data below quality threshold: Vector DB available",
+    "missing_fields": [
+      "Vector DB available"
+    ]
+  },
+  "matched_events": [],
+  "missing_fields": [
+    "Vector DB available"
+  ],
+  "reason": "Critical data below quality threshold: Vector DB available",
+  "score": null,
+  "signal": "INSUFFICIENT_DATA",
+  "similarity_scores": []
+}

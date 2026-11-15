@@ -1,0 +1,122 @@
+{
+  "_recorded": {
+    "by": "scripts/record_agent_fixtures.py",
+    "date": "2026-11-16",
+    "symbol": "TITAN"
+  },
+  "agent_name": "macro",
+  "data_sources": [
+    "yfinance_usdinr",
+    "yfinance_indiavix",
+    "google_news_macro"
+  ],
+  "detail": {
+    "dxy": {
+      "note": "DXY unknown (neutral)",
+      "score": 10,
+      "value": null
+    },
+    "india_vix": {
+      "note": "India VIX 15.5 \u2014 low volatility",
+      "score": 8,
+      "value": 15.5
+    },
+    "inr_usd": {
+      "note": "INR 94.23/USD \u2014 sharply weak rupee",
+      "score": 1,
+      "value": 94.23
+    },
+    "macro_news": {
+      "headlines_scanned": 29,
+      "key_events": [
+        "India's Q2 GDP growth likely at 7.8%, above RBI estimate of 7.2%: SBI Research - Moneycontrol.com",
+        "India's Q2 GDP growth likely to hit 7.8%, beating RBI estimate: SBI - Fortune India",
+        "India\u2019s October retail inflation breaches RBI\u2019s 6% ceiling, odds of December repo rate hike rise - ThePrint",
+        "Budget 2026\u201327 Sets the Stage for India as a Global Hub for Cloud and AI Infrastructure - www.pib.gov.in",
+        "India Union Budget 2026-27 - kpmg.com",
+        "India's Union Budget 2026\u201327: Manufacturing Push, Tax Reforms - India Briefing",
+        "Union Budget 2026\u201327: Spending and Development Priorities - orfonline.org",
+        "Union Budget 2026: Strong fiscal signals, fragmented support for India\u2019s energy transition - Institute for Energy Econom"
+      ],
+      "score_adj": 10,
+      "signal": "NEGATIVE_SHOCK"
+    },
+    "max_possible": 100,
+    "rbi_repo": {
+      "note": "RBI repo rate unknown (neutral)",
+      "score": 7,
+      "value": null
+    },
+    "us10y": {
+      "note": "US10Y unknown (neutral)",
+      "score": 10,
+      "value": null
+    },
+    "vix": {
+      "note": "VIX unknown (neutral)",
+      "score": 8,
+      "value": null
+    }
+  },
+  "gift_nifty": {
+    "fetched_at": "2026-11-15T20:18:50.174645+00:00",
+    "gift_expiry": "2026-11-23",
+    "gift_price": 25266.0,
+    "gift_traded_at": "14-Nov-2026 02:44:30",
+    "is_pre_market": false,
+    "market_note": "GIFT Nifty +0.48% \u2014 no directional edge, flat open expected (last trade 14-Nov-2026 02:44:30 IST)",
+    "premium_pct": 0.484,
+    "premium_pts": 121.7,
+    "prev_nifty_close": 25144.3,
+    "signal": "FLAT",
+    "signal_strength": "WEAK",
+    "source": "nseix"
+  },
+  "macro_news_events": [
+    "India's Q2 GDP growth likely at 7.8%, above RBI estimate of 7.2%: SBI Research - Moneycontrol.com",
+    "India's Q2 GDP growth likely to hit 7.8%, beating RBI estimate: SBI - Fortune India",
+    "India\u2019s October retail inflation breaches RBI\u2019s 6% ceiling, odds of December repo rate hike rise - ThePrint",
+    "Budget 2026\u201327 Sets the Stage for India as a Global Hub for Cloud and AI Infrastructure - www.pib.gov.in",
+    "India Union Budget 2026-27 - kpmg.com",
+    "India's Union Budget 2026\u201327: Manufacturing Push, Tax Reforms - India Briefing",
+    "Union Budget 2026\u201327: Spending and Development Priorities - orfonline.org",
+    "Union Budget 2026: Strong fiscal signals, fragmented support for India\u2019s energy transition - Institute for Energy Econom"
+  ],
+  "macro_news_signal": "NEGATIVE_SHOCK",
+  "score": 54,
+  "sector_impacts": {
+    "AUTO": {
+      "outlook": "NEUTRAL",
+      "reason": "Neutral macro for auto"
+    },
+    "BANKING": {
+      "outlook": "NEUTRAL",
+      "reason": "High rates compress NIMs for variable-rate books"
+    },
+    "FMCG": {
+      "outlook": "POSITIVE",
+      "reason": "Low volatility favours defensive FMCG holdings"
+    },
+    "IT": {
+      "outlook": "POSITIVE",
+      "reason": "Weak INR boosts USD revenue realisation"
+    },
+    "METALS": {
+      "outlook": "NEUTRAL",
+      "reason": "USD neutral for metals"
+    },
+    "OIL_GAS": {
+      "outlook": "NEGATIVE",
+      "reason": "Weak INR / strong USD raises USD-denominated crude import cost"
+    },
+    "PHARMA": {
+      "outlook": "POSITIVE",
+      "reason": "Weak INR boosts US generic export realisations"
+    },
+    "REALTY": {
+      "outlook": "NEUTRAL",
+      "reason": "High rates dampen mortgage affordability"
+    }
+  },
+  "signal": "NEUTRAL"
+}

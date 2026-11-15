@@ -1,0 +1,75 @@
+{
+  "_recorded": {
+    "by": "scripts/record_agent_fixtures.py",
+    "date": "2026-11-16",
+    "symbol": "TITAN"
+  },
+  "agent_name": "technical",
+  "atr_14": 128.88,
+  "atr_stoploss": 4587.14,
+  "atr_stoploss_pct": 5.3,
+  "confidence": 0.87,
+  "data_sources": [
+    "yfinance_ohlcv_1y",
+    "yfinance_analyst_target"
+  ],
+  "detail": {
+    "indicators": {
+      "above_poc": true,
+      "adx": 51.24,
+      "analyst_target": 5477.97,
+      "current_price": 4844.9,
+      "ema20": 4692.8,
+      "ema200": 4554.72,
+      "ema50": 4677.69,
+      "macd": 89.6051,
+      "macd_signal": 26.5905,
+      "obv": 14316767.0,
+      "poc": 4423.06,
+      "rsi": 60.82,
+      "supertrend": null,
+      "supertrend_bullish": false,
+      "target_price_used": 5477.97,
+      "vah": 4478.55,
+      "val": 3840.36,
+      "vol_div_price_trend": 0.1453,
+      "vol_div_vol_trend": 0.0739,
+      "volume_divergence": "NONE",
+      "vwap": 4356.52
+    },
+    "momentum": {
+      "macd_bullish": true,
+      "macd_histogram_growing": false,
+      "notes": "RSI healthy bullish (60.8); MACD above signal; MACD histogram positive",
+      "rsi": 60.82,
+      "score": 27
+    },
+    "pattern": {
+      "detected": [],
+      "notes": "No significant patterns detected",
+      "score": 0
+    },
+    "trend_alignment": {
+      "adx": 51.24,
+      "ema_aligned": true,
+      "notes": "EMAs fully bullish (20>50>200); Strong trend ADX=51.2; Supertrend bearish",
+      "score": 25,
+      "supertrend_bullish": false
+    },
+    "volume_confirmation": {
+      "above_poc": true,
+      "notes": "OBV trending up (accumulation); Volume below avg (0.7x)",
+      "obv_trend": "DOWN",
+      "poc": 4423.06,
+      "score": 10,
+      "vah": 4478.55,
+      "val": 3840.36,
+      "volume_divergence": "NONE",
+      "volume_vs_avg": 0.66
+    }
+  },
+  "ohlcv_last_date": "2026-11-13",
+  "score": 62,
+  "signal": "BUY",
+  "upside_pct": 13.07
+}

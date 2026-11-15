@@ -1,0 +1,43 @@
+{
+  "_recorded": {
+    "by": "scripts/record_agent_fixtures.py",
+    "date": "2026-11-16",
+    "symbol": "TITAN"
+  },
+  "agent_name": "warren_bot",
+  "business_quality_score": 65,
+  "confidence": 100,
+  "conviction_rating": "MODERATE CONVICTION \u2014 5-year hold candidate",
+  "current_price": 4844.89990234375,
+  "data_gaps": [],
+  "data_sources": [
+    "screener.in",
+    "yfinance"
+  ],
+  "detail": "TITAN meets Buffett-Jhunjhunwala quality criteria with none moat and ROCE avg 23.5%. Business quality score 65/100 reflects moderate conviction based on 10-year financial history and DCF-derived margin of safety.",
+  "early_penetration_play": false,
+  "earnings_score": 20,
+  "india_consumption_play": true,
+  "intrinsic_value_per_share": 3100.59,
+  "jhunjhunwala_cyclical_flag": false,
+  "key_risks": [
+    "Current price offers limited margin of safety at DCF-implied value",
+    "Economic moat not clearly established or declining margins",
+    "ROCE below 15% suggests capital allocation inefficiency",
+    "Promoter pledging or declining holding raises governance concern"
+  ],
+  "management_score": 20,
+  "margin_of_safety_pct": -56.26,
+  "moat_strength_score": 6,
+  "moat_type": "NONE",
+  "promoter_quality": "EXCELLENT",
+  "roce_avg_10yr": 23.5,
+  "roce_score": 15,
+  "score": 65,
+  "signal": "QUALITY_BUY",
+  "symbol": "TITAN",
+  "ten_year_eps_cagr": 18.07,
+  "valuation_score": 0,
+  "why_buffett_would_like": "TITAN delivers ROCE of 23.5% with none moat characteristics and EPS CAGR of 18.1% \u2014 the kind of capital efficiency that compounds shareholder wealth over a decade.",
+  "why_buffett_would_pass": "Even quality businesses at a DCF margin of safety of -56.3% carry re-rating risk \u2014 a patient Buffett-style investor would want the 65/100 business quality score sustained through the next cycle before committing full capital."
+}

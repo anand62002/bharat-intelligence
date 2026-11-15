@@ -1,0 +1,53 @@
+{
+  "_recorded": {
+    "by": "scripts/record_agent_fixtures.py",
+    "date": "2026-11-16",
+    "symbol": "TITAN"
+  },
+  "agent_name": "commodities",
+  "commodities": {
+    "crude": {
+      "agent_name": "commodities",
+      "detail": "Crude stable -0.5%; INR 94.2 very weak \u2014 crude import cost critically high; Crude demand season: NEUTRAL",
+      "inr_usd": 94.2300033569336,
+      "price": 95.83999633789062,
+      "score": 40,
+      "seasonal": "NEUTRAL",
+      "signal": "NEUTRAL",
+      "source": "Brent (BZ=F)",
+      "trend_50d": -0.46,
+      "upside_pct": 3.4
+    },
+    "gold": {
+      "agent_name": "commodities",
+      "detail": "Strong downtrend -10.7% (50d); INR corr unknown; Seasonal demand: STRONG; Safe-haven base premium",
+      "inr_correlation": null,
+      "price": 111.91000366210938,
+      "score": 47,
+      "seasonal": "STRONG",
+      "signal": "NEUTRAL",
+      "trend_50d": -10.71,
+      "upside_pct": 5.0
+    },
+    "silver": {
+      "agent_name": "commodities",
+      "detail": "Downtrend -25.6% (50d); INR corr unknown; Seasonal: MODERATE",
+      "inr_correlation": null,
+      "price": 49.12099838256836,
+      "score": 29,
+      "seasonal": "MODERATE",
+      "signal": "BEARISH",
+      "trend_50d": -25.63,
+      "upside_pct": 4.0
+    }
+  },
+  "critical_gold_upside": false,
+  "data_sources": [
+    "yfinance_commodities",
+    "yfinance_usdinr",
+    "yfinance_india_etf"
+  ],
+  "gold_upside_conditions": [],
+  "score": 41,
+  "signal": "NEUTRAL"
+}

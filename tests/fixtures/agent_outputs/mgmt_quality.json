@@ -1,0 +1,49 @@
+{
+  "_recorded": {
+    "by": "scripts/record_agent_fixtures.py",
+    "date": "2026-11-16",
+    "symbol": "TITAN"
+  },
+  "agent_name": "mgmt_quality",
+  "detail": {
+    "balance_sheet": {
+      "notes": [
+        "Elevated D/E 1.51"
+      ],
+      "score": 2
+    },
+    "capital_allocation": {
+      "notes": [],
+      "score": 0
+    },
+    "earnings_reliability": {
+      "notes": [
+        "EPS CAGR 26.5% \u2014 exceptional growth"
+      ],
+      "score": 8
+    },
+    "promoter_commitment": {
+      "notes": [
+        "Promoter holding 52.9%"
+      ],
+      "score": 6
+    },
+    "raw_inputs": {
+      "debt_equity": 1.513,
+      "dividend_yield": null,
+      "eps_cagr_5y": 26.47,
+      "pledging_pct": null,
+      "promoter_holding": 52.9
+    },
+    "shareholder_returns": {
+      "notes": [
+        "Revenue CAGR 22.7% \u2014 shareholders benefiting from growth",
+        "EPS growing faster than revenue \u2014 operating leverage"
+      ],
+      "score": 8
+    }
+  },
+  "risk_flags": [],
+  "score": 24,
+  "signal": "SELL"
+}

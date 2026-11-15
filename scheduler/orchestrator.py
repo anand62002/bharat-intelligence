@@ -569,7 +569,7 @@ def _portfolio_ledger_row(
     tech = agent_results.get("technical") or {}
     tech_detail = tech.get("detail") if isinstance(tech.get("detail"), dict) else {}
     tech_ind = tech_detail.get("indicators") if isinstance(tech_detail.get("indicators"), dict) else {}
-    price = valuation.get("current_price") or tech_ind.get("current_price") or tech.get("current_price")
+    price = valuation.get("current_price") or tech_ind.get("current_price")
 
     v = outcome.to_dict() if outcome is not None else {}
     row = candidate_ledger.deep_row(
