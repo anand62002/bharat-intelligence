@@ -226,7 +226,7 @@ def _portfolio_alert_exists(
         )
         return bool(resp.data)
     except Exception as exc:
-        log.debug("Portfolio alert dedup check failed: %s", exc)
+        log.warning("Portfolio alert dedup check failed: %s", exc)
         return False
 
 
@@ -442,7 +442,7 @@ def _compute_correlation_pairs(
         returns = closes.pct_change().dropna(how="all")
 
     except Exception as exc:
-        log.debug("Correlation: price download failed: %s", exc)
+        log.warning("Correlation: price download failed: %s", exc)
         return []
 
     pairs: list[tuple[str, str, float]] = []
@@ -575,7 +575,7 @@ def _fii_net_5session(client) -> float:
         rows = resp.data or []
         return sum(float(r.get("fii_net") or 0) for r in rows)
     except Exception as exc:
-        log.debug("FII 5-session fetch failed: %s", exc)
+        log.warning("FII 5-session fetch failed: %s", exc)
         return 0.0
 
 
@@ -597,7 +597,7 @@ def _has_negative_news(symbol: str) -> bool:
             if any(kw in title for kw in _NEGATIVE_KEYWORDS):
                 return True
     except Exception as exc:
-        log.debug("News check failed for %s: %s", symbol, exc)
+        log.warning("News check failed for %s: %s", symbol, exc)
     return False
 
 
@@ -651,7 +651,7 @@ def _alert_exists(
             return bool(resp2.data)
         return False
     except Exception as exc:
-        log.debug("Alert dedup check failed: %s", exc)
+        log.warning("Alert dedup check failed: %s", exc)
         return False  # fail open: let the alert through if we can't check
 
 
@@ -829,7 +829,7 @@ def _analyse_holding(
         if resp.data:
             latest_rec = resp.data[0]
     except Exception as exc:
-        log.debug("[%s] latest rec fetch failed: %s", symbol, exc)
+        log.warning("[%s] latest rec fetch failed: %s", symbol, exc)
 
     # Effective danger values — sourced entirely from portfolio_holdings row
     # (written there by the orchestrator after each agent run).

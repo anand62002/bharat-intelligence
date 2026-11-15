@@ -108,8 +108,8 @@ def _resolve_yf_symbol(symbol: str) -> str:
         base = symbol.replace(".NS", "").replace(".BO", "").upper()
         if base in YF_SYMBOL_MAP:
             return YF_SYMBOL_MAP[base]
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("_resolve_yf_symbol(%s): symbol map lookup failed: %s", symbol, exc)
     if "." in symbol or symbol.startswith("^"):
         return symbol
     return f"{symbol}.NS"
@@ -215,8 +215,8 @@ def _batch_fetch_prices(yf_symbols: list[str]) -> dict[str, Optional[float]]:
                     last = col.dropna()
                     if not last.empty:
                         prices[sym] = float(last.iloc[-1])
-            except Exception:
-                pass  # will stay None, handled below
+            except Exception as exc:
+                log.warning("_batch_fetch_prices: no price for %s (stays None): %s", sym, exc)
 
         missing = [s for s, v in prices.items() if v is None]
         log.info(

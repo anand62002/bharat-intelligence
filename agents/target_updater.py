@@ -123,7 +123,7 @@ def _quick_technicals(yf_sym: str) -> dict:
 
         return {"pe": pe, "rsi": rsi}
     except Exception as e:
-        log.debug("_quick_technicals(%s) failed: %s", yf_sym, e)
+        log.warning("_quick_technicals(%s) failed: %s", yf_sym, e)
         return {}
 
 
@@ -138,8 +138,8 @@ def _sector_pe(sector: Optional[str]) -> float:
         for k, v in SECTOR_LONGRUN_PE.items():
             if k in key or key in k:
                 return float(v)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("_sector_pe(%s): sector map lookup failed — using 22x: %s", sector, exc)
     return 22.0
 
 
@@ -195,7 +195,7 @@ def _cache_warren(symbol: str, result: dict) -> None:
             on_conflict="symbol",
         ).execute()
     except Exception as e:
-        log.debug("warren_bot_cache write skipped for %s: %s", symbol, e)
+        log.warning("warren_bot_cache write skipped for %s: %s", symbol, e)
 
 
 # ── Mechanism 4: Exit signal ──────────────────────────────────────────────────
@@ -566,8 +566,9 @@ def _needs_target_review(holding: dict) -> bool:
                 last_dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
                 if (datetime.utcnow().replace(tzinfo=last_dt.tzinfo) - last_dt).days < 14:
                     return False
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("[%s] unparseable target_updated_at %r — re-reviewing: %s",
+                            holding.get("symbol"), last, exc)
 
     progress = (current - avg_buy) / (target - avg_buy)
     return progress >= _TARGET_REVIEW_PROGRESS
@@ -599,8 +600,8 @@ def _is_laggard(holding: dict) -> bool:
                     dt = date.fromisoformat(str(raw)[:10])
                 days_held = (date.today() - dt).days
                 break
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("[%s] unparseable holding date %r: %s", holding.get("symbol"), raw, exc)
 
     return days_held >= _LAGGARD_DAYS
 
@@ -620,8 +621,9 @@ def _maybe_review_laggard(holding: dict, client, dry_run: bool) -> Optional[dict
             last_dt = date.fromisoformat(str(last_review)[:10])
             if (date.today() - last_dt).days < _LAGGARD_COOLDOWN_DAYS:
                 return None
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("[%s] unparseable last_review_at %r — reviewing anyway: %s",
+                        holding.get("symbol"), last_review, exc)
 
     log.info("[%s] Laggard review triggered", symbol)
 

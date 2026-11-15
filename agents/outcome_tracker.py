@@ -180,8 +180,8 @@ def _resolve_yf_symbol(symbol: str) -> str:
         base = symbol.replace(".NS", "").replace(".BO", "").upper()
         if base in YF_SYMBOL_MAP:
             return YF_SYMBOL_MAP[base]
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("_resolve_yf_symbol(%s): symbol map lookup failed: %s", symbol, exc)
     if "." in symbol or symbol.startswith("^"):
         return symbol
     return f"{symbol}.NS"
@@ -462,8 +462,8 @@ def _batch_current_prices(yf_symbols: list[str]) -> dict[str, float]:
                 series = close[sym].dropna() if sym in close.columns else pd.Series(dtype=float)
                 if not series.empty:
                     result[sym] = float(series.iloc[-1])
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("_batch_current_prices: no price for %s: %s", sym, exc)
         return result
     except Exception as exc:
         log.warning("Batch price fetch failed: %s — falling back to per-symbol", exc)

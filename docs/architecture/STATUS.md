@@ -16,7 +16,7 @@ Plan: `workplan.yaml` · Review: `REVIEW.md` · Target: `TARGET_ARCHITECTURE.md`
 | WP-007 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-15 | `db/contract.py` + `scripts/check_schema.py` (worker start-up + weekly audit). First prod run found 3 writes to columns that never existed (target-updater alerts, data-quality alert, sentiment flag) — fixed; check now exits 0 |
 | WP-008 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-15 | CI uses dummy keys + `-m "not integration"`; conftest guard fails any test building a live Supabase/Anthropic/OpenAI client; 80 offending tests fixed. Suite passes with keys unset (3612). NEEDS-HUMAN: delete repo secrets `SUPABASE_SERVICE_KEY`, `ANTHROPIC_API_KEY`, `SUPABASE_URL`; optionally delete 3 test rows from `forward_estimates_cache` |
 | WP-009 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-15 | AST policy test + allowlist of 173 silent broad handlers (only shrinks); new silent handlers fail CI. Test-only |
-| WP-010 | TODO | — | — | Make swallowed failures loud on the decision path |
+| WP-010 | IN_PROGRESS | — (branch `wp/WP-010-loud-decision-path`, local) | 2026-11-15 | 29 silent handlers → WARNING (orchestrator, discovery, target updater, outcome tracker, paper book, portfolio monitor); synthesis failures reach the run ledger; allowlist 173 → 144 |
 | WP-011 | TODO | — | — | Run the regime detector before the orchestrator |
 | WP-012 | NEEDS_HUMAN | — | — | Create the candidates ledger table (migration) |
 | WP-013 | TODO | — | — | Write every screened symbol to the candidates ledger |

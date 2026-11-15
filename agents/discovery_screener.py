@@ -418,8 +418,10 @@ def _get_sector_pe(sector: str) -> float:
         live_pe = compute_rolling_longrun_pe(key)
         if live_pe is not None:
             return live_pe
-    except Exception:
-        pass  # Supabase unavailable, tracker import failed, or insufficient data
+    except Exception as exc:
+        # Insufficient data returns None (no exception); this is a real failure.
+        log.warning("_get_sector_pe(%s): live rolling median failed — using static map: %s",
+                    sector, exc)
 
     # Layer 2: static 5-year structural median from sector_valuation.py
     try:
@@ -507,8 +509,8 @@ def prescreen(
                 symbol, eg.get("days_until"), eg.get("earnings_date"),
             )
             return False, []
-    except Exception:
-        pass  # non-fatal — continue screening
+    except Exception as exc:
+        log.warning("prescreen(%s): earnings guard failed — screening without it: %s", symbol, exc)
 
     # ── Liquidity guard: skip ILLIQUID symbols (impact cost ≥ 1%) ────────────
     try:
@@ -520,8 +522,8 @@ def prescreen(
                 symbol, liq.get("impact_cost_pct") or 0, liq.get("avg_daily_volume_inr") or 0,
             )
             return False, []
-    except Exception:
-        pass  # non-fatal — continue screening
+    except Exception as exc:
+        log.warning("prescreen(%s): liquidity check failed — screening without it: %s", symbol, exc)
 
     close = df["Close"].dropna()   # strip trailing NaN from today's incomplete candle
 
@@ -664,7 +666,7 @@ def prescreen(
                     )
         except Exception as _dvm_exc:
             # DVM is an optional enhancement — never block prescreen on failure
-            log.debug("prescreen(%s): DVM filter skipped (%s)", symbol, _dvm_exc)
+            log.warning("prescreen(%s): DVM filter skipped (%s)", symbol, _dvm_exc)
 
     # Threshold: ≥ 4 triggers must fire (absolute count, not percentage)
     # With DVM available (6 filters): still only 4 required → more opportunities.
@@ -748,7 +750,7 @@ def _run_all_agents(symbol: str, macro_result: Optional[dict] = None) -> dict:
         ) or ""
         results["macro"] = get_sector_adjusted_macro_score(base_macro, fund_sector)
     except Exception as _mac_exc:
-        log.debug("[%s] sector macro adjust failed (non-fatal): %s", symbol, _mac_exc)
+        log.warning("[%s] sector macro adjust failed (non-fatal): %s", symbol, _mac_exc)
         results["macro"] = base_macro
 
     # 6. Historical RAG
@@ -1240,7 +1242,7 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                         _warren_score = _wb.get("score")
                         _mos_pct      = _wb.get("margin_of_safety_pct")
                 except Exception as _we:
-                    log.debug("_save_discovery(%s): warren_bot sizing skipped: %s", result.symbol, _we)
+                    log.warning("_save_discovery(%s): warren_bot sizing skipped: %s", result.symbol, _we)
 
             _sizing   = calc_position_size(
                 upside_pct   = result.upside_pct,
@@ -1252,7 +1254,7 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             pos_pct   = _sizing["suggested_position_pct"]
             pos_label = _sizing["position_label"]
         except Exception as pe:
-            log.debug("_save_discovery(%s): position sizing failed: %s", result.symbol, pe)
+            log.warning("_save_discovery(%s): position sizing failed: %s", result.symbol, pe)
 
         client   = create_client(url, key)
         today    = date.today().isoformat()
@@ -1686,8 +1688,8 @@ def run_discovery(
                 liq = estimate_impact_cost(symbol, trade_value_inr=5_00_000)
                 liq_tier = liq.get("liquidity_tier")
                 liq_cost = liq.get("impact_cost_pct")
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("[%s] impact cost unavailable: %s", symbol, exc)
 
             # ── Forward estimates ─────────────────────────────────────────────
             fwd_pe       = None
@@ -1699,8 +1701,8 @@ def run_discovery(
                 fwd_pe     = fe.get("forward_pe")
                 fwd_peg    = fe.get("peg_ratio")
                 fwd_eps_gr = fe.get("eps_growth_pct")
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("[%s] forward estimates unavailable: %s", symbol, exc)
 
             dr = DiscoveryResult(
                 symbol            = symbol,

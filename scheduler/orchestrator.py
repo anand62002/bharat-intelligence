@@ -582,7 +582,7 @@ def _build_recommendation(
                 gov_screen["risk_score_delta"], risk_score,
             )
     except Exception as exc:
-        log.debug("[%s] governance_screener failed (non-blocking): %s", symbol, exc)
+        log.warning("[%s] governance_screener failed (non-blocking): %s", symbol, exc)
 
     def _f(key: str, *fallbacks) -> Optional[float]:
         """First non-None of synthesis_data[key] then the fallbacks, as float.
@@ -747,7 +747,7 @@ async def _run_agents_for_symbol(
                 results["macro"].get("sector_outlook"),
             )
     except Exception as _macro_adj_exc:
-        log.debug("[%s] sector macro adjust failed (non-fatal): %s", symbol, _macro_adj_exc)
+        log.warning("[%s] sector macro adjust failed (non-fatal): %s", symbol, _macro_adj_exc)
         results["macro"] = macro_res
     results["commodities"] = comm_res
 
@@ -1262,7 +1262,8 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                         for v in _leakage_report.leaks
                     ]
             except Exception as _audit_exc:
-                log.debug("[%s] leakage audit error (non-critical): %s", symbol, _audit_exc)
+                log.warning("[%s] leakage audit error (non-critical): %s", symbol, _audit_exc)
+                errors.append(f"{symbol}: leakage audit failed: {_audit_exc}")
 
             # ── P7-C: Data density firewall ──────────────────────────────────────
             # If fundamental agent only has <5 years of history, CAGR and DCF
@@ -1328,7 +1329,8 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                             0.0, _num(synthesis_data.get("confidence"), 50.0) - 20
                         )
             except Exception as _eg_exc:
-                log.debug("[%s] Earnings guard skipped: %s", symbol, _eg_exc)
+                log.warning("[%s] Earnings guard skipped: %s", symbol, _eg_exc)
+                errors.append(f"{symbol}: earnings guard failed: {_eg_exc}")
 
             # ── Pre-publication validation gate ───────────────────────────────
             # Three independent LLM judges score the synthesis across 5 rubrics.
