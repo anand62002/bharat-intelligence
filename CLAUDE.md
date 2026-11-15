@@ -86,7 +86,7 @@ Stock analysis/
 │   ├── mgmt_quality.py         # Management quality scoring (5 dims, non-blocking, runs alongside warren_bot)
 │   ├── valuation_scenarios.py  # Bull/base/bear DCF scenarios + sensitivity tornado
 │   ├── regime_detector.py      # Market regime classification (5 indicators) → market_regime table
-│   │                           # Runs 06:30 IST, before orchestrator; feeds regime-specific weight multipliers
+│   │                           # Runs 05:45 IST, before the 06:00 orchestrator; feeds regime-specific weight multipliers
 │   ├── earnings_guard.py       # Pre-earnings risk guard — blocks new entries near binary earnings events
 │   ├── options_sentiment.py    # PCR/max-pain/IV-skew/VIX → directional options sentiment signal
 │   ├── portfolio_risk.py       # Portfolio-level correlation matrix, sector concentration, VaR (95%/99%)
@@ -196,8 +196,8 @@ Stock analysis/
 │   #  Schedule (IST) — as of 2026-08-03:
 │   #    05:30 — market digest MORNING (P6-C, moved before orchestrator so mood/nifty_signal
 │   #            can be injected into every synthesis prompt)
+│   #    05:45 — regime detector (market_regime table; before the orchestrator reads it — WP-011)
 │   #    06:00 — orchestrator (7 core agents + synthesis + governance; discovery NOT included)
-│   #    06:30 — regime detector (market_regime table, before orchestrator)
 │   #    06:55 — rec outcome seeder (P5-C, seeds PENDING recommendation_outcomes rows)
 │   #    07:00 — performance tracker
 │   #    07:05 — paper portfolio open (P5-B, opens positions for today's new BUY recs)

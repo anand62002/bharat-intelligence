@@ -7,8 +7,8 @@ BlockingScheduler instance. Deploy as the `worker` dyno on Railway.
 Schedule (all times IST / Asia/Kolkata)
 ----------------------------------------
   05:30  Market Digest MORNING — overnight global cues + domestic news before orchestrator
+  05:45  Regime detector      — market regime classification, written before the orchestrator reads it
   06:00  Daily orchestrator   — runs all 9 agents, synthesises recs (digest injected as context)
-  06:30  Regime detector      — market regime classification before orchestrator
   06:55  Rec outcome seeder   — seed PENDING rows for new recs (P5-C)
   07:00  Performance tracker  — audits agent accuracy, writes agent_performance
   07:05  Paper portfolio open — open paper positions for today's BUY recs (P5-B)
@@ -300,9 +300,9 @@ def job_earnings_calendar() -> dict:
 
 @tracked_job("regime_detector")
 def job_regime_detector() -> dict:
-    """06:30 IST — detect market regime before orchestrator runs."""
+    """05:45 IST — detect market regime before the 06:00 orchestrator reads it."""
     log.info("-" * 50)
-    log.info("  JOB START: Regime Detector (06:30 IST)")
+    log.info("  JOB START: Regime Detector (05:45 IST)")
     log.info("-" * 50)
     from agents.regime_detector import detect_regime
     result = detect_regime(dry_run=False)
@@ -872,9 +872,11 @@ def build_scheduler():
     )
 
     # ── Regime detector — before orchestrator ────────────────────────────────
+    # 05:45 so today's market_regime row exists when the 06:00 orchestrator
+    # reads it (WP-011). At 06:30 every run used yesterday's regime.
     scheduler.add_job(
         job_regime_detector,
-        CronTrigger(hour=6, minute=30, timezone=IST),
+        CronTrigger(hour=5, minute=45, timezone=IST),
         id="regime_detector",
         name="Regime Detector",
         max_instances=1,
@@ -1171,8 +1173,9 @@ def main() -> None:
     log.info("=" * 60)
     log.info("  Bharat Intelligence Worker started")
     log.info("  Jobs scheduled (all times IST):")
+    log.info("    05:30  Market Digest Morning Brief (P6-C)")
+    log.info("    05:45  Regime Detector")
     log.info("    06:00  Daily Orchestrator")
-    log.info("    06:30  Regime Detector")
     log.info("    08:00  Earnings Calendar")
     log.info("    08:30  Breeze Token Refresh")
     log.info("    07:00  Performance Tracker")
@@ -1188,7 +1191,6 @@ def main() -> None:
     log.info("    18:30  Outcome Tracker")
     log.info("    07:45 (1st/month)  Monthly Backtest")
     log.info("    08:15 (1st/month)  RAG Corpus Auto-Refresh")
-    log.info("    08:45  Market Digest Morning Brief (P6-C)")
     log.info("    16:20  Market Digest Closing Digest (P6-C)")
     log.info("  Press Ctrl+C to stop")
     log.info("=" * 60)

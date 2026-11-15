@@ -2701,7 +2701,7 @@ async def get_market_regime(
 ):
     """
     Current market regime (BULL/BEAR/SIDEWAYS/HIGH_VOLATILITY) + last N days history.
-    Regime is detected daily at 06:30 IST before the main orchestrator run.
+    Regime is detected daily at 05:45 IST before the main orchestrator run.
 
     Returns:
       { current: {...regime row...}, history: [...], last_updated: str }
