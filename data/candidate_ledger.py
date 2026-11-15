@@ -112,8 +112,13 @@ def screen_row(run_date: date, symbol: str, source: str, *, passed: bool,
 
 def deep_row(run_date: date, symbol: str, source: str, *, features: Optional[dict],
              agent_signals: Optional[dict], signal_score: Any, data_quality: Optional[str],
-             tier: Optional[str], rec_id: Optional[str]) -> dict:
-    """Same key as screen_row, with the deep-analysis fields. PROMOTED when a call was saved."""
+             tier: Optional[str], rec_id: Optional[str],
+             gate_score: Any = None) -> dict:
+    """Same key as screen_row, with the deep-analysis fields. PROMOTED when a call was saved.
+
+    gate_score (WP-015) is the validation gate's quality × agreement score
+    (stored by older code as aggregate_kappa); None when no gate ran.
+    """
     return {
         "run_date": run_date.isoformat(),
         "symbol": base_symbol(symbol),
@@ -122,6 +127,7 @@ def deep_row(run_date: date, symbol: str, source: str, *, features: Optional[dic
         "features": dict(features or {}),
         "agent_signals": agent_signals or {},
         "signal_score": _num(signal_score),
+        "gate_score": _num(gate_score),
         "data_quality": data_quality or None,
         "tier": tier,
         "rec_id": rec_id,

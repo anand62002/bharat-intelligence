@@ -677,6 +677,18 @@ def _transform_holding(row: dict) -> dict:
     }
 
 
+def _gate_score(gov: Any) -> Optional[float]:
+    """gov_check.validation gate score; falls back to aggregate_kappa for rows written before WP-015."""
+    v = (gov or {}).get("validation") if isinstance(gov, dict) else None
+    if not isinstance(v, dict):
+        return None
+    val = v.get("gate_score", v.get("aggregate_kappa"))
+    try:
+        return round(float(val), 4) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _transform_recommendation(row: dict) -> dict:
     """recommendations DB row → React recommendation shape."""
     el  = row.get("entry_low")
@@ -740,6 +752,9 @@ def _transform_recommendation(row: dict) -> dict:
         "agents":           agents,
         "warrenBot":        warren_bot_data,   # None if warren_bot hasn't run for this rec
         "govCheck":         gov,
+        # WP-015: validation gate score (quality × agreement; stored by older
+        # code only as aggregate_kappa). None when no gate ran.
+        "gateScore":        _gate_score(gov),
         "createdAt":        str(row.get("created_at") or ""),
         # Discovery-tab extra fields (stored in metadata by the discovery screener)
         "discoveryScore":   meta.get("discovery_score")  or 0,

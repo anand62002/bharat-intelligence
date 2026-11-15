@@ -547,6 +547,77 @@ def _log_suppressed_synthesis(
             log.warning("[%s] Failed to log suppressed rec: %s", symbol, exc)
 
 
+def _portfolio_ledger_row(
+    symbol: str,
+    agent_results: dict,
+    composite: float,
+    synthesis_data: dict,
+    outcome: Any,
+    published: bool,
+) -> dict:
+    """
+    Candidates row (source='portfolio') for one holding — WP-015, ADR-002/004.
+
+    Written for every symbol that reaches the validation gate, published or
+    suppressed, so the gate score can later be tested against outcomes. Every
+    row has the same keys (record_candidates batches by key set).
+    """
+    from data import candidate_ledger
+    fund = agent_results.get("fundamental") or {}
+    fund_detail = fund.get("detail") if isinstance(fund.get("detail"), dict) else {}
+    valuation = fund_detail.get("valuation") if isinstance(fund_detail.get("valuation"), dict) else {}
+    tech = agent_results.get("technical") or {}
+    tech_detail = tech.get("detail") if isinstance(tech.get("detail"), dict) else {}
+    tech_ind = tech_detail.get("indicators") if isinstance(tech_detail.get("indicators"), dict) else {}
+    price = valuation.get("current_price") or tech_ind.get("current_price") or tech.get("current_price")
+
+    v = outcome.to_dict() if outcome is not None else {}
+    row = candidate_ledger.deep_row(
+        date.today(), symbol, "portfolio",
+        features={
+            "price":               candidate_ledger._num(price),
+            "composite_score":     round(float(composite), 2),
+            "action":              synthesis_data.get("action"),
+            "published":           bool(published),
+            "gate_status":         v.get("status") or "NOT_VALIDATED",
+            "dimension_quality":   v.get("dimension_quality") or {},
+            "dimension_agreement": v.get("dimension_agreement") or {},
+            "dimension_gate":      v.get("dimension_kappas") or {},
+        },
+        agent_signals={k: {"signal": (a or {}).get("signal"), "score": (a or {}).get("score")}
+                       for k, a in agent_results.items() if isinstance(a, dict)},
+        signal_score=composite,
+        data_quality=fund.get("data_quality") or fund_detail.get("data_quality"),
+        tier=None,
+        rec_id=None,
+        gate_score=v.get("gate_score"),
+    )
+    yf = symbol if ("." in symbol or symbol.startswith("^")) else f"{symbol}.NS"
+    row.update(stage="PROMOTED" if published else "DEEP",
+               yf_symbol=yf, price=candidate_ledger._num(price))
+    return row
+
+
+def _write_portfolio_ledger(rows: list[dict], errors: list[str]) -> int:
+    """Upsert the run's portfolio rows with the Nifty level fetched once. Never raises."""
+    if not rows:
+        return 0
+    try:
+        from data import candidate_ledger
+        nifty = candidate_ledger.nifty_level()
+        for row in rows:
+            row["nifty"] = nifty
+        written = candidate_ledger.record_candidates(candidate_ledger.get_client(), rows)
+    except Exception as exc:
+        log.warning("Candidate ledger (portfolio) write failed: %s", exc)
+        errors.append(f"candidate ledger: {exc}")
+        return 0
+    if written < len(rows):
+        errors.append(f"candidate ledger: {len(rows) - written}/{len(rows)} portfolio rows not written")
+    log.info("Candidate ledger: %d/%d portfolio rows recorded (gate scores)", written, len(rows))
+    return written
+
+
 def _build_recommendation(
     symbol:         str,
     synthesis_data: dict,
@@ -996,6 +1067,7 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             log.warning("anthropic package not installed — pip install anthropic")
 
     recommendations: list[dict] = []
+    ledger_rows: list[dict] = []     # WP-015: one candidates row per gated symbol
 
     # ── Morning Digest context (P6-C wiring) ─────────────────────────────────
     # Fetch today's MORNING digest (or yesterday's CLOSING as fallback) to inject
@@ -1355,6 +1427,19 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                         symbol, _val_exc,
                     )
 
+            # WP-015: gate score to the candidate ledger for every symbol,
+            # published or suppressed. Dry/on-demand runs write nothing.
+            if not state["dry_run"]:
+                try:
+                    ledger_rows.append(_portfolio_ledger_row(
+                        symbol, agent_results, composite, synthesis_data, validation_outcome,
+                        published=not (validation_outcome
+                                       and validation_outcome.status == "SUPPRESSED"),
+                    ))
+                except Exception as _lr_exc:
+                    log.warning("[%s] candidate ledger row not built: %s", symbol, _lr_exc)
+                    errors.append(f"{symbol}: candidate ledger row failed: {_lr_exc}")
+
             # Apply validation outcome
             if validation_outcome and validation_outcome.status == "SUPPRESSED":
                 log.warning(
@@ -1466,6 +1551,8 @@ async def synthesise_node(state: OrchestratorState) -> dict:
         except Exception as exc:
             log.error("[%s] synthesis failed: %s", symbol, exc)
             errors.append(f"{symbol} synthesis: {exc}")
+
+    _write_portfolio_ledger(ledger_rows, errors)
 
     # P7-F: aggregate data quality across all synthesised symbols
     _dq_counts: dict[str, int] = {"FULL": 0, "FALLBACK": 0, "ESTIMATED": 0, "UNKNOWN": 0}

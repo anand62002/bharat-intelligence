@@ -1825,6 +1825,9 @@ def run_discovery(
                                               "confidence": upside_conf}, agent_results, _ant_client)
                             )
 
+                        # WP-015: the discovery gate score goes on the ledger row,
+                        # whatever the outcome (suppressed rows included).
+                        deep_rows[symbol]["gate_score"] = candidate_ledger._num(_vout.aggregate_kappa)
                         if _vout.status == "SUPPRESSED":
                             log.warning(
                                 "  ⛔ %s CRITICAL suppressed by hallucination check (κ=%.3f) — "

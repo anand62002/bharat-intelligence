@@ -13,13 +13,20 @@ Using three Claude variants was a known gap (correlated sampling — all three c
 agree on the same hallucination).  A GPT judge breaks this correlation.
 Model IDs live in data/model_config.py.
 
-A quality-weighted inter-rater kappa is computed per dimension and in aggregate:
+A GATE SCORE is computed per dimension and in aggregate:
 
     quality   = (mean_judge_score − 1) / 4        normalised 1-5 → 0–1
     agreement = mean pairwise(1 − |si − sj| / 4)  linear-weighted agreement 0–1
-    kappa_d   = quality × agreement                combined quality+reliability 0–1
+    gate_d    = quality × agreement                combined quality+reliability 0–1
 
-  aggregate_kappa = unweighted mean of 5 dimension kappas
+  gate_score = unweighted mean of 5 dimension gate scores
+
+NOTE (WP-015, ADR-004): this is NOT a kappa statistic. Cohen's/Fleiss' kappa
+corrects observed agreement for chance agreement; this is mean quality
+multiplied by raw agreement. The code, thresholds and logs historically call it
+"kappa" (aggregate_kappa, KAPPA_SUPPRESS, κ); those names are kept so nothing
+downstream breaks. ValidationOutcome.to_dict() carries the same value as both
+`gate_score` (the honest name) and `aggregate_kappa` (kept for one release).
 
 Publication rules (evaluated in priority order):
   1. aggregate_kappa < 0.40        → SUPPRESSED  (skip DB write; log for human review)
@@ -268,7 +275,7 @@ class DimensionResult:
 class ValidationOutcome:
     """Full validation result for one synthesised recommendation."""
     status:             str                        # "PASS" | "QUALIFIED" | "SUPPRESSED"
-    aggregate_kappa:    float
+    aggregate_kappa:    float                      # the gate score (quality × agreement); not a kappa statistic
     dimensions:         dict[str, DimensionResult]
     failed_dimensions:  list[str]                  # dims where kappa < threshold
     caveats:            list[str]                  # non-empty when QUALIFIED
@@ -277,9 +284,15 @@ class ValidationOutcome:
     elapsed_seconds:    float
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialise to a dict safe for Supabase JSONB storage."""
+        """Serialise to a dict safe for Supabase JSONB storage.
+
+        gate_score and aggregate_kappa hold the same value. gate_score is the
+        honest name (mean quality × agreement, not a kappa statistic);
+        aggregate_kappa stays for one release so existing readers don't break.
+        """
         return {
             "status":              self.status,
+            "gate_score":          round(self.aggregate_kappa, 4),
             "aggregate_kappa":     round(self.aggregate_kappa, 4),
             "dimension_kappas":    {d: round(r.kappa,     4) for d, r in self.dimensions.items()},
             "dimension_quality":   {d: round(r.quality,   4) for d, r in self.dimensions.items()},
@@ -324,7 +337,10 @@ def _compute_dimension_kappa(scores: list[int]) -> tuple[float, float, float]:
 
     quality   = (mean_score − 1) / 4                ∈ [0, 1]  higher = better synthesis
     agreement = _pairwise_agreement(scores)           ∈ [0, 1]  higher = judges agree more
-    kappa     = quality × agreement                   ∈ [0, 1]  combined reliability metric
+    kappa     = quality × agreement                   ∈ [0, 1]  the per-rubric GATE SCORE
+
+    Despite the name, the third value is not a kappa statistic: there is no
+    chance correction. It is quality scaled by raw agreement (WP-015).
 
     Single-judge handling:
       n=1 → agreement = 0.5 (50 % reliability penalty; no cross-check possible)
