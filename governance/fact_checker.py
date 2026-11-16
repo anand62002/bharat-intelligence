@@ -811,8 +811,15 @@ def _check_one(
     gov_check, confidence_delta, withheld = _apply_governance_rules(claims, rec)
     rec["gov_check"] = _keep_validation(rec, gov_check)
 
-    # Apply confidence adjustment (floor at 5, cap at 100)
-    if confidence_delta != 0:
+    # Apply confidence adjustment (floor at 5, cap at 100). Not on a code decision
+    # (WP-018, ADR-001): its confidence is a calibrated rate, and the claims checked
+    # here come from LLM prose — the LLM must not move a number, even indirectly.
+    if confidence_delta != 0 and ((rec.get("decision_meta") or {}).get("decision") or {}).get("source") == "code":
+        if isinstance(rec.get("gov_check"), dict):
+            rec["gov_check"]["confidence_delta_not_applied"] = confidence_delta
+        log.info("[%s] fact-check confidence delta %.1f recorded, not applied (code decision)",
+                 symbol, confidence_delta)
+    elif confidence_delta != 0:
         old_conf = float(rec.get("confidence", 50))
         new_conf = max(5.0, min(100.0, old_conf + confidence_delta))
         rec["confidence"] = round(new_conf, 2)

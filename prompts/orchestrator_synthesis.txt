@@ -17,7 +17,7 @@ You have received outputs from 7 specialised AI analysis agents for the stock **
 - Confidence: {confidence_line}
 - Entry zone: {entry_low} – {entry_high}
 - Target: {target} (upside {upside_pct})
-- Stoploss: {stoploss} (2× ATR-14 below price)
+- Stoploss: {stoploss}
 - Downside if the bear case plays out: {danger_drop_pct}
 - Horizon: {horizon_days} days
 - Consensus gate: {consensus_note}
@@ -45,9 +45,9 @@ These values come from code. You cannot change them. Where your reading of the a
 
 **Synthesis** — One paragraph (2–4 sentences) that weighs the bull and bear cases, acknowledges key uncertainties, and explains why the decision above is (or is not) well supported. Cite only figures that appear in the agent outputs or the decision.
 
-**Market constraints** — One sentence covering: (a) the NSE circuit-breaker band (±5% NIFTY 50/100 constituents, ±10% most EQ stocks, ±20% small-cap/SME/T-group); (b) liquidity (LIQUID / THIN / ILLIQUID); (c) position tier for the market-cap segment (FULL large-cap, HALF mid-cap, QUARTER small-cap < ₹2 000 Cr); (d) any known ex-dividend or corporate-action date affecting T+2 settlement.
+**Market constraints** — One sentence covering: (a) the NSE circuit-breaker band (±5% NIFTY 50/100 constituents, ±10% most EQ stocks, ±20% small-cap/SME/T-group); (b) liquidity (LIQUID / THIN / ILLIQUID); (c) any known ex-dividend or corporate-action date affecting T+2 settlement. Do not state a position size — sizing is computed in code.
 
-**Headline** — One crisp sentence (≤100 chars) stating the action above.
+**Headline** — One crisp clause (≤80 chars) summarising the thesis. Do not start with the action or include figures not in the decision; the "{action}: {symbol} —" prefix is added in code.
 
 **Veto (optional)** — Set `veto` to true ONLY if the action is BUY and the agent outputs contain a concrete, material reason the rules cannot see (e.g. a governance red flag, a pending regulatory action, a data error that inflates the score). A veto turns BUY into HOLD; it cannot upgrade anything or change any number. Give the specific reason in `veto_reason`. Otherwise set `veto` to false and `veto_reason` to null.
 
@@ -70,8 +70,8 @@ Respond ONLY with a single valid JSON object. Do not include any text, explanati
     "Risk 3: ..."
   ],
   "synthesis": "...",
-  "market_constraints": "Circuit: ±10% NSE band; Liquidity: LIQUID; Position: HALF tier (mid-cap); Settlement: No ex-dates in next 10 days.",
-  "headline": "{action}: {symbol} — ...",
+  "market_constraints": "Circuit: ±10% NSE band; Liquidity: LIQUID; Settlement: No ex-dates in next 10 days.",
+  "headline": "one sentence on the thesis (the action prefix is added in code)",
   "veto": false,
   "veto_reason": null
 }

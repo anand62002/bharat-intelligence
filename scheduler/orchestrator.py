@@ -622,6 +622,9 @@ def _portfolio_ledger_row(
             "dimension_quality":   v.get("dimension_quality") or {},
             "dimension_agreement": v.get("dimension_agreement") or {},
             "dimension_gate":      v.get("dimension_kappas") or {},
+            # ADR-001: vetoes are scored against outcomes later.
+            "veto":                (synthesis_data.get("decision_basis") or {}).get("veto"),
+            "narrative":           (synthesis_data.get("decision_basis") or {}).get("narrative", "llm"),
         },
         agent_signals={k: {"signal": (a or {}).get("signal"), "score": (a or {}).get("score")}
                        for k, a in agent_results.items() if isinstance(a, dict)},
@@ -1351,13 +1354,18 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                                     symbol,
                                 )
                         else:
-                            raise  # non-retriable error — bubble up
+                            if _code_mode:
+                                # ADR-001: a synthesis failure costs the prose, never
+                                # the recommendation (truncation, refusal, 4xx, timeout).
+                                break
+                            raise  # legacy path: non-retriable error — bubble up
 
                 if _synthesis_raw is None:
-                    # All retries exhausted on 529 — use weighted fallback
-                    log.warning("[%s] SYNTHESIS FALLBACK: Anthropic overloaded after 3 attempts", symbol)
-                    errors.append(f"{symbol}: SYNTHESIS_FALLBACK (overloaded: {_last_exc})")
-                    synthesis_data = _fallback("model overloaded")
+                    # Retries exhausted on 529, or (code mode) any other model error.
+                    _why = f"{type(_last_exc).__name__}: {_last_exc}" if _last_exc else "no reply"
+                    log.warning("[%s] SYNTHESIS FALLBACK: %s", symbol, _why)
+                    errors.append(f"{symbol}: SYNTHESIS_FALLBACK ({_why})")
+                    synthesis_data = _fallback(_why[:160])
                 else:
                     raw_text = _synthesis_raw
                     try:
@@ -1365,7 +1373,8 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                         if _code_mode:
                             synthesis_data = merge_narrative(_decision, synthesis_data)
                         log.info("[%s] Claude synthesis parsed OK", symbol)
-                    except (ValueError, json.JSONDecodeError, KeyError) as parse_err:
+                    except (ValueError, json.JSONDecodeError, KeyError, TypeError,
+                            AttributeError) as parse_err:
                         log.warning(
                             "[%s] SYNTHESIS FALLBACK: JSON parse failed (%s) — raw reply starts: %.300s",
                             symbol, parse_err, raw_text,
@@ -1423,21 +1432,31 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             _years_avail  = (agent_results.get("warren_bot") or {}).get("years_available")
             _data_quality = (agent_results.get("fundamental", {}) or {}).get("data_quality")
             if _years_avail is not None and _years_avail < 5:
-                _old_conf = _num(synthesis_data.get("confidence"), 50.0)
-                synthesis_data["confidence"] = min(_old_conf, 60.0)
+                # Code mode (ADR-001): confidence is a calibrated rate — record the flag,
+                # don't overwrite the number. Legacy mode keeps the P7-C cap.
+                if _code_mode:
+                    synthesis_data.setdefault("decision_basis", {})["data_density"] = (
+                        f"only {_years_avail} years of history")
+                else:
+                    _old_conf = _num(synthesis_data.get("confidence"), 50.0)
+                    synthesis_data["confidence"] = min(_old_conf, 60.0)
                 _ddw = (
                     f"\n⚠ DATA DENSITY WARNING: Only {_years_avail} years of fundamental "
                     f"history available (minimum 5 required for reliable CAGR/DCF). "
                     f"All multi-year growth rates and intrinsic value estimates are "
-                    f"statistically unreliable. Confidence capped at 60. "
+                    f"statistically unreliable."
+                    f"{'' if _code_mode else ' Confidence capped at 60.'} "
                     f"Do NOT cite revenue/EPS CAGR figures as reliable signals.\n"
                 )
                 synthesis_data["synthesis"] = _ddw + (synthesis_data.get("synthesis") or "")
                 log.warning("[%s] P7-C data density: only %d years available — confidence capped at 60",
                             symbol, _years_avail)
             elif _data_quality == "ESTIMATED":
-                _old_conf = _num(synthesis_data.get("confidence"), 50.0)
-                synthesis_data["confidence"] = min(_old_conf, 65.0)
+                if _code_mode:
+                    synthesis_data.setdefault("decision_basis", {})["data_density"] = "ESTIMATED data"
+                else:
+                    _old_conf = _num(synthesis_data.get("confidence"), 50.0)
+                    synthesis_data["confidence"] = min(_old_conf, 65.0)
                 _eq = ("\n⚠ ESTIMATED DATA: Fundamental figures sourced from yfinance fallback "
                        "(screener.in unavailable). Treat specific ratio values with reduced confidence.\n")
                 synthesis_data["synthesis"] = _eq + (synthesis_data.get("synthesis") or "")
@@ -1464,17 +1483,22 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                     )
                     if eg["warning_level"] == "CRITICAL":
                         eg_line += (
-                            "Binary event risk is CRITICAL — do NOT initiate new position. "
-                            "Downgrade BUY confidence by 20 points minimum.\n"
+                            "Binary event risk is CRITICAL — do NOT initiate new position."
+                            + ("\n" if _code_mode else
+                               " Downgrade BUY confidence by 20 points minimum.\n")
                         )
                     else:
                         eg_line += "Consider waiting for results before entry.\n"
                     synthesis_data.setdefault("synthesis", "")
                     synthesis_data["synthesis"] = eg_line + (synthesis_data.get("synthesis") or "")
                     if eg["warning_level"] == "CRITICAL":
-                        synthesis_data["confidence"] = max(
-                            0.0, _num(synthesis_data.get("confidence"), 50.0) - 20
-                        )
+                        if _code_mode:
+                            synthesis_data.setdefault("decision_basis", {})["earnings_risk"] = (
+                                f"CRITICAL: results in {days_u} days")
+                        else:
+                            synthesis_data["confidence"] = max(
+                                0.0, _num(synthesis_data.get("confidence"), 50.0) - 20
+                            )
             except Exception as _eg_exc:
                 log.warning("[%s] Earnings guard skipped: %s", symbol, _eg_exc)
                 errors.append(f"{symbol}: earnings guard failed: {_eg_exc}")
@@ -1487,7 +1511,8 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             # PASS       → attach validation metadata; proceed normally.
             validation_outcome = None
             _used_claude_synthesis = ant_client and prompt_template
-            if _used_claude_synthesis and not state["dry_run"]:
+            _templated = ((synthesis_data.get("decision_basis") or {}).get("narrative") == "template")
+            if _used_claude_synthesis and not _templated and not state["dry_run"]:
                 try:
                     from scheduler.synthesis_validator import validate_synthesis
                     validation_outcome = await validate_synthesis(
@@ -1504,12 +1529,13 @@ async def synthesise_node(state: OrchestratorState) -> dict:
 
             # WP-015: gate score to the candidate ledger for every symbol,
             # published or suppressed. Dry/on-demand runs write nothing.
+            _suppressed = bool(validation_outcome and validation_outcome.status == "SUPPRESSED")
             if not state["dry_run"]:
                 try:
                     ledger_rows.append(_portfolio_ledger_row(
                         symbol, agent_results, composite, synthesis_data, validation_outcome,
-                        published=not (validation_outcome
-                                       and validation_outcome.status == "SUPPRESSED"),
+                        # code mode publishes the decision even when the narrative is suppressed
+                        published=_code_mode or not _suppressed,
                     ))
                 except Exception as _lr_exc:
                     log.warning("[%s] candidate ledger row not built: %s", symbol, _lr_exc)
@@ -1529,7 +1555,16 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 _log_suppressed_synthesis(
                     symbol, synthesis_data, validation_outcome, state["dry_run"]
                 )
-                continue   # ← skip _build_recommendation; next symbol
+                if not _code_mode:
+                    continue   # ← legacy: skip _build_recommendation; next symbol
+                # ADR-001: the judges rejected the NARRATIVE; the numbers are code.
+                # Publish the decision with the templated narrative instead.
+                _flags = {k: v for k, v in (synthesis_data.get("decision_basis") or {}).items()
+                          if k in ("data_density", "earnings_risk", "veto")}
+                synthesis_data = fallback_narrative(
+                    symbol, _decision, agent_results,
+                    f"narrative suppressed by judges (κ={validation_outcome.aggregate_kappa:.3f})")
+                synthesis_data["decision_basis"].update(_flags, judges="SUPPRESSED")
 
             if validation_outcome and validation_outcome.status == "QUALIFIED":
                 if validation_outcome.caveats:
@@ -1596,9 +1631,14 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             try:
                 from agents.position_sizer import calc_position_size
                 wb_attached = rec.get("warren_bot") or {}
+                # WP-018 interim (until WP-019): code-mode confidence is a calibrated
+                # rate (50 % with no track record), which is below every sizing tier,
+                # so size on the composite the decision was made on instead.
+                _size_conf = (rec.get("composite_score", 0) if _code_mode
+                              else rec.get("confidence", 0))
                 sizing = calc_position_size(
                     upside_pct   = rec.get("upside_pct", 0),
-                    confidence   = rec.get("confidence", 0),
+                    confidence   = _size_conf,
                     action       = rec.get("action", "HOLD"),
                     mos_pct      = wb_attached.get("margin_of_safety_pct") if wb_attached else None,
                     warren_score = wb_attached.get("score") if wb_attached else None,

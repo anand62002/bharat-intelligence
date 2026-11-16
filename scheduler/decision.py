@@ -98,11 +98,15 @@ def decide(
     action = str(gated.get("action") or action).upper()
 
     if calibration is not None:
-        confidence = float(calibration.confidence(composite))
+        beat_rate = float(calibration.confidence(composite))
         band_n = int(calibration.band_n(composite))
         has_history = bool(getattr(calibration, "has_history", False))
     else:
-        confidence, band_n, has_history = 50.0, 0, False
+        beat_rate, band_n, has_history = 50.0, 0, False
+    # The band rate is P(beat Nifty). A SELL/AVOID is right when the stock lags,
+    # so its confidence is the complement (Fable review of WP-018).
+    bearish = action in ("SELL", "AVOID")
+    confidence = 100.0 - beat_rate if bearish else beat_rate
 
     tech = agent_results.get("technical") or {}
     fund = agent_results.get("fundamental") or {}
@@ -120,10 +124,23 @@ def decide(
         if upside is not None and upside > 0:
             target = round(price * (1 + upside / 100.0), 2)
     stoploss = round(atr_stop, 2) if atr_stop else None
+    stop_note = None
+    # The technical agent's stop is anchored to ITS price; the decision's price may come
+    # from the fundamental snapshot. A stop at/above the entry or price is unusable —
+    # rebuild it from this price, or drop it.
+    floor = entry_low if entry_low else price
+    if stoploss and floor and stoploss >= floor:
+        if price and atr:
+            stoploss, stop_note = round(price - 2 * atr, 2), "rebuilt: agent stop was above entry"
+        else:
+            stoploss, stop_note = None, "dropped: agent stop was above entry"
 
     danger = _f(fund.get("danger_drop_pct"))
-    if danger is None and stoploss and price:
+    if not danger and stoploss and price:
         danger = round((price - stoploss) / price * 100.0, 2)
+    danger_conf = _f(fund.get("danger_confidence")) or 0.0
+    if 0 < danger_conf <= 1.0:          # fundamental emits 0–1; the column is 0–100
+        danger_conf *= 100.0
 
     out = {
         "action": action,
@@ -137,13 +154,17 @@ def decide(
         "upside_pct": round(upside, 2) if (upside is not None and target) else 0.0,
         "horizon_days": dc.DECISION_HORIZON_DAYS,
         "danger_drop_pct": danger or 0.0,
-        "danger_confidence": _f(fund.get("danger_confidence")) or 0.0,
+        "danger_confidence": round(danger_conf, 1),
         "decision_basis": {
             "source": "code",
+            "symbol": symbol,
             "composite": round(composite, 2),
             "rule_action": action_for(composite),
             "consensus_gate": gate_note or None,
             "confidence_basis": ("calibrated" if has_history else "no_track_record"),
+            "confidence_meaning": ("P(underperform Nifty)" if bearish else "P(beat Nifty)"),
+            "band_beat_rate": round(beat_rate, 1),
+            "stop_note": stop_note,
             "band_n": band_n,
             "upside_source": upside_src,
             "valuation_gap_pct": round(upside_raw, 2) if upside_raw is not None else None,
@@ -177,8 +198,9 @@ def render_prompt(template: str, *, symbol: str, agent_text: str, composite: flo
                   data_years: str, data_quality: str) -> str:
     """Fill the narrative prompt. The decision's numbers go in as fixed facts."""
     b = decision.get("decision_basis") or {}
-    conf_line = (f"{decision['confidence']:.1f}% (historical beat-Nifty rate for this composite band, "
-                 f"n={b.get('band_n', 0)})" if b.get("confidence_basis") == "calibrated"
+    meaning = b.get("confidence_meaning", "P(beat Nifty)")
+    conf_line = (f"{decision['confidence']:.1f}% — {meaning} at 90 days, historical rate for this "
+                 f"composite band (n={b.get('band_n', 0)})" if b.get("confidence_basis") == "calibrated"
                  else f"{decision['confidence']:.1f}% (no track record yet — neutral prior)")
     repl = {
         "{symbol}": str(symbol),
@@ -190,7 +212,8 @@ def render_prompt(template: str, *, symbol: str, agent_text: str, composite: flo
         "{entry_low}": _fmt(decision.get("entry_low"), money=True),
         "{entry_high}": _fmt(decision.get("entry_high"), money=True),
         "{target}": _fmt(decision.get("target"), money=True),
-        "{stoploss}": _fmt(decision.get("stoploss"), money=True),
+        "{stoploss}": (f"{_fmt(decision.get('stoploss'), money=True)} (2× ATR-14 below price)"
+                       if decision.get("stoploss") else "none (no ATR data)"),
         "{upside_pct}": _fmt(decision.get("upside_pct"), pct=True),
         "{danger_drop_pct}": _fmt(decision.get("danger_drop_pct"), pct=True),
         "{horizon_days}": str(decision.get("horizon_days")),
@@ -205,23 +228,69 @@ def render_prompt(template: str, *, symbol: str, agent_text: str, composite: flo
     return out
 
 
+def _as_text(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    if isinstance(v, (list, tuple)):
+        v = " ".join(str(x) for x in v if x is not None)
+    elif isinstance(v, dict):
+        v = " ".join(str(x) for x in v.values() if x is not None)
+    t = str(v).strip()
+    return t or None
+
+
+def _as_list(v: Any) -> list[str]:
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if x not in (None, "")]
+    if isinstance(v, dict):
+        return [str(x).strip() for x in v.values() if x not in (None, "")]
+    t = str(v).strip()
+    return [t] if t else []
+
+
+def _is_veto(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("true", "yes", "1")
+
+
+def _headline(action: str, symbol: Optional[str], tail: Optional[str]) -> str:
+    """'ACTION: SYMBOL — tail'. The prefix is code; any action the LLM led with is stripped."""
+    import re
+    t = re.sub(r"^\s*(BUY|HOLD|SELL|AVOID|WITHHELD)\b\s*[:\-—–]?\s*", "", tail or "",
+               flags=re.I).strip()
+    if symbol:
+        t = re.sub(rf"^{re.escape(symbol.split('.')[0])}(\.NS|\.BO)?\s*[:\-—–]\s*", "", t,
+                   flags=re.I).strip()
+    head = f"{action}: {symbol}" if symbol else action
+    return f"{head} — {t}"[:120] if t else head
+
+
 def merge_narrative(decision: dict, llm: dict) -> dict:
     """
     Decision numbers + the LLM's text. The LLM cannot change a number; a veto
-    only turns BUY into HOLD (recorded in decision_basis).
+    only turns BUY into HOLD (recorded in decision_basis). Malformed text types
+    are coerced, never allowed to break the run.
     """
+    if not isinstance(llm, dict):
+        llm = {}
     merged = {k: v for k, v in decision.items() if k != "synthesis_note"}
-    for k in NARRATIVE_KEYS:
-        v = llm.get(k)
-        if v not in (None, "", []):
-            merged[k] = v
+    for k in ("bull_case", "bear_case"):
+        lst = _as_list(llm.get(k))
+        if lst:
+            merged[k] = lst
+    for k in ("synthesis", "market_constraints", "headline"):
+        t = _as_text(llm.get(k))
+        if t:
+            merged[k] = t
     ignored = sorted(k for k in DECISION_KEYS if k in llm)
     if ignored:
         log.info("LLM returned decision fields %s — ignored (numbers come from code)", ignored)
     basis = dict(merged.get("decision_basis") or {})
-    veto = bool(llm.get("veto")) and str(llm.get("veto")).lower() not in ("false", "0", "no")
-    if veto:
-        reason = str(llm.get("veto_reason") or "").strip() or "no reason given"
+    if _is_veto(llm.get("veto")):
+        reason = _as_text(llm.get("veto_reason")) or "no reason given"
         basis["veto"] = {"applied": merged["action"] == "BUY", "reason": reason,
                          "from_action": merged["action"]}
         if merged["action"] == "BUY":
@@ -231,6 +300,8 @@ def merge_narrative(decision: dict, llm: dict) -> dict:
     merged["decision_basis"] = basis
     if decision.get("synthesis_note"):
         merged["synthesis"] = decision["synthesis_note"] + "\n\n" + (merged.get("synthesis") or "")
+    # Headline prefix from code, after any veto, so it can never contradict the action.
+    merged["headline"] = _headline(merged["action"], basis.get("symbol"), merged.get("headline"))
     return merged
 
 
@@ -254,7 +325,7 @@ def fallback_narrative(symbol: str, decision: dict, agent_results: dict, reason:
             f"Narrative unavailable ({reason}); levels and confidence are computed in code.")
     merged = merge_narrative(decision, {
         "bull_case": bull, "bear_case": bear, "synthesis": text,
-        "headline": f"{decision['action']}: {symbol} — composite {b.get('composite', 0):.0f}/100",
+        "headline": f"composite {b.get('composite', 0):.0f}/100, narrative unavailable",
     })
     merged["decision_basis"] = {**merged.get("decision_basis", {}), "narrative": "template",
                                 "narrative_reason": reason}

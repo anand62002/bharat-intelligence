@@ -220,7 +220,7 @@ def load_composite_calibration(client: Any) -> Calibration:
     MIN_RESOLVED independent calls it has no history and confidence() returns the
     neutral 50 %. That's the honest answer until the track record exists. Never raises.
     """
-    from data.decision_config import COMPOSITE_BANDS
+    from data.decision_config import COMPOSITE_BANDS, EQUAL_WEIGHTS_SINCE
     if client is None:
         log.warning("composite calibration: no client — using neutral %.0f%%", NEUTRAL)
         return Calibration()
@@ -247,7 +247,10 @@ def load_composite_calibration(client: Any) -> Calibration:
             if len(page) < 1000:
                 break
             off += 1000
-        pairs = [(recs[o["rec_id"]], o) for o in outs if o.get("rec_id") in recs]
+        # Composites before ADR-003 were accuracy-weighted — a different scale from the
+        # equal-weight bands — so only calls made on equal weights count.
+        pairs = [(recs[o["rec_id"]], o) for o in outs
+                 if o.get("rec_id") in recs and str(o.get("rec_date") or "")[:10] >= EQUAL_WEIGHTS_SINCE]
         cal = build_calibration(pairs, score_fn=composite_score_of, bands=COMPOSITE_BANDS)
         log.info("composite calibration: n=%d overall=%.1f%% has_history=%s",
                  cal.n, cal.overall, cal.has_history)

@@ -100,10 +100,16 @@ AVOID_MAX_COMPOSITE: float = 30.0     # at or below → AVOID; between this and 
 
 # Composite bands for the calibrated confidence (agents/call_calibration.py). The
 # edges are the action thresholds above, so a band never straddles two actions.
+# Bands are [lo, hi); the first ends just above AVOID_MAX so "≤ 30" is exactly the AVOID band.
+_AVOID_EDGE = __import__("math").nextafter(AVOID_MAX_COMPOSITE, 101.0)
 COMPOSITE_BANDS: list[tuple[float, float]] = [
-    (0.0, AVOID_MAX_COMPOSITE + 0.01), (AVOID_MAX_COMPOSITE + 0.01, HOLD_MIN_COMPOSITE),
+    (0.0, _AVOID_EDGE), (_AVOID_EDGE, HOLD_MIN_COMPOSITE),
     (HOLD_MIN_COMPOSITE, BUY_MIN_COMPOSITE), (BUY_MIN_COMPOSITE, 101.0),
 ]
+
+# First run date on the equal-weight composite (WP-003 merged). Calibration ignores
+# older outcomes: their composite_score is on the accuracy-weighted scale.
+EQUAL_WEIGHTS_SINCE: str = "2026-11-15"
 
 UPSIDE_CAP_PCT: float = 100.0         # same cap discovery applies (_UPSIDE_CAP)
 DECISION_HORIZON_DAYS: int = 90       # the only horizon with outcome data (CALL_HORIZON_DAYS)

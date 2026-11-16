@@ -147,11 +147,24 @@ def run_node(monkeypatch):
 
 def test_suppressed_symbol_still_produces_ledger_write(run_node):
     out, writes = run_node(_outcome("SUPPRESSED", 0.21))
-    assert out["recommendations"] == []                       # suppression unchanged
+    # WP-018 / ADR-001: the judges reject the NARRATIVE; the code decision still
+    # publishes, with the templated narrative.
+    (rec,) = out["recommendations"]
+    assert rec["decision_meta"]["decision"]["judges"] == "SUPPRESSED"
+    assert rec["decision_meta"]["decision"]["narrative"] == "template"
     assert len(writes) == 1
     w = writes[0]
-    assert (w["symbol"], w["source"], w["stage"]) == ("TITAN", "portfolio", "DEEP")
+    assert (w["symbol"], w["source"], w["stage"]) == ("TITAN", "portfolio", "PROMOTED")
     assert w["gate_score"] == 0.21 and w["nifty"] == 24000.0
+    assert w["features"]["gate_status"] == "SUPPRESSED"
+
+
+def test_suppressed_symbol_is_dropped_on_the_legacy_path(run_node, monkeypatch):
+    from data import decision_config
+    monkeypatch.setattr(decision_config, "DECISION_SOURCE", "llm")
+    out, writes = run_node(_outcome("SUPPRESSED", 0.21))
+    assert out["recommendations"] == []
+    assert writes[0]["stage"] == "DEEP"
 
 
 def test_published_symbol_writes_promoted_row(run_node):

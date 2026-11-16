@@ -271,4 +271,154 @@ def test_composite_calibration_without_client_is_neutral():
 def test_thresholds_are_the_recentred_provisional_values():
     """Owner decision 2026-11-16: 65/45/30 on the equal-weight composite (not validated)."""
     assert (dc.BUY_MIN_COMPOSITE, dc.HOLD_MIN_COMPOSITE, dc.AVOID_MAX_COMPOSITE) == (65.0, 45.0, 30.0)
-    assert [lo for lo, _ in dc.COMPOSITE_BANDS] == [0.0, 30.01, 45.0, 65.0]
+    assert [lo for lo, _ in dc.COMPOSITE_BANDS][2:] == [45.0, 65.0]
+    lo1 = dc.COMPOSITE_BANDS[1][0]
+    assert 30.0 < lo1 < 30.000001                       # "≤ 30 is AVOID", exactly
+
+
+# ── Fable review fixes (2026-11-16) ───────────────────────────────────────────
+
+def _run_live(monkeypatch, *, body="{}", stop_reason="end_turn", exc=None, outcome=None,
+              warren=None, earnings=None):
+    """Non-dry synthesise_node with the judges, ledger and DB stubbed."""
+    from scheduler import orchestrator as orch
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-real")
+    monkeypatch.setattr(orch, "_supabase", lambda: None)
+    monkeypatch.setattr(orch, "_log_suppressed_synthesis", lambda *a, **k: None)
+    client = MagicMock()
+    if exc is not None:
+        client.messages.create.side_effect = exc
+    else:
+        r = _resp(body)
+        r.stop_reason = stop_reason
+        client.messages.create.return_value = r
+    judged = []
+
+    async def fake_validate(**kw):
+        judged.append(kw["synthesis_data"])
+        return outcome
+    ag = dict(AG, **({"warren_bot": warren} if warren else {}))
+    state = {"symbol_results": {"TITAN.NS": ag}, "agent_weights": dc.equal_weights(),
+             "current_regime": None, "errors": [], "dry_run": False}
+    with patch("anthropic.Anthropic", return_value=client), \
+         patch("agents.earnings_guard.check_pre_earnings",
+               return_value=earnings or {"has_upcoming_earnings": False}), \
+         patch("agents.governance_screener.screen_governance", return_value={"flag_count": 0}), \
+         patch("scheduler.synthesis_validator.validate_synthesis", fake_validate), \
+         patch("data.candidate_ledger.get_client", return_value=object()), \
+         patch("data.candidate_ledger.nifty_level", return_value=24000.0), \
+         patch("data.candidate_ledger.record_candidates", side_effect=lambda c, rows: len(rows)):
+        return asyncio.run(orch.synthesise_node(state)), judged
+
+
+@pytest.mark.parametrize("kind", ["max_tokens", "refusal", "auth_error"])
+def test_any_model_failure_publishes_the_decision(monkeypatch, kind):
+    if kind == "auth_error":
+        out, judged = _run_live(monkeypatch, exc=RuntimeError("401 invalid x-api-key"))
+    else:
+        out, judged = _run_live(monkeypatch, body=NARRATIVE, stop_reason=kind)
+    (rec,) = out["recommendations"]
+    assert rec["action"] == "BUY" and rec["target"] == 1250.0
+    assert any("SYNTHESIS_FALLBACK" in e for e in out["errors"])
+    assert judged == []                      # the template is never sent to the judges
+
+
+def test_judges_score_the_llm_narrative_only(monkeypatch):
+    from scheduler.synthesis_validator import ValidationOutcome
+    ok = ValidationOutcome(status="PASS", aggregate_kappa=0.6, dimensions={}, failed_dimensions=[],
+                           caveats=[], suppression_reason=None, judge_errors=[], elapsed_seconds=0)
+    out, judged = _run_live(monkeypatch, body=NARRATIVE, outcome=ok)
+    assert len(judged) == 1 and len(out["recommendations"]) == 1
+
+
+def test_non_string_narrative_does_not_drop_the_symbol(monkeypatch):
+    body = json.dumps({"synthesis": ["part one", "part two"], "bull_case": "single string",
+                       "bear_case": {"a": "x"}, "headline": ["h"]})
+    out, _ = _run_live(monkeypatch, body=body)
+    (rec,) = out["recommendations"]
+    assert rec["action"] == "BUY" and "part one part two" in rec["summary"]
+
+
+def test_earnings_and_data_density_flag_but_never_move_confidence(monkeypatch):
+    eg = {"has_upcoming_earnings": True, "days_until": 2, "warning_level": "CRITICAL",
+          "earnings_date": "2026-11-18", "quarter": "Q3"}
+    out, _ = _run_live(monkeypatch, body=NARRATIVE, earnings=eg,
+                       warren={"signal": "HOLD", "score": 50, "years_available": 3})
+    (rec,) = out["recommendations"]
+    assert rec["confidence"] == 50.0                                   # calibrated rate untouched
+    basis = rec["decision_meta"]["decision"]
+    assert basis["earnings_risk"].startswith("CRITICAL") and "3 years" in basis["data_density"]
+    assert "EARNINGS ALERT" in rec["summary"] and "Confidence capped" not in rec["summary"]
+
+
+def test_sizing_uses_the_composite_until_wp019(monkeypatch):
+    out, _ = _run_live(monkeypatch, body=NARRATIVE)
+    (rec,) = out["recommendations"]
+    assert rec["confidence"] == 50.0 and rec["composite_score"] > 55
+    assert rec["position_label"] not in (None, "AVOID") and rec["suggested_position_pct"] > 0
+
+
+def test_headline_prefix_follows_the_final_action():
+    dec = d.decide("TITAN.NS", agents(), 80.0, 1000.0, Cal())
+    out = d.merge_narrative(dec, {"headline": "BUY: TITAN — strong momentum", "veto": True,
+                                  "veto_reason": "pending SEBI order"})
+    assert out["action"] == "HOLD" and out["headline"] == "HOLD: TITAN.NS — strong momentum"
+
+
+def test_veto_strings_that_mean_no():
+    dec = d.decide("X.NS", agents(), 80.0, 1000.0, Cal())
+    for v in ("null", "none", "false", "", None, 0):
+        assert d.merge_narrative(dec, {"veto": v})["action"] == "BUY"
+
+
+def test_sell_confidence_is_the_probability_of_lagging():
+    out = d.decide("X.NS", agents(), 40.0, 1000.0, Cal(rate=35.0))
+    assert out["action"] == "SELL" and out["confidence"] == 65.0
+    assert out["decision_basis"]["confidence_meaning"] == "P(underperform Nifty)"
+    assert out["decision_basis"]["band_beat_rate"] == 35.0
+
+
+def test_stale_agent_stop_above_entry_is_rebuilt():
+    out = d.decide("X.NS", agents(atr=50.0, atr_stop=1010.0), 80.0, 1000.0, Cal())
+    assert out["stoploss"] == 900.0 and out["stoploss"] < out["entry_low"]
+    assert out["decision_basis"]["stop_note"].startswith("rebuilt")
+
+
+def test_danger_confidence_scaled_and_zero_danger_falls_back():
+    a = agents()
+    a["fundamental"].update(danger_drop_pct=0.0, danger_confidence=0.4)
+    out = d.decide("X.NS", a, 80.0, 1000.0, Cal())
+    assert out["danger_confidence"] == 40.0
+    assert out["danger_drop_pct"] == 10.0                # from the 900 stop on a 1000 price
+
+
+def test_fact_checker_delta_not_applied_to_code_decisions():
+    import inspect
+    from governance import fact_checker
+    src = inspect.getsource(fact_checker)
+    assert "confidence_delta_not_applied" in src and '"source") == "code"' in src
+
+
+def test_calibration_ignores_pre_equal_weight_outcomes():
+    from agents import call_calibration as cc
+
+    class Q:
+        def __init__(self, data): self.data = data
+        def select(self, *a): return self
+        def eq(self, *a): return self
+        def neq(self, *a): return self
+        @property
+        def not_(self): return self
+        def is_(self, *a): return self
+        def range(self, *a): return self
+        def execute(self): return self
+
+    recs = [{"id": f"r{i}", "symbol": f"S{i}", "metadata": {}} for i in range(80)]
+    outs = [{"rec_id": f"r{i}", "symbol": f"S{i}", "composite_score": 80.0, "alpha_t90": 0.1,
+             "rec_date": "2026-10-01" if i < 60 else "2026-11-20"} for i in range(80)]
+
+    class C:
+        def table(self, name):
+            return Q(recs if name == "recommendations" else outs)
+    cal = cc.load_composite_calibration(C())
+    assert cal.n == 20 and cal.has_history is False      # the 60 accuracy-weighted calls don't count
