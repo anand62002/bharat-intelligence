@@ -87,10 +87,15 @@ def describe_weights() -> str:
 #          Rollback only.
 DECISION_SOURCE: str = "code"
 
-# Action rule on the equal-weight composite (the P1-D thresholds the fallback has
-# used since 2026-07; not yet validated — ADR-006 governs any change).
-BUY_MIN_COMPOSITE: float = 75.0
-HOLD_MIN_COMPOSITE: float = 58.0
+# Action rule on the equal-weight composite. PROVISIONAL (owner decision 2026-11-16).
+# The P1-D thresholds (75 / 58 / 30) were set for the old accuracy-weighted
+# composite. On the equal-weight composite (ADR-003), scores cluster between 44
+# and 64, so 75/58 would have made 22–23 of 24 holdings SELL every day (replay of
+# the 2026-11-15/16 runs). Re-centred to the new scale: the same replay gives
+# HOLD 22 / SELL 2 and HOLD 24. These are NOT validated. Revisit under ADR-006
+# once the candidates ledger has ≥300 labelled rows across ≥8 weeks.
+BUY_MIN_COMPOSITE: float = 65.0
+HOLD_MIN_COMPOSITE: float = 45.0
 AVOID_MAX_COMPOSITE: float = 30.0     # at or below → AVOID; between this and HOLD_MIN → SELL
 
 # Composite bands for the calibrated confidence (agents/call_calibration.py). The

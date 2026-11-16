@@ -43,8 +43,8 @@ def agents(signals=("BUY", "BUY", "HOLD"), fund_up=30.0, tech_up=10.0, atr=50.0,
 
 # ── the rule ──────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("comp,act", [(80, "BUY"), (75, "BUY"), (74.9, "HOLD"), (58, "HOLD"),
-                                      (57.9, "SELL"), (30.5, "SELL"), (30, "AVOID"), (5, "AVOID")])
+@pytest.mark.parametrize("comp,act", [(80, "BUY"), (65, "BUY"), (64.9, "HOLD"), (45, "HOLD"),
+                                      (44.9, "SELL"), (30.5, "SELL"), (30, "AVOID"), (5, "AVOID")])
 def test_action_rule(comp, act):
     assert d.action_for(comp) == act
 
@@ -76,7 +76,7 @@ def test_consensus_gate_moves_buy_to_hold_without_touching_confidence():
 
 
 def test_sell_has_no_entry_or_target_but_keeps_the_stop():
-    out = d.decide("X.NS", agents(), 45.0, 1000.0, Cal())
+    out = d.decide("X.NS", agents(), 40.0, 1000.0, Cal())
     assert out["action"] == "SELL"
     assert out["entry_low"] is None and out["target"] is None and out["upside_pct"] == 0.0
     assert out["stoploss"] == 900.0
@@ -90,7 +90,7 @@ def test_no_track_record_is_neutral_and_says_so():
 
 
 def test_missing_data_never_raises():
-    out = d.decide("X.NS", {}, 62.0, None, None)
+    out = d.decide("X.NS", {}, 55.0, None, None)
     assert out["action"] == "HOLD" and out["confidence"] == 50.0
     assert out["entry_low"] is None and out["stoploss"] is None and out["target"] is None
 
@@ -117,7 +117,7 @@ def test_veto_turns_buy_into_hold_and_is_recorded():
 
 
 def test_veto_cannot_upgrade_or_touch_non_buy():
-    dec = d.decide("X.NS", agents(), 45.0, 1000.0, Cal())     # SELL
+    dec = d.decide("X.NS", agents(), 40.0, 1000.0, Cal())     # SELL
     out = d.merge_narrative(dec, {"veto": True, "veto_reason": "x", "action": "BUY"})
     assert out["action"] == "SELL"
     assert out["decision_basis"]["veto"]["applied"] is False
@@ -238,12 +238,12 @@ def test_rollback_to_llm_numbers(monkeypatch):
 
 def test_build_recommendation_does_not_backfill_a_deliberately_empty_target():
     from scheduler.orchestrator import _build_recommendation
-    dec = d.decide("X.NS", agents(), 45.0, 1000.0, Cal())            # SELL, target None
+    dec = d.decide("X.NS", agents(), 40.0, 1000.0, Cal())            # SELL, target None
     syn = d.merge_narrative(dec, {"synthesis": "s"})
     with patch("agents.governance_screener.screen_governance", return_value={"flag_count": 0}):
         a = agents()
         a["technical"]["detail"]["indicators"]["target_price_used"] = 1500.0
-        rec = _build_recommendation("X.NS", syn, a, {}, 45.0)
+        rec = _build_recommendation("X.NS", syn, a, {}, 40.0)
     assert rec["action"] == "SELL" and rec["target"] is None
 
 
@@ -266,3 +266,9 @@ def test_composite_calibration_without_client_is_neutral():
     from agents.call_calibration import load_composite_calibration
     cal = load_composite_calibration(None)
     assert cal.has_history is False and cal.confidence(80.0) == 50.0
+
+
+def test_thresholds_are_the_recentred_provisional_values():
+    """Owner decision 2026-11-16: 65/45/30 on the equal-weight composite (not validated)."""
+    assert (dc.BUY_MIN_COMPOSITE, dc.HOLD_MIN_COMPOSITE, dc.AVOID_MAX_COMPOSITE) == (65.0, 45.0, 30.0)
+    assert [lo for lo, _ in dc.COMPOSITE_BANDS] == [0.0, 30.01, 45.0, 65.0]
