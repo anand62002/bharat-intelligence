@@ -211,9 +211,13 @@ def run_synthesis(symbol: str, agent_results: dict) -> dict | None:
             _load_semantic_layer,
             _format_agent_outputs,
             _composite_score,
+            _current_price,
             _extract_json,
+            _code_decides,
             CLAUDE_MODEL, CLAUDE_MAX_TOKENS,
         )
+        from scheduler.decision import decide, render_prompt, merge_narrative, NARRATIVE_KEYS
+        from agents.call_calibration import Calibration
         from data.llm_utils import first_text
     except ImportError as exc:
         fail(f"Cannot import synthesis helpers: {exc}")
@@ -241,13 +245,26 @@ def run_synthesis(symbol: str, agent_results: dict) -> dict | None:
         composite = _composite_score(agent_results, weights, regime=None)
         agent_text = _format_agent_outputs(symbol, agent_results, weights)
 
-        prompt = (
-            prompt_template
-            .replace("{symbol}",          str(symbol))
-            .replace("{agent_outputs}",   agent_text)
-            .replace("{composite_score}", f"{composite:.1f}")
-            .replace("{current_price}",   "N/A")
+        # WP-018: the numbers come from code; the LLM writes only the narrative.
+        # Same functions the 06:00 orchestrator uses (neutral calibration here).
+        if not _code_decides():
+            fail("DECISION_SOURCE is 'llm' — this check covers the code-decision path")
+            return None
+        price = _current_price(agent_results)
+        decision = decide(symbol, agent_results, composite, price, Calibration())
+        ok(f"Decision from code: {decision['action']} conf={decision['confidence']}% "
+           f"target={decision['target']} stop={decision['stoploss']} (composite {composite:.1f})")
+        atr = (agent_results.get("technical") or {}).get("atr_14")
+        prompt = render_prompt(
+            prompt_template, symbol=symbol, agent_text=agent_text, composite=composite,
+            decision=decision, current_price=price,
+            atr_entry_zone=(f"₹{price - atr:.2f}" if (price and atr) else "N/A"),
+            data_years=str((agent_results.get("warren_bot") or {}).get("years_available") or "unknown"),
+            data_quality=str((agent_results.get("fundamental") or {}).get("data_quality") or "FULL"),
         )
+        if "{" in prompt and any(t in prompt for t in ("{action}", "{confidence_line}", "{target}")):
+            fail("Prompt has unfilled decision placeholders")
+            return None
         if semantic_layer:
             prompt = (
                 "## BUSINESS SEMANTICS CONTEXT\n"
@@ -282,15 +299,24 @@ def run_synthesis(symbol: str, agent_results: dict) -> dict | None:
             return None
 
         try:
-            synthesis_data = _extract_json(raw_text)
+            narrative = _extract_json(raw_text)
         except ValueError:
             fail(f"Claude response has no JSON block ({elapsed:.1f}s)")
             print(f"     Raw response snippet: {raw_text[:300]}")
             return None
-        action     = synthesis_data.get("action", "?")
-        confidence = synthesis_data.get("confidence", "?")
-        upside     = synthesis_data.get("upside_pct", "?")
-        ok(f"Synthesis parsed OK: action={action} confidence={confidence}% upside={upside}%  ({elapsed:.1f}s)")
+        missing = [k for k in ("bull_case", "bear_case", "synthesis", "headline")
+                   if not narrative.get(k)]
+        if missing:
+            fail(f"Narrative JSON missing {missing} ({elapsed:.1f}s)")
+            return None
+        stray = sorted(set(narrative) - set(NARRATIVE_KEYS) - {"veto", "veto_reason"})
+        if stray:
+            warn(f"Model returned extra keys {stray} — ignored (numbers come from code)")
+        synthesis_data = merge_narrative(decision, narrative)
+        veto = (synthesis_data.get("decision_basis") or {}).get("veto")
+        ok(f"Narrative parsed OK: action={synthesis_data['action']} "
+           f"confidence={synthesis_data['confidence']}% upside={synthesis_data['upside_pct']}%"
+           f"{'  VETO: ' + veto['reason'] if veto else ''}  ({elapsed:.1f}s)")
         return synthesis_data
 
     except json.JSONDecodeError as exc:

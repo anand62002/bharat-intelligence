@@ -305,6 +305,12 @@ class TestGetOhlcvDropsPartialBar:
 # /api/analyse must report the real reason
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Imported at collection time: api.main builds its Supabase client at import,
+# which the WP-008 guard blocks inside a test (it passed only when another
+# module had imported api.main first).
+from api.main import on_demand_analyse  # noqa: E402
+
+
 class TestAnalyseSurfacesPipelineErrors:
 
     @pytest.mark.anyio
@@ -313,7 +319,6 @@ class TestAnalyseSurfacesPipelineErrors:
         A crash inside synthesise_node lands in state["errors"] and yields no
         rec. Reporting that as "suppressed" hid a real bug for a full day.
         """
-        from api.main import on_demand_analyse
 
         state = {
             "recommendations": [],
@@ -334,7 +339,6 @@ class TestAnalyseSurfacesPipelineErrors:
 
     @pytest.mark.anyio
     async def test_genuine_suppression_keeps_original_wording(self):
-        from api.main import on_demand_analyse
 
         state = {"recommendations": [], "symbol_results": {"TINY.NS": {}}, "errors": []}
         req = MagicMock()

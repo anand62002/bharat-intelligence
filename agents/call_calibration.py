@@ -111,15 +111,24 @@ def signal_score_of(row: dict) -> Optional[float]:
         return None
 
 
-def build_calibration(pairs: list[tuple[dict, dict]]) -> Calibration:
+def build_calibration(
+    pairs: list[tuple[dict, dict]],
+    score_fn=None,
+    bands: Optional[list[tuple[float, float]]] = None,
+) -> Calibration:
     """
     Pure function: (recommendation_row, outcome_row) pairs → Calibration.
     Kept separate from the DB read so it can be tested directly.
+
+    score_fn(rec, out) → the score to band on (default: the discovery signal
+    score); bands default to SIGNAL_BANDS. WP-018 uses the portfolio composite
+    with data.decision_config.COMPOSITE_BANDS.
     """
+    bands_def = bands or SIGNAL_BANDS
     resolved = []
     for rec, out in pairs:
         alpha = out.get("alpha_t90")
-        score = signal_score_of(rec)
+        score = score_fn(rec, out) if score_fn else signal_score_of(rec)
         rec_date = str(out.get("rec_date") or rec.get("created_at") or "")[:10]
         if alpha is None or score is None or not rec_date:
             continue
@@ -147,7 +156,7 @@ def build_calibration(pairs: list[tuple[dict, dict]]) -> Calibration:
     hits_total = sum(1 for _, h in kept if h)
     p0 = hits_total / n
     bands = []
-    for lo, hi in SIGNAL_BANDS:
+    for lo, hi in bands_def:
         in_band = [h for s, h in kept if lo <= s < hi]
         bn, bh = len(in_band), sum(in_band)
         rate = (bh + PRIOR_STRENGTH * p0) / (bn + PRIOR_STRENGTH)
@@ -190,4 +199,59 @@ def load_calibration(client: Any) -> Calibration:
         return cal
     except Exception as exc:
         log.warning("call_calibration: failed (%s) — using neutral %.0f%%", exc, NEUTRAL)
+        return Calibration()
+
+
+def composite_score_of(rec: dict, out: dict) -> Optional[float]:
+    """The composite a portfolio recommendation was decided on (WP-004 stores it on both)."""
+    v = out.get("composite_score")
+    if v is None:
+        v = (rec.get("metadata") or {}).get("composite_score")
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def load_composite_calibration(client: Any) -> Calibration:
+    """
+    Portfolio calibration (WP-018, ADR-001): P(beat Nifty at 90d) by composite band,
+    from resolved PORTFOLIO recommendations (is_discovery = false). Below
+    MIN_RESOLVED independent calls it has no history and confidence() returns the
+    neutral 50 %. That's the honest answer until the track record exists. Never raises.
+    """
+    from data.decision_config import COMPOSITE_BANDS
+    if client is None:
+        log.warning("composite calibration: no client — using neutral %.0f%%", NEUTRAL)
+        return Calibration()
+    try:
+        recs: dict[str, dict] = {}
+        off = 0
+        while True:
+            page = (client.table("recommendations")
+                    .select("id,symbol,created_at,metadata")
+                    .eq("is_discovery", False).neq("action", "SUPPRESSED")
+                    .range(off, off + 999).execute().data or [])
+            recs.update({r["id"]: r for r in page})
+            if len(page) < 1000:
+                break
+            off += 1000
+        outs: list[dict] = []
+        off = 0
+        while True:
+            page = (client.table("recommendation_outcomes")
+                    .select("rec_id,symbol,rec_date,alpha_t90,composite_score")
+                    .not_.is_("alpha_t90", "null")
+                    .range(off, off + 999).execute().data or [])
+            outs += page
+            if len(page) < 1000:
+                break
+            off += 1000
+        pairs = [(recs[o["rec_id"]], o) for o in outs if o.get("rec_id") in recs]
+        cal = build_calibration(pairs, score_fn=composite_score_of, bands=COMPOSITE_BANDS)
+        log.info("composite calibration: n=%d overall=%.1f%% has_history=%s",
+                 cal.n, cal.overall, cal.has_history)
+        return cal
+    except Exception as exc:
+        log.warning("composite calibration failed (%s) — using neutral %.0f%%", exc, NEUTRAL)
         return Calibration()

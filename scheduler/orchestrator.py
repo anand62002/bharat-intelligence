@@ -94,7 +94,8 @@ from data.model_config import SYNTHESIS_MODEL as CLAUDE_MODEL  # single source o
 # pipeline published nothing for months. 16000 stays under the SDK's
 # non-streaming timeout guidance.
 CLAUDE_MAX_TOKENS     = int(os.getenv("CLAUDE_MAX_TOKENS", 16000))
-SYNTHESIS_PROMPT_PATH = _ROOT / "prompts" / "orchestrator_synthesis.txt"
+SYNTHESIS_PROMPT_PATH = _ROOT / "prompts" / "orchestrator_synthesis.txt"          # WP-018: narrative only
+SYNTHESIS_PROMPT_LLM_PATH = _ROOT / "prompts" / "orchestrator_synthesis_llm.txt"  # legacy: LLM numbers
 SEMANTIC_LAYER_PATH   = _ROOT / "docs"    / "semantic_layer.md"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,12 +135,18 @@ def _supabase():
 
 
 def _load_synthesis_prompt() -> str:
-    """Load the synthesis prompt template from disk once."""
+    """Load the synthesis prompt for the configured DECISION_SOURCE (WP-018)."""
+    path = SYNTHESIS_PROMPT_PATH if _code_decides() else SYNTHESIS_PROMPT_LLM_PATH
     try:
-        return SYNTHESIS_PROMPT_PATH.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        log.error("Synthesis prompt not found at %s", SYNTHESIS_PROMPT_PATH)
+        log.error("Synthesis prompt not found at %s", path)
         return ""
+
+
+def _code_decides() -> bool:
+    """WP-018 / ADR-001: numbers from scheduler/decision.py unless rolled back to 'llm'."""
+    return decision_config.DECISION_SOURCE != "llm"
 
 
 def _load_semantic_layer() -> str:
@@ -709,10 +716,14 @@ def _build_recommendation(
     # stayed null. They now read what the technical agent does produce: its
     # target price (analyst mean, else 1.5×EMA200 — the basis of its upside_pct)
     # and its 2×ATR stoploss floor. There is no agent entry zone to fall back to.
+    # WP-018: when the decision came from code (decision_basis present), an empty
+    # level is deliberate (no target on SELL/AVOID) — don't backfill it.
+    _from_code  = isinstance(synthesis_data.get("decision_basis"), dict)
     entry_low   = _f("entry_low")
     entry_high  = _f("entry_high")
-    target      = _f("target",     tech_ind.get("target_price_used") if isinstance(tech_ind, dict) else None)
-    stoploss    = _f("stoploss",   tech.get("atr_stoploss"))
+    target      = (_f("target") if _from_code else
+                   _f("target", tech_ind.get("target_price_used") if isinstance(tech_ind, dict) else None))
+    stoploss    = _f("stoploss") if _from_code else _f("stoploss", tech.get("atr_stoploss"))
     # NOTE: every read below must use _num()/_f() — synthesis_data values can be
     # explicit JSON nulls, which dict.get(key, default) does NOT replace.
     horizon_days      = int(_num(synthesis_data.get("horizon_days"), 180) or 180)
@@ -780,7 +791,9 @@ def _build_recommendation(
         # these from the stored compact agent_signals (signal/score/weight/reason
         # only), so data_years_available, data_quality and the ATR fields were
         # never saved (WP-016 contract test).
-        "decision_meta":     _decision_meta(agent_results),
+        "decision_meta":     {**_decision_meta(agent_results),
+                              **({"decision": synthesis_data["decision_basis"]}
+                                 if isinstance(synthesis_data.get("decision_basis"), dict) else {})},
         "is_discovery":      False,
         # Governance red flags (from governance_screener)
         "gov_screen":        gov_screen,
@@ -1112,6 +1125,19 @@ async def synthesise_node(state: OrchestratorState) -> dict:
     recommendations: list[dict] = []
     ledger_rows: list[dict] = []     # WP-015: one candidates row per gated symbol
 
+    # WP-018: the decision is computed in code; confidence is the calibrated
+    # beat-Nifty rate of the composite's band (neutral 50 % until 30 resolve).
+    _code_mode = _code_decides()
+    _calibration = None
+    if _code_mode:
+        from agents.call_calibration import load_composite_calibration
+        from scheduler.decision import decide, fallback_narrative, merge_narrative, render_prompt
+        _calibration = load_composite_calibration(_supabase())
+        log.info("Decision source: code (composite calibration n=%d, history=%s)",
+                 _calibration.n, _calibration.has_history)
+    else:
+        log.warning("Decision source: LLM (legacy, DECISION_SOURCE='llm')")
+
     # ── Morning Digest context (P6-C wiring) ─────────────────────────────────
     # Fetch today's MORNING digest (or yesterday's CLOSING as fallback) to inject
     # market_mood / nifty_signal / sectors_in_focus into every synthesis prompt.
@@ -1172,6 +1198,13 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             agent_text   = _format_agent_outputs(symbol, agent_results, weights)
 
             synthesis_data: dict = {}
+            _decision = (decide(symbol, agent_results, composite, _current_price(agent_results),
+                                _calibration) if _code_mode else None)
+
+            def _fallback(reason: str) -> dict:
+                if _code_mode:
+                    return fallback_narrative(symbol, _decision, agent_results, reason)
+                return _fallback_synthesis(symbol, composite, agent_results)
 
             if ant_client and prompt_template:
                 # Resolve current price for the prompt (was always "N/A": it read
@@ -1202,17 +1235,25 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                 _data_years_str   = str(_years_pre) if _years_pre is not None else "unknown"
                 _data_quality_str = _dq_pre
 
-                prompt = (
-                    prompt_template
-                    .replace("{symbol}",            str(symbol))
-                    .replace("{agent_outputs}",     agent_text)
-                    .replace("{composite_score}",   f"{composite:.1f}")
-                    .replace("{current_price}",     str(current_price))
-                    .replace("{atr_stoploss}",      _atr_stoploss_str)
-                    .replace("{atr_entry_zone}",    _atr_entry_zone)   # P7-D
-                    .replace("{data_years}",        _data_years_str)   # P7-C
-                    .replace("{data_quality_label}",_data_quality_str) # P7-C
-                )
+                if _code_mode:
+                    prompt = render_prompt(
+                        prompt_template, symbol=symbol, agent_text=agent_text,
+                        composite=composite, decision=_decision, current_price=_cp,
+                        atr_entry_zone=_atr_entry_zone, data_years=_data_years_str,
+                        data_quality=_data_quality_str,
+                    )
+                else:
+                    prompt = (
+                        prompt_template
+                        .replace("{symbol}",            str(symbol))
+                        .replace("{agent_outputs}",     agent_text)
+                        .replace("{composite_score}",   f"{composite:.1f}")
+                        .replace("{current_price}",     str(current_price))
+                        .replace("{atr_stoploss}",      _atr_stoploss_str)
+                        .replace("{atr_entry_zone}",    _atr_entry_zone)   # P7-D
+                        .replace("{data_years}",        _data_years_str)   # P7-C
+                        .replace("{data_quality_label}",_data_quality_str) # P7-C
+                    )
 
                 # ── Semantic layer injection ──────────────────────────────────
                 # Prepend business-semantics context so the model has explicit
@@ -1316,11 +1357,13 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                     # All retries exhausted on 529 — use weighted fallback
                     log.warning("[%s] SYNTHESIS FALLBACK: Anthropic overloaded after 3 attempts", symbol)
                     errors.append(f"{symbol}: SYNTHESIS_FALLBACK (overloaded: {_last_exc})")
-                    synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
+                    synthesis_data = _fallback("model overloaded")
                 else:
                     raw_text = _synthesis_raw
                     try:
                         synthesis_data = _extract_json(raw_text)
+                        if _code_mode:
+                            synthesis_data = merge_narrative(_decision, synthesis_data)
                         log.info("[%s] Claude synthesis parsed OK", symbol)
                     except (ValueError, json.JSONDecodeError, KeyError) as parse_err:
                         log.warning(
@@ -1328,9 +1371,9 @@ async def synthesise_node(state: OrchestratorState) -> dict:
                             symbol, parse_err, raw_text,
                         )
                         errors.append(f"{symbol}: SYNTHESIS_FALLBACK (unparseable JSON: {parse_err})")
-                        synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
+                        synthesis_data = _fallback("unparseable reply")
             else:
-                synthesis_data = _fallback_synthesis(symbol, composite, agent_results)
+                synthesis_data = _fallback("no Anthropic client")
 
             # ── Data leakage audit ────────────────────────────────────────────
             # Pre-synthesis temporal integrity check: verifies technical OHLCV
@@ -1403,7 +1446,8 @@ async def synthesise_node(state: OrchestratorState) -> dict:
             # ── Consensus gate — prevent single-agent BUY promotions ────────────
             # Applied before earnings guard and validation so adjusted confidence
             # flows through both downstream steps correctly.
-            synthesis_data = _apply_consensus_gate(symbol, synthesis_data, agent_results)
+            if not _code_mode:      # decide() already applied the gate to the action
+                synthesis_data = _apply_consensus_gate(symbol, synthesis_data, agent_results)
 
             # ── Earnings guard — inject pre-earnings warning ──────────────────
             # If earnings are within 14 days, add context to synthesis prompt

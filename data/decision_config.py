@@ -75,3 +75,31 @@ def describe_weights() -> str:
         n = len(AGENT_NAMES)
         return f"Agent weights: equal ({n} × {1.0 / n:.4f})"
     return f"Agent weights: {AGENT_WEIGHTS_MODE}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Portfolio decision (WP-018, ADR-001): numbers come from code, narrative from the LLM
+# ─────────────────────────────────────────────────────────────────────────────
+# "code" → scheduler/decision.py computes action, confidence, entry, target, stop,
+#          upside, horizon and danger; the LLM writes only bull/bear case, synthesis,
+#          headline and an optional veto (BUY → HOLD only).          (default)
+# "llm"  → legacy: the LLM returns every number (prompts/orchestrator_synthesis_llm.txt).
+#          Rollback only.
+DECISION_SOURCE: str = "code"
+
+# Action rule on the equal-weight composite (the P1-D thresholds the fallback has
+# used since 2026-07; not yet validated — ADR-006 governs any change).
+BUY_MIN_COMPOSITE: float = 75.0
+HOLD_MIN_COMPOSITE: float = 58.0
+AVOID_MAX_COMPOSITE: float = 30.0     # at or below → AVOID; between this and HOLD_MIN → SELL
+
+# Composite bands for the calibrated confidence (agents/call_calibration.py). The
+# edges are the action thresholds above, so a band never straddles two actions.
+COMPOSITE_BANDS: list[tuple[float, float]] = [
+    (0.0, AVOID_MAX_COMPOSITE + 0.01), (AVOID_MAX_COMPOSITE + 0.01, HOLD_MIN_COMPOSITE),
+    (HOLD_MIN_COMPOSITE, BUY_MIN_COMPOSITE), (BUY_MIN_COMPOSITE, 101.0),
+]
+
+UPSIDE_CAP_PCT: float = 100.0         # same cap discovery applies (_UPSIDE_CAP)
+DECISION_HORIZON_DAYS: int = 90       # the only horizon with outcome data (CALL_HORIZON_DAYS)
+ENTRY_ATR_MULTIPLE: float = 1.0       # entry_low = price − 1×ATR14; stop = technical atr_stoploss (2×ATR)
