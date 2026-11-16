@@ -56,6 +56,9 @@ POSITION_LABELS = {
     "AVOID":   "Avoid (0%)",
 }
 
+# WP-019 tiers (size_from_probability). Labels start with the tier word so the
+# paper book's allocation lookup (substring match) maps them unambiguously.
+
 # Thresholds — kept as module constants so tests can reference them directly
 FULL_MOS_MIN        = 40.0   # %
 FULL_WARREN_MIN     = 70.0   # score /100
@@ -199,3 +202,71 @@ def _result(
         "mos_used":               round(float(mos_used), 2),
         "mos_source":             mos_source,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WP-019 (ADR-006): size from calibrated probability, conviction locked by default
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Why: calc_position_size's confidence input was the raw screening score, which
+# for every discovery call is ≥ 65 — so all 334 paper positions got the same
+# HALF size, and the size said nothing about the evidence. Now size follows the
+# calibrated band: BASE for every call until a band's 90 % Wilson lower bound on
+# the beat-Nifty rate clears data.decision_config.SIZING_UNLOCK_LOWER_BOUND with
+# ≥ SIZING_UNLOCK_MIN_N resolved calls; CONVICTION unlocks for that band only.
+# calc_position_size stays for the legacy DECISION_SOURCE='llm' path.
+
+PROB_LABELS = {
+    "BASE":       "Base position (2.5%)",
+    "CONVICTION": "Conviction position (5%)",
+    "AVOID":      "Avoid (0%)",
+}
+
+
+def size_from_probability(
+    hit_rate: Optional[float],
+    band_n: Optional[int],
+    lower_bound: Optional[float],
+    action: str = "BUY",
+) -> dict:
+    """
+    Position size from a calibrated band.
+
+    hit_rate    — band's calibrated P(beat Nifty at 90 d), percent
+    band_n      — resolved, independent calls in the band
+    lower_bound — band's 90 % Wilson lower bound on the beat-Nifty rate, percent
+    action      — SELL / AVOID / STRONG_SELL get 0 %
+
+    Returns the same keys as calc_position_size (suggested_position_pct,
+    position_label, position_tier, sizing_rationale) plus `conviction_locked`.
+    """
+    from data import decision_config as dc
+
+    act = (action or "").strip().upper()
+    n = int(band_n or 0)
+    lb = float(lower_bound or 0.0)
+    rate = float(hit_rate) if hit_rate is not None else None
+
+    def out(tier: str, pct: float, why: str, locked: bool) -> dict:
+        return {"suggested_position_pct": pct, "position_label": PROB_LABELS[tier],
+                "position_tier": tier, "sizing_rationale": why, "conviction_locked": locked,
+                "hit_rate": rate, "band_n": n, "lower_bound": lb}
+
+    if act in _AVOID_ACTIONS:
+        return out("AVOID", 0.0, f"Action is {act} — no position allocation.", True)
+
+    if n >= dc.SIZING_UNLOCK_MIN_N and lb > dc.SIZING_UNLOCK_LOWER_BOUND:
+        return out("CONVICTION", dc.CONVICTION_POSITION_PCT,
+                   f"Conviction unlocked: this band's 90% lower bound {lb:.1f}% > "
+                   f"{dc.SIZING_UNLOCK_LOWER_BOUND:.0f}% on n={n} resolved calls"
+                   f" (calibrated hit rate {rate:.1f}%)." if rate is not None else
+                   f"Conviction unlocked: lower bound {lb:.1f}% on n={n}.", False)
+
+    if n < dc.SIZING_UNLOCK_MIN_N:
+        why = (f"only {n} resolved calls in this band (need {dc.SIZING_UNLOCK_MIN_N})")
+    else:
+        why = (f"this band's 90% lower bound {lb:.1f}% does not exceed "
+               f"{dc.SIZING_UNLOCK_LOWER_BOUND:.0f}%")
+    return out("BASE", dc.BASE_POSITION_PCT,
+               f"Conviction sizing locked — {why}. Every call gets base size until a band "
+               f"proves an edge (ADR-006).", True)

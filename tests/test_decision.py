@@ -351,11 +351,12 @@ def test_earnings_and_data_density_flag_but_never_move_confidence(monkeypatch):
     assert "EARNINGS ALERT" in rec["summary"] and "Confidence capped" not in rec["summary"]
 
 
-def test_sizing_uses_the_composite_until_wp019(monkeypatch):
+def test_portfolio_sizing_is_base_with_conviction_locked(monkeypatch):
+    """WP-019: code decisions size from the composite band's calibration."""
     out, _ = _run_live(monkeypatch, body=NARRATIVE)
     (rec,) = out["recommendations"]
-    assert rec["confidence"] == 50.0 and rec["composite_score"] > 55
-    assert rec["position_label"] not in (None, "AVOID") and rec["suggested_position_pct"] > 0
+    assert rec["position_label"] == "Base position (2.5%)" and rec["suggested_position_pct"] == 2.5
+    assert rec["decision_meta"]["sizing"]["conviction_locked"] is True
 
 
 def test_headline_prefix_follows_the_final_action():

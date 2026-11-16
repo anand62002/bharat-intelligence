@@ -161,6 +161,8 @@ def discovery_env(monkeypatch):
     logged = {}
     monkeypatch.setattr(ds, "_log_daily_run", lambda **kw: logged.update(kw))
     monkeypatch.setattr(cl, "get_client", lambda: client)
+    from agents.call_calibration import Calibration
+    monkeypatch.setattr(ds, "_get_calibration", lambda: Calibration())
     nifty_calls = []
     monkeypatch.setattr(cl, "nifty_level", lambda: nifty_calls.append(1) or 24000.0)
     return ds, client, logged, nifty_calls

@@ -75,6 +75,28 @@ class Calibration:
                 return b["rate"]
         return round(self.overall, 1)
 
+    def band(self, score: Optional[float]) -> Optional[dict]:
+        if score is None:
+            return None
+        for b in self.bands:
+            if b["lo"] <= float(score) < b["hi"]:
+                return b
+        return None
+
+    def lower_bound(self, score: Optional[float], z: Optional[float] = None) -> float:
+        """
+        90 % Wilson lower bound (percent) on the band's RAW beat-Nifty rate
+        (WP-019). It uses the band's own hits/n, not the shrunk rate, because the
+        unlock rule asks whether THIS band has proved an edge. 0.0 with no data.
+        """
+        b = self.band(score) if self.has_history else None
+        if not b or not b.get("n"):
+            return 0.0
+        if z is None:
+            from data.decision_config import SIZING_Z
+            z = SIZING_Z
+        return round(wilson_lower(int(b.get("hits", 0)), int(b["n"]), z) * 100, 1)
+
     def band_n(self, signal_score: Optional[float]) -> int:
         if signal_score is None:
             return self.n
@@ -88,6 +110,17 @@ class Calibration:
             "as_of": self.as_of, "n": self.n, "overall": self.overall,
             "has_history": self.has_history, "bands": self.bands,
         }
+
+
+def wilson_lower(hits: int, n: int, z: float = 1.6449) -> float:
+    """Wilson score interval lower bound for hits/n (fraction). 0.0 when n == 0."""
+    if n <= 0:
+        return 0.0
+    p = hits / n
+    denom = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    margin = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
+    return max(0.0, (centre - margin) / denom)
 
 
 def signal_score_of(row: dict) -> Optional[float]:

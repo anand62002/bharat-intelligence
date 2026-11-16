@@ -307,6 +307,7 @@ class DiscoveryResult:
     eps_growth_pct:      Optional[float] = None
     valuation_gap_pct:   Optional[float] = None   # raw gap before _UPSIDE_CAP
     saved_rec_id:        Optional[str] = None   # Supabase recommendations.id
+    sizing:              Optional[dict] = None  # WP-019: size_from_probability() result
     discovered_at:       str = field(
         default_factory=lambda: datetime.utcnow().isoformat()
     )
@@ -1230,6 +1231,31 @@ def _agent_signals_with_reasons(agent_signals: dict) -> dict:
     }
 
 
+def _size_discovery(result: DiscoveryResult, action: str = "BUY") -> dict:
+    """
+    WP-019 (ADR-006): size from the CALIBRATED band, not the raw score.
+
+    The raw score is ≥ 65 for every discovery call, so all 334 paper positions
+    came out the same HALF size. BASE until the band's 90 % lower bound proves an
+    edge. Logs one line per call, on dry runs too. Returns {} (logged) on failure.
+    """
+    try:
+        from agents.position_sizer import size_from_probability
+        cal = _get_calibration()
+        sz = size_from_probability(
+            hit_rate    = cal.confidence(result.upside_confidence),
+            band_n      = cal.band_n(result.upside_confidence),
+            lower_bound = cal.lower_bound(result.upside_confidence),
+            action      = action,
+        )
+        log.info("  %s sizing: %s%s — %s", result.symbol, sz["position_tier"],
+                 " (conviction locked)" if sz["conviction_locked"] else "", sz["sizing_rationale"])
+        return sz
+    except Exception as exc:
+        log.warning("  %s position sizing failed: %s", result.symbol, exc)
+        return {}
+
+
 def _save_discovery(result: DiscoveryResult) -> Optional[str]:
     """
     Save or update a discovery recommendation.
@@ -1253,37 +1279,16 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
         tier   = result.opportunity_tier
         action = "BUY"
 
-        # ── P3-A: Position sizing ─────────────────────────────────────────────
-        pos_pct   = None
-        pos_label = None
-        try:
-            from agents.position_sizer import calc_position_size
-
-            # For CRITICAL tier: run warren_bot (24h Supabase cache — fast if recently analysed)
-            # to get proper DCF MOS + quality score so FULL allocation is reachable.
-            _warren_score: Optional[float] = None
-            _mos_pct:      Optional[float] = None
-            if tier == "CRITICAL":
-                try:
-                    from agents.warren_bot import analyse as warren_analyse
-                    _wb = warren_analyse(result.symbol)
-                    if _wb and not _wb.get("error") and _wb.get("signal") != "AVOID":
-                        _warren_score = _wb.get("score")
-                        _mos_pct      = _wb.get("margin_of_safety_pct")
-                except Exception as _we:
-                    log.warning("_save_discovery(%s): warren_bot sizing skipped: %s", result.symbol, _we)
-
-            _sizing   = calc_position_size(
-                upside_pct   = result.upside_pct,
-                confidence   = result.upside_confidence,
-                action       = action,
-                mos_pct      = _mos_pct,
-                warren_score = _warren_score,
-            )
-            pos_pct   = _sizing["suggested_position_pct"]
-            pos_label = _sizing["position_label"]
-        except Exception as pe:
-            log.warning("_save_discovery(%s): position sizing failed: %s", result.symbol, pe)
+        # ── Position sizing (WP-019, ADR-006) — decided in run_discovery ──────
+        _sizing = result.sizing or _size_discovery(result, action)
+        pos_pct   = _sizing.get("suggested_position_pct")
+        pos_label = _sizing.get("position_label")
+        sizing_meta: dict = {
+            "sizing_tier":        _sizing.get("position_tier"),
+            "sizing_rationale":   _sizing.get("sizing_rationale"),
+            "conviction_locked":  _sizing.get("conviction_locked"),
+            "sizing_lower_bound": _sizing.get("lower_bound"),
+        } if _sizing else {}
 
         client   = create_client(url, key)
         today    = date.today().isoformat()
@@ -1333,6 +1338,7 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
             updated_meta = {
                 **old_meta,
                 **_calibration_meta(result, cal),
+                **sizing_meta,     # WP-019: rationale only; the call's size is not rewritten
                 "call_status":      "ACTIVE",
                 "call_date":        old_meta.get("call_date") or discovery_dates[0],
                 "call_price":       old_meta.get("call_price") or old_meta.get("price"),
@@ -1413,6 +1419,7 @@ def _save_discovery(result: DiscoveryResult) -> Optional[str]:
                 "upside_basis":      result.upside_basis,
                 "upside_horizon":    result.upside_horizon,
                 **_calibration_meta(result, cal),
+                **sizing_meta,     # WP-019
                 "call_date":         today,
                 "call_price":        result.current_price,
                 "call_status":       "ACTIVE",
@@ -1856,6 +1863,9 @@ def run_discovery(
                         "  %s CRITICAL hallucination check failed (%s) — keeping CRITICAL",
                         symbol, _ve,
                     )
+
+            # ── Size (WP-019) — before persisting, so dry runs show it too ────
+            dr.sizing = _size_discovery(dr)
 
             # ── Persist ───────────────────────────────────────────────────────
             deep_rows[symbol]["tier"] = tier

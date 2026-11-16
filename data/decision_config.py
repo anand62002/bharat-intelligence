@@ -114,3 +114,17 @@ EQUAL_WEIGHTS_SINCE: str = "2026-11-15"
 UPSIDE_CAP_PCT: float = 100.0         # same cap discovery applies (_UPSIDE_CAP)
 DECISION_HORIZON_DAYS: int = 90       # the only horizon with outcome data (CALL_HORIZON_DAYS)
 ENTRY_ATR_MULTIPLE: float = 1.0       # entry_low = price − 1×ATR14; stop = technical atr_stoploss (2×ATR)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Position sizing (WP-019, ADR-006): size from calibrated probability, locked by default
+# ─────────────────────────────────────────────────────────────────────────────
+# Every call gets BASE size until its band PROVES an edge: the band's 90 % Wilson
+# lower bound on the beat-Nifty rate must exceed SIZING_UNLOCK_LOWER_BOUND with at
+# least SIZING_UNLOCK_MIN_N resolved, independent calls. Only then does CONVICTION
+# size unlock — and only for that band. Same discipline as the long-horizon book.
+SIZING_UNLOCK_LOWER_BOUND: float = 55.0   # percent
+SIZING_UNLOCK_MIN_N: int = 30
+SIZING_Z: float = 1.6449                  # two-sided 90 %
+BASE_POSITION_PCT: float = 2.5            # % of portfolio (what every paper position has been)
+CONVICTION_POSITION_PCT: float = 5.0

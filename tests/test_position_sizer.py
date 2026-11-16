@@ -303,3 +303,97 @@ class TestRationale:
                 result = _buy(upside=-5, confidence=30)
             if result["position_tier"] == tier:
                 assert result["position_label"] == POSITION_LABELS[tier]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WP-019 (ADR-006): size from calibrated probability, conviction locked by default
+# ─────────────────────────────────────────────────────────────────────────────
+
+from agents.call_calibration import Calibration, SIGNAL_BANDS, wilson_lower  # noqa: E402
+from agents.position_sizer import size_from_probability  # noqa: E402
+from data import decision_config as _dc  # noqa: E402
+
+
+def _cal(band_counts):
+    """Calibration from raw (hits, n) per SIGNAL_BAND."""
+    bands = [{"lo": lo, "hi": hi, "n": n, "hits": h, "rate": round(100 * h / n, 1) if n else 50.0}
+             for (lo, hi), (h, n) in zip(SIGNAL_BANDS, band_counts)]
+    return Calibration(bands=bands, overall=46.7, n=sum(n for _, n in band_counts), has_history=True)
+
+
+def test_todays_calibration_yields_base_for_every_band():
+    """2026-11 discovery bands: 41.6 / 53.3 / 43.9 / 37.3 % on n = 13–38."""
+    cal = _cal([(16, 38), (16, 30), (6, 13), (7, 19)])
+    for score in (60, 75, 85, 95):
+        sz = size_from_probability(cal.confidence(score), cal.band_n(score), cal.lower_bound(score))
+        assert sz["position_tier"] == "BASE" and sz["conviction_locked"] is True
+        assert sz["suggested_position_pct"] == _dc.BASE_POSITION_PCT
+        assert "locked" in sz["sizing_rationale"]
+
+
+def test_synthetic_band_at_70pct_n60_unlocks():
+    cal = _cal([(16, 38), (42, 60), (6, 13), (7, 19)])            # 70-80 band: 70 % on 60
+    assert cal.lower_bound(75) > _dc.SIZING_UNLOCK_LOWER_BOUND
+    sz = size_from_probability(cal.confidence(75), cal.band_n(75), cal.lower_bound(75))
+    assert sz["position_tier"] == "CONVICTION" and sz["conviction_locked"] is False
+    assert sz["suggested_position_pct"] == _dc.CONVICTION_POSITION_PCT
+    # other bands stay locked
+    assert size_from_probability(cal.confidence(60), cal.band_n(60),
+                                 cal.lower_bound(60))["position_tier"] == "BASE"
+
+
+def test_high_rate_on_too_few_calls_stays_locked():
+    sz = size_from_probability(90.0, 12, 70.0)
+    assert sz["position_tier"] == "BASE" and "only 12 resolved" in sz["sizing_rationale"]
+
+
+def test_sell_and_avoid_get_zero():
+    for act in ("SELL", "AVOID"):
+        assert size_from_probability(80.0, 100, 70.0, action=act)["suggested_position_pct"] == 0.0
+
+
+def test_no_history_has_zero_lower_bound():
+    assert Calibration().lower_bound(80) == 0.0
+
+
+def test_wilson_lower_bound_values():
+    assert round(wilson_lower(42, 60) * 100, 1) == 59.6
+    assert wilson_lower(0, 0) == 0.0
+    assert wilson_lower(30, 30) < 1.0
+
+
+def test_paper_book_allocates_by_new_labels():
+    from agents.paper_portfolio import _get_allocation_inr
+    from agents.position_sizer import PROB_LABELS
+    assert _get_allocation_inr(PROB_LABELS["BASE"]) == 5_000
+    assert _get_allocation_inr(PROB_LABELS["CONVICTION"]) == 10_000
+    assert _get_allocation_inr(PROB_LABELS["AVOID"]) == 0
+    assert _get_allocation_inr("Half position (2.5%)") == 5_000      # legacy labels unchanged
+
+
+def test_discovery_dry_run_logs_base_conviction_locked_for_every_promoted(monkeypatch, caplog):
+    """Acceptance: --no-save logs 'sizing: BASE (conviction locked)' for every promoted symbol."""
+    import logging
+    from agents import discovery_screener as ds
+    monkeypatch.setattr(ds, "fetch_all_nse_equity_symbols", lambda: ["AAA.NS", "BBB.NS"])
+    monkeypatch.setattr(ds, "_load_portfolio_symbols", lambda: set())
+    monkeypatch.setattr(ds, "get_nse_fii_dii", lambda: {})
+    monkeypatch.setattr("agents.macro.analyse", lambda: {"signal": "NEUTRAL", "score": 50})
+    monkeypatch.setattr(ds, "prescreen", lambda s, fii_data=None, features=None: (True, ["a"] * 4))
+    monkeypatch.setattr(ds, "_run_all_agents", lambda s, macro_result=None: {
+        a: {"signal": "BUY", "score": 70, "upside_pct": 30.0, "confidence": 0.7, "data_quality": "OK"}
+        for a in ("technical", "fundamental", "sentiment", "institutional", "macro",
+                  "historical_rag", "commodities")})
+    monkeypatch.setattr(ds, "_best_upside", lambda ar: (30.0, 70.0))
+    monkeypatch.setattr(ds, "_current_price", lambda s: 100.0)
+    monkeypatch.setattr(ds, "_upside_basis", lambda *a, **k: "b")
+    monkeypatch.setattr("data.impact_cost.estimate_impact_cost", lambda *a, **k: {})
+    monkeypatch.setattr("data.forward_estimates.get_forward_estimates", lambda s: {})
+    monkeypatch.setattr(ds, "_get_calibration", lambda: _cal([(16, 38), (16, 30), (6, 13), (7, 19)]))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with caplog.at_level(logging.INFO):
+        out = ds.run_discovery(max_candidates=5, max_prescreen=2, save_to_db=False, inter_delay=0)
+    assert len(out) == 2
+    for r in out:
+        assert r.sizing["position_tier"] == "BASE"
+        assert any(f"{r.symbol} sizing: BASE (conviction locked)" in m for m in caplog.messages)

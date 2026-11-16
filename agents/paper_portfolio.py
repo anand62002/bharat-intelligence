@@ -65,6 +65,11 @@ PRICE_WINDOW           = 4             # ±days for historical price lookup
 
 # Map position_label substring → INR allocation
 _TIER_ALLOCATIONS: dict[str, float] = {
+    # WP-019 calibrated tiers (checked first): BASE is the ₹5k every paper
+    # position has had; CONVICTION unlocks only for a band that proves an edge.
+    "conviction": 10_000,
+    "base":        5_000,
+    # legacy calc_position_size tiers
     "full":    10_000,
     "half":     5_000,
     "quarter":  2_500,
