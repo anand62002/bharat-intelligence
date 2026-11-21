@@ -1884,7 +1884,6 @@ async def get_system_health(
       - Last daily run: date and status from daily_runs table
       - FII data freshness: most recent row in institutional_flows
       - Screener.in: whether Railway IP was recently blocked (inferred from daily_run errors)
-      - Breeze Connect: whether session token is configured + not expired
       - Anthropic API: whether ANTHROPIC_API_KEY is set
       - OpenAI (GPT validation judge): whether OPENAI_API_KEY is set
       - Trendlyne F&O: whether session cookies are configured
@@ -2050,27 +2049,6 @@ async def get_system_health(
             checks.append(_warn("FII/DII Data", "No institutional_flows rows", "institutional.py needs to run at least once to populate the table"))
     except Exception as exc:
         checks.append(_warn("FII/DII Data", f"Could not read institutional_flows: {exc}", "Verify table exists in Supabase"))
-
-    # ── Breeze Connect (marked for removal in P4 — superseded by Trendlyne F&O) ──
-    # Breeze requires a manual daily session token refresh which is high-maintenance.
-    # Trendlyne F&O Excel provides the same option chain data automatically.
-    # Breeze will be removed entirely in P4-D.
-    breeze_key     = os.getenv("BREEZE_API_KEY", "")
-    breeze_secret  = os.getenv("BREEZE_API_SECRET", "")
-    breeze_token   = os.getenv("BREEZE_SESSION_TOKEN", "")
-    if breeze_key and breeze_secret and breeze_token:
-        checks.append(_info(
-            "Breeze Connect",
-            "Configured but marked for removal (P4-D) — Trendlyne F&O is the primary options source",
-            "No action needed. Breeze will be removed in Phase 4 (P4-D) to simplify the stack."
-        ))
-    else:
-        # Not configured — this is fine, Trendlyne F&O is primary
-        checks.append(_info(
-            "Breeze Connect",
-            "Not configured — this is expected. Trendlyne F&O Excel is the primary options source.",
-            "No action needed. Breeze is deprecated (P4-D) and will be removed in Phase 4."
-        ))
 
     # ── Anthropic API (ARIA + Claude judge) ──────────────────────────────────
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")

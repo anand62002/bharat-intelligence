@@ -133,14 +133,6 @@ def test_options_snapshot_one_symbol_failing_is_warning(ledger):
     assert _row(ledger)["status"] == "WARNING"
 
 
-def test_breeze_refresh_failure_is_warning(ledger):
-    with patch("data.breeze_auth.refresh_session",
-               return_value={"success": False, "mode": "manual", "message": "token expired"}):
-        worker.job_breeze_token_refresh()
-    row = _row(ledger)
-    assert row["status"] == "WARNING" and row["symbols_processed"] == 0
-
-
 def test_job_runs_without_supabase():
     with patch.object(run_log, "_supabase_client", return_value=None), \
          patch("agents.regime_detector.detect_regime", return_value={"regime": "BULL", "confidence": 70}):

@@ -1,6 +1,6 @@
 # Bharat Intelligence — Investment-Grade Execution Plan
 ### Target: 6.0 → 8.8 / 10 System Robustness
-*Last updated: 2026-11-15*
+*Last updated: 2026-11-21 — superseded as a tracker by `docs/architecture/STATUS.md`*
 
 > **Standing rules (apply after every build):**
 > 1. Update `CLAUDE.md` — new files, tables, endpoints, env vars, resolved issues
@@ -59,7 +59,7 @@
 | P4-A | Warren bot commentary grounding fix | Phase 4 | ✅ **DONE** | 2026-05-16 |
 | P4-B | Symbol resolution cache persistence (DB-backed) | Phase 4 | ✅ **DONE** | (already built) |
 | P4-C | Governance numerical grounding check | Phase 4 | ✅ **DONE** | 2026-05-16 |
-| P4-D | Replace Breeze with Angel One SmartAPI — live options chain (lowest priority) | Phase 4 | ⬜ TODO | — |
+| P4-D | Replace Breeze with Angel One SmartAPI — live options chain (lowest priority) | Phase 4 | ⏸ **DEFERRED** (ADR-008: no paid/new data feed until the candidate ledger shows what a feed would change). Breeze itself removed 2026-11-21 (WP-024) | — |
 | BF-8 | Discovery save silent failure — missing required DB columns + discoveries.append gate | Bug Fix | ✅ **DONE** | 2026-05-16 |
 | BF-9 | Health panel daily_runs.status + agents_run column errors | Bug Fix | ✅ **DONE** | 2026-05-16 |
 | BF-10 | Governance WebSocket broadcaster pushing all 107 raw alerts (bypassing dedup) | Bug Fix | ✅ **DONE** | 2026-05-16 |
@@ -93,7 +93,7 @@
 | P7-H | **Fundamentals Cache — Phase 1: intra-run memoisation** — `fundamental`, `warren_bot`, `mgmt_quality`, `governance_screener` and `insider_signal` (called twice: once by sentiment, once by institutional) each independently call `get_screener_data`/`get_screener_history` for the *same* symbol inside a single run — roughly 9 remote fetches per stock where 2 would do. Fix: a request/run-scoped memo cache in `data/fetchers.py` keyed by (symbol, fn), cleared at run start. Zero staleness risk — it returns exactly the data the same run would otherwise have refetched seconds later. Expected: ~640 → ~150 remote fetches/day, and a matching drop in the 403/rate-limit pressure that pushes the fundamental agent onto degraded yfinance data. No migration, no schema change. | Phase 7 | ✅ DONE 2026-08-04 — `data/run_cache.py`: per-key-locked memoisation with double-checked reads (concurrent duplicates collapse to one fetch, which matters because fundamental/warren_bot/mgmt_quality run in the same `asyncio.gather`); applied to `get_screener_data` + `get_screener_history`; scoped per run in `run_pipeline` and `run_discovery`; saving surfaced on `/api/system/health`. Measured 9 → 2 fetches per symbol (77.8% avoided). 17 tests. | — |
 | P7-I | **Fundamentals Cache — Phase 2: persistent cache with decay** — Fundamentals change quarterly; we refetch them daily. Add a `fundamentals_cache` table (symbol, payload JSONB, fetched_at, source, ttl_class) with TTL driven by what the field actually is rather than one flat number: snapshot ratios/PE ~7d, 10-yr annual history ~30d, promoter holding ~30d (quarterly filings). Force a refresh when a symbol's `earnings_calendar` date passes — the one event that genuinely invalidates fundamentals. On a source outage, serve stale-but-flagged data (`data_quality="CACHED_STALE"`, age surfaced in the agent rationale) instead of silently degrading to yfinance, which *improves* quality on blocked days. Precondition for P7-G: Trendlyne MCP allows 2,000 calls/month vs our current ~19,000 — the cache is what makes the MCP option viable at all. | Phase 7 | ✅ DONE 2026-09-09 — `data/fundamentals_cache.py` + `db/migrations/create_fundamentals_cache.sql`. Per-kind TTL (snapshot 7d, history 30d), early invalidation when `earnings_calendar` shows results since the fetch, and a quality rank (screener 3 / trendlyne 2 / yfinance 1) so a degraded fetch can never overwrite a good cached row **and** an outage serves last-known-good real fundamentals instead of thin yfinance data. Layered beneath the P7-H memo. Never raises. 25 tests. **Migration must be run in Supabase.** | — |
 
-**Progress: 78 / 90 items complete (87%) — Session 2026-08-04: P7-C/P7-D/P7-F ✅ shipped; P7-H + P7-I (fundamentals cache, Phase 1 → Phase 2) added (+2 items)**
+**Progress is no longer counted here.** "78 / 90 items (87%)" counted features shipped, not outcomes achieved (Fable review, REVIEW.md §4). Since 2026-11-12 the plan is `docs/architecture/workplan.yaml` and progress is `docs/architecture/STATUS.md`; outcomes are measured in the evidence pack (`scripts/build_architect_pack.py`). This file is kept as history.
 
 > **Next up — fundamentals caching, in this order:** P7-H (intra-run memoisation) then P7-I (persistent cache with decay).
 > Motivation, from call-site analysis: ~640 remote screener.in/Trendlyne fetches per day (~19,000/month) for data that changes quarterly.
@@ -877,7 +877,9 @@ Add both to Railway `worker` + `web` services.
 
 ---
 
-### ⬜ P4-D: Replace Breeze Connect with Angel One SmartAPI (Live Options)
+### ⏸ P4-D: Replace Breeze Connect with Angel One SmartAPI (Live Options) — DEFERRED per ADR-008
+
+> Breeze was removed on 2026-11-21 (WP-024). Angel One is deferred until ledger evidence shows a live options feed would change decisions (ADR-008).
 **Priority:** Lowest — Trendlyne F&O already works well as primary options source.  
 **What changes:**
 - Remove `data/breeze_auth.py` (deprecated per CLAUDE.md P4-D note)
@@ -997,7 +999,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 | **P4-A** | Warren bot commentary grounding | Code | None | S | ✅ Done |
 | **P4-B** | Symbol resolution cache persistence | Code | None | S | ✅ Done (already built) |
 | **P4-C** | Governance numerical grounding check | Code | None | M | ✅ Done |
-| **P4-D** | Replace Breeze with Angel One SmartAPI (live options) | Code | ₹0 (free with demat) | M | ⬜ TODO (lowest priority) |
+| **P4-D** | Replace Breeze with Angel One SmartAPI (live options) | Code | ₹0 (free with demat) | M | ⏸ DEFERRED (ADR-008) |
 | **P5-A** | Enhanced outcome tracker + attribution | Code | None | L | ✅ Done |
 | **P5-B** | Paper portfolio simulation mode | Code | None | L | ✅ Done |
 | **P5-C** | Rec outcome seeder (backfill open recs into recommendation_outcomes) | Code | None | S | ✅ Done |
@@ -1036,7 +1038,7 @@ Upstox:    Free but needs daily token refresh job + our own PCR/max pain computa
 
 | Service | Monthly Cost | Required For |
 |---|---|---|
-| Quantsapp Pro (options) | ₹2,499 (~$30) | P1-B — if no Upstox demat |
+| Quantsapp Pro (options) | ₹2,499 (~$30) | ⏸ DEFERRED (ADR-008) — no paid data feed yet |
 | Upstox API (options) | ₹0 | P1-B — if opening free demat |
 | Trendlyne StratQ (annual) | ₹492/mo (~$6) | P3-C — DVM scores, fundamentals, filings, insider, analyst estimates |
 | ~~Trendlyne GuruQ (monthly)~~ | ~~₹310/mo~~ | *(not recommended — limited downloads, no historical series)* |

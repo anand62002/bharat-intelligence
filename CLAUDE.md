@@ -86,7 +86,8 @@ Stock analysis/
 │   ├── mgmt_quality.py         # Management quality scoring (5 dims, non-blocking, runs alongside warren_bot)
 │   ├── valuation_scenarios.py  # Bull/base/bear DCF scenarios + sensitivity tornado
 │   ├── regime_detector.py      # Market regime classification (5 indicators) → market_regime table
-│   │                           # Runs 05:45 IST, before the 06:00 orchestrator; feeds regime-specific weight multipliers
+│   │                           # Runs 05:45 IST, before the 06:00 orchestrator. Regime weight multipliers are OFF
+│   │                           #   (data/decision_config.py REGIME_MULTIPLIERS_ENABLED=False, ADR-003); logged only
 │   ├── earnings_guard.py       # Pre-earnings risk guard — blocks new entries near binary earnings events
 │   ├── options_sentiment.py    # PCR/max-pain/IV-skew/VIX → directional options sentiment signal
 │   ├── portfolio_risk.py       # Portfolio-level correlation matrix, sector concentration, VaR (95%/99%)
@@ -187,7 +188,10 @@ Stock analysis/
 │   │                           # (discovery is NOT in this graph — see discovery_screener.py note)
 │   ├── portfolio_monitor.py    # Monitors open holdings, fires portfolio_alerts
 │   ├── sector_pe_tracker.py    # Daily sector_pe_snapshots writes
-│   ├── synthesis_validator.py  # P1-C: 3-judge (GPT gpt-6-luna + Claude Sonnet + Claude Opus) agreement gate;
+│   ├── synthesis_validator.py  # P1-C: 3-judge (GPT gpt-6-luna + Claude Sonnet + Claude Opus) GATE SCORE =
+│   │                           #   mean rubric quality × agreement — NOT a kappa statistic (WP-015; the code's
+│   │                           #   "aggregate_kappa" key = gate_score). Judges grade the NARRATIVE: since WP-018
+│   │                           #   a SUPPRESSED narrative is replaced by a template and the code decision still publishes
 │   │                           # GPT judge falls back to Haiku on ANY OpenAI failure
 │   │                           # before a synthesised recommendation is published
 │   └── performance_tracker.py  # Writes agent_performance rows daily
@@ -205,7 +209,6 @@ Stock analysis/
 │   #    08:00 — earnings calendar refresh
 │   #    08:15 (1st of month) — RAG corpus auto-refresh (db/auto_seed_rag.py)
 │   #    08:30 — GIFT Nifty pre-market signal (P6-D-7)
-│   #    08:35 — Breeze token refresh (P1-B, DEPRECATED)
 │   #    09:15, 11:30, 13:30, 15:15 — portfolio monitor
 │   #    10:30 — discovery screener (moved out of orchestrator pipeline — live intraday prices)
 │   #    15:45 — options market snapshot
@@ -306,11 +309,7 @@ Stock analysis/
 │   │                           #   by Railway CA bundle — safe for read-only public market data)
 │   │                           # Used by: fetchers.py (screener.in) + trendlyne_analyst_fetcher.py
 │   │                           # proxy_configured() → bool; get_proxy_dict() → dict|None
-│   └── breeze_auth.py          # ICICI Breeze Connect — DEPRECATED (P4-D: scheduled for removal)
-│   #                             Superseded by trendlyne_fno_fetcher (current primary).
-│   #                             P4-D will replace with Angel One SmartAPI as new live tier-1 source.
-│   #                             Angel One credentials needed: ANGEL_ONE_API_KEY, ANGEL_ONE_CLIENT_ID,
-│   #                             ANGEL_ONE_PASSWORD, ANGEL_ONE_TOTP_SECRET (see EXECUTION_PLAN P4-D).
+│   (breeze_auth.py removed 2026-11-21, WP-024 / ADR-008 — Trendlyne F&O is the options source)
 │
 ├── api/
 │   ├── __init__.py
@@ -390,7 +389,7 @@ Stock analysis/
 >
 > `create_long_horizon.sql` (P8-E) ✅ applied 2026-11-11.
 >
-> ⏳ **Pending (2026-11-12):** `add_danger_drop_pct_column.sql` (portfolio recs save without it until applied) and `add_daily_runs_pipeline.sql` (run log falls back to base columns until applied).
+> `add_danger_drop_pct_column.sql` and `add_daily_runs_pipeline.sql` ✅ applied (verified 2026-11-15, WP-002). `create_candidates.sql` ✅ applied 2026-11-16 (WP-012). `scripts/check_schema.py` (run at worker start-up and in the Sunday audit) compares production with `db/contract.py`.
 >
 > `create_fundamentals_cache.sql` (P7-I) ✅ applied 2026-09-09 (RLS disabled on the table — it holds public market data only). Verified live: a second run with the in-process memo cleared served 1/1 from the persistent cache with zero live fetches.
 >
@@ -591,15 +590,10 @@ Uses `ANTHROPIC_API_KEY` env var server-side (never exposed to browser).
 | `SUPABASE_SERVICE_KEY` | service_role key (bypasses RLS) |
 | `DASHBOARD_API_KEY` | Secret shared with Vercel frontend |
 | `VERCEL_DASHBOARD_URL` | Exact Vercel URL for CORS (e.g. `https://bharat-intelligence-two.vercel.app`) |
-| `BREEZE_API_KEY` | ICICI Breeze Connect API key (from ICICI Direct API portal) — P1-B |
-| `BREEZE_API_SECRET` | ICICI Breeze Connect API secret — P1-B |
-| `BREEZE_SESSION_TOKEN` | Daily session token (get from login redirect URL, rotate every 24h) — P1-B |
-| `ICICI_USER_ID` | *(Optional)* ICICI Direct login ID — enables auto-token refresh at 08:30 IST |
-| `ICICI_PASSWORD` | *(Optional)* ICICI Direct password — enables auto-token refresh |
-| `BREEZE_TOTP_SECRET` | *(Optional)* Base32 TOTP secret — enables fully automated daily refresh (DEPRECATED, see P4-D) |
+| *(Breeze / ICICI)* | **Removed 2026-11-21 (WP-024).** `BREEZE_API_KEY`, `BREEZE_API_SECRET`, `BREEZE_SESSION_TOKEN`, `BREEZE_TOTP_SECRET`, `ICICI_USER_ID`, `ICICI_PASSWORD` are no longer read by any code and can be deleted from Railway. |
 | *(model IDs)* | **Not env vars — set in `data/model_config.py`.** No model env vars are set on Railway, so the code defaults are what production runs; change models by editing that file. The optional overrides it reads (`CLAUDE_MODEL`, `JUDGE_MODEL_SONNET`, `JUDGE_MODEL_OPUS`, `JUDGE_MODEL_GPT`, `RESEARCH_AGENT_MODEL`, `CLAUDE_HAIKU_MODEL`) are for local experiments only — leave them unset in production. Current: synthesis `claude-opus-5-5`, judges `gpt-6-luna` / `claude-sonnet-4-6` / `claude-opus-5-5`, research `claude-sonnet-4-6`, Haiku tier + ARIA `claude-haiku-5-5`. |
-| `CLAUDE_MAX_TOKENS` | *(Optional)* Synthesis ceiling. Default 4096 (was 2048 — adaptive-thinking tokens share this budget, and truncation drops the whole symbol). |
-| `JUDGE_MAX_TOKENS` | *(Optional)* Per-judge ceiling. Default 500 (was 150, which truncated ~every Opus reply and silently dropped that judge from the kappa calculation). |
+| `CLAUDE_MAX_TOKENS` | *(Optional)* Synthesis ceiling. Default **16000** (`scheduler/orchestrator.py`) — adaptive-thinking tokens share this budget. |
+| `JUDGE_MAX_TOKENS` | *(Optional)* Per-judge ceiling. Default **2000** (`scheduler/synthesis_validator.py`) — 500 truncated ~every Opus reply and dropped that judge's vote. |
 | `TRENDLYNE_SESSION` | `.trendlyne` cookie value — required for F&O Excel download + analyst targets scraper |
 | `TRENDLYNE_CSRF` | `csrftoken` cookie value — required alongside TRENDLYNE_SESSION |
 | `TRENDLYNE_USER` | *(Optional)* Trendlyne login email — enables auto-cookie-refresh when session expires |
@@ -751,7 +745,12 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 - `get_screener_history(symbol)` → 10-yr annual: revenue, OPM%, PAT, EPS, depreciation, capex, ROCE, ROE, dividend payout, promoter holding
 - `get_ohlcv(symbol)` → current price (yfinance)
 
-### Output keys (28 total)
+### Output keys
+
+> The authoritative list of keys other modules READ is `agents/contracts.py` (WP-016), checked against a
+> real recorded output in `tests/fixtures/agent_outputs/warren_bot.json`. The list below is historical and
+> partly wrong (e.g. the code emits `intrinsic_value_per_share`, not `intrinsic_value`).
+
 `symbol`, `signal`, `score`, `moat_score`, `roce_score`, `mgmt_score`, `earnings_score`, `dcf_score`,
 `moat_type`, `roce_avg`, `eps_cagr_5yr`, `eps_cagr_10yr`, `revenue_cagr`,
 `intrinsic_value`, `current_price`, `margin_of_safety_pct`, `owner_earnings`,
@@ -763,12 +762,44 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 
 ---
 
+## Architecture review (WP-001 … WP-024, Nov 2026)
+
+The Fable architecture review (`docs/architecture/REVIEW.md`, `TARGET_ARCHITECTURE.md`, ADR-001…008) was
+executed as work packages. **Progress lives in `docs/architecture/STATUS.md`; the plan in
+`docs/architecture/workplan.yaml`.** What a new session must know:
+
+- **Numbers from code, narrative from the LLM (ADR-001, WP-018).** `scheduler/decision.py::decide()` sets
+  action (composite rule BUY ≥ 65 / HOLD ≥ 45 / AVOID ≤ 30 — provisional, re-centred for equal weights —
+  then the consensus gate), confidence (calibrated beat-Nifty rate of the composite band; 50 % "no track
+  record" until 30 resolve; SELL/AVOID = P(underperform)), entry/stop (ATR), target (valuation gap ≤ 100 %).
+  The LLM returns only bull/bear case, synthesis, headline, market constraints and a BUY→HOLD veto. Any
+  synthesis or judge failure publishes the decision with a templated narrative. Rollback:
+  `DECISION_SOURCE = "llm"` in `data/decision_config.py` (single home of weights, thresholds, sizing rules).
+- **Equal agent weights (ADR-003, WP-003);** regime multipliers off. `agent_performance` is reporting only.
+- **Holdings review (ADR-007, WP-021).** The 06:00 pipeline saves one `metadata.kind = "HOLDING_REVIEW"` row
+  per open holding (exit_signal + thesis INTACT/WEAKENED/BROKEN; stop/target read from
+  `portfolio_holdings`), never BUY, superseding yesterday's. Excluded from `/api/recommendations` and the
+  paper book; shown on the Portfolio tab (`reviewAction`, `thesisStatus`).
+- **Sizing (WP-019):** BASE for every call until a band's 90 % Wilson lower bound beats 55 % with n ≥ 30.
+- **Candidate ledger (ADR-002, WP-012…014):** `candidates` table, one row per screened symbol per day
+  (`data/candidate_ledger.py`), labelled with 30/90-day alpha at 18:30. `agents/shadow_model.py` +
+  `scripts/evaluate_shadow_model.py` evaluate a model walk-forward (refuses below 300 rows / 8 weeks).
+  Gate scores land on portfolio rows (WP-015).
+- **Fail loud (ADR-005):** every worker job writes a `daily_runs` row (`data/run_log.py::tracked_job`,
+  output made JSON-safe); `scheduler/invariants.py` + the 19:00 watchdog raise `JOB_INVARIANT` alerts;
+  `db/contract.py` + `scripts/check_schema.py` catch schema drift; `tests/test_exception_policy.py` only
+  lets the silent-handler allowlist shrink; `agents/contracts.py` + recorded fixtures catch consumers
+  reading keys an agent doesn't emit; CI runs with dummy keys and a guard against live clients.
+- **Evidence pack:** `python scripts/build_architect_pack.py` → `docs/architect_pack/CURRENT_STATE.md`
+  (runs by pipeline, job-ledger coverage, candidate ledger, every rate with n + 90 % interval).
+
 ## git history (recent)
 
 | Commit | Change |
 |---|---|
+| (2026-11-15 → 11-21 — architecture work packages) | WP-001…WP-024 executed (see the section above and `docs/architecture/STATUS.md`). Bugs found on the way and fixed: synthesis prompt said "Current price: ₹N/A" for every holding and the P7-C <5-year cap never fired (keys no agent emitted — WP-016); warren_bot failures looked valid; save_recs never saved ATR/data-years metadata; target-updater alerts / data-quality alert / sentiment flag wrote non-existent columns (WP-007); tests wrote to the production DB and called live judges (WP-008); `--no-save` discovery dry runs overwrote that day's `discovery_runs`; `portfolio_risk` never logged a run (NaN in its output); fake GIFT Nifty data (now NSE IX). Breeze removed (WP-024). |
 | (2026-11-15 — dashboard redesign) | **Editorial Research redesign of the whole dashboard** (`ux-revamp`, merged). Direction picked from a Claude Design canvas with three working prototypes. New `C` palette + serif/sans/mono type + line icons (no emoji) + shared primitives (`EdTag`, `edBtn`, `Icon`, `useNarrow`, `AgentSignals`, `LevelsBar`…). **Discovery, Portfolio Recs, Portfolio, Market rebuilt** as list+detail / table+expand layouts with filters, search, sort, loading/empty/no-match states; Performance, Gov Research, Governance restyled. **Phone shell** (<760px): bottom tab bar + More sheet, ticker row, full-screen ARIA — found by measuring at 375/320px that the ARIA button sat off-screen, the ticker was 0px wide and tabs were 863px wide. Bugs fixed on the way: Recs "My holdings" never matched (symbol suffix + brand aliases); Portfolio's "Add holding" only opened ARIA (now a validated form that averages into existing positions); below-stop holdings read "+28.5% away"; alert prices printed raw floats; GIFT NIFTY "flat" shown as a red ▼; weekend Market tab had no brief (now falls back to the latest); `/api/market/digest` 500 on any parameter (`Optional` not imported in `api/main.py`). Unused `RiskGauge`/`ConfidenceGauge`/`CriticalDangerBanner`/`MarketDigestPanel` removed; `CI=true` build now clean. |
-| (2026-11-12 — portfolio pipeline outage) | **The 06:00 portfolio pipeline had published nothing since ≥2026-09-04.** Root cause: production `recommendations` has no `danger_drop_pct` (in db/schema.sql, never migrated) → every published-rec insert in `save_recs_node` failed with PGRST204; only SUPPRESSED rows (separate insert omitting it) landed. Invisible because the orchestrator's `daily_runs` insert also failed (non-existent `agents_run` column) — every daily_runs row was the discovery screener's, errors hard-coded 0. Compounding: `_synthesis_fields()` cut the synthesis to 300 chars for the judges (constraint_awareness/risk_disclosure scored 1 everywhere); Opus 5.5 judges (always thinking) truncated at 500 tokens ("Unterminated string … column 27") so votes were dropped; truncated/failed syntheses silently became the fallback template. Fixes: `_insert_tolerating_schema_drift()` (drops a missing column, retries, records `SCHEMA_DRIFT`); `db/migrations/add_danger_drop_pct_column.sql`; judges see the full synthesis, run at `effort: low`, `JUDGE_MAX_TOKENS` 2000, robust `raw_decode` parse, `JudgeTruncated` named; `CLAUDE_MAX_TOKENS` 16000, max_tokens/refusal raised explicitly, every fallback logged + counted as `SYNTHESIS_FALLBACK`; new `data/run_log.py` — one daily_runs writer tagged by `pipeline`, honest status (OK/WARNING/ALL_SUPPRESSED/NO_OUTPUT) with per-reason counts in `details` (`db/migrations/add_daily_runs_pipeline.sql`; falls back to base columns until applied). Verified: TITAN synthesis + live judges κ 0.161 → 0.519 (QUALIFIED, publishes); live probe insert succeeds with drift reported. |
+| (2026-11-12 — portfolio pipeline outage) | **The 06:00 portfolio pipeline had never saved a published row** (only SUPPRESSED rows existed; the first published rows landed 2026-11-13). Root cause: production `recommendations` has no `danger_drop_pct` (in db/schema.sql, never migrated) → every published-rec insert in `save_recs_node` failed with PGRST204; only SUPPRESSED rows (separate insert omitting it) landed. Invisible because the orchestrator's `daily_runs` insert also failed (non-existent `agents_run` column) — every daily_runs row was the discovery screener's, errors hard-coded 0. Compounding: `_synthesis_fields()` cut the synthesis to 300 chars for the judges (constraint_awareness/risk_disclosure scored 1 everywhere); Opus 5.5 judges (always thinking) truncated at 500 tokens ("Unterminated string … column 27") so votes were dropped; truncated/failed syntheses silently became the fallback template. Fixes: `_insert_tolerating_schema_drift()` (drops a missing column, retries, records `SCHEMA_DRIFT`); `db/migrations/add_danger_drop_pct_column.sql`; judges see the full synthesis, run at `effort: low`, `JUDGE_MAX_TOKENS` 2000, robust `raw_decode` parse, `JudgeTruncated` named; `CLAUDE_MAX_TOKENS` 16000, max_tokens/refusal raised explicitly, every fallback logged + counted as `SYNTHESIS_FALLBACK`; new `data/run_log.py` — one daily_runs writer tagged by `pipeline`, honest status (OK/WARNING/ALL_SUPPRESSED/NO_OUTPUT) with per-reason counts in `details` (`db/migrations/add_daily_runs_pipeline.sql`; falls back to base columns until applied). Verified: TITAN synthesis + live judges κ 0.161 → 0.519 (QUALIFIED, publishes); live probe insert succeeds with drift reported. |
 | (2026-11-12 — architecture review kit) | **Fable architect-review process.** `docs/FABLE_ARCHITECT_REVIEW.md` replaces the stale July `FABLE5_REDESIGN_PROMPT.md`: Stage A evidence pack (`scripts/build_architect_pack.py` → `docs/architect_pack/CURRENT_STATE.md`, generated from code + live DB, aggregates only), Stage B Fable 5.1 review in Claude Code Plan mode → `docs/architecture/{REVIEW,TARGET_ARCHITECTURE,ADR-*}.md` + `workplan.yaml`, Stage C execution via the `/execute-wp WP-NNN` project command (`.claude/commands/execute-wp.md`: branch per WP, tests, acceptance table, PR, never merges/migrates; STATUS in `docs/architecture/STATUS.md`), Stage D monthly re-plan. The pack surfaced an OPEN finding: **every non-discovery recommendation since 2026-09-04 is SUPPRESSED (15 rows total) while `daily_runs` reports success** — root cause not yet investigated. `docs/ARCHITECTURE.md` marked stale. |
 | (2026-11-12) | **Paper-portfolio P&L fixed.** `total_pnl_pct` was unrealised P&L / open capital, so it hid every realised loss (+6.41% shown vs −1.76% actual on ₹16.9 L deployed); alpha compared it with the Nifty since the first-ever position. New `compute_pnl_metrics()` used by the snapshot and `GET /api/paper/portfolio` (adds `unrealized_pnl_pct`, `deployed_capital`); alpha is now against the same trades in the Nifty. `scripts/backfill_paper_pnl.py` filled 95 missing `nifty_entry`/`nifty_exit` values and recomputed 179 snapshots (backup in `logs/`). Dashboard panel shows Total P&L (₹ and %) and Open positions separately. |
 | (2026-11-11 session) | **Exit logic for real holdings.** (1) **Target extension had never run**: `target_updater` read `warren["intrinsic_value"]`, but warren_bot emits `intrinsic_value_per_share`, so intrinsic was always 0 — 12 holdings past 80% of target, `target_update_count`=0 on all; the steam/protect check and the laggard thin-upside test were dead too. The tests mocked the same wrong key. Fixed via `_intrinsic()` + a contract test. (2) **Stops topped out at +20%** — YATHARTH +81% with a +20% stop; now trails 15% below price above +40%. (3) **Exit marker** per holding on the Portfolio tab (EXIT / BOOK PARTIAL / REVIEW / TRAIL / HOLD, reason on hover, summary counts, rows sorted by urgency). (4) `ae4d0e8` had swept a parallel, in-progress dashboard redesign into the commit with invalid JSX, breaking the Vercel build; `4c279d7` restored the pre-redesign App.jsx plus only the functional changes (verified with a production build). The redesign is being done in a separate chat. |
@@ -825,7 +856,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | Issue | Severity | File | Status |
 |---|---|---|---|
 | `warren_bot._log_to_supabase()` notes column issue | LOW | `agents/warren_bot.py` | ✅ Already correct — no issue |
-| Options signal is India VIX proxy, not real option chain (NSE blocks server-side) | HIGH | `data/options_fetcher.py` | ✅ Fixed (P1-B) — Breeze Connect as primary source |
+| Options signal is India VIX proxy, not real option chain (NSE blocks server-side) | HIGH | `data/options_fetcher.py` | ✅ Trendlyne F&O is the primary source; Breeze removed 2026-11-21 (WP-024) |
 | WACC hardcoded 12% for all stocks | HIGH | `agents/valuation_scenarios.py`, `agents/warren_bot.py` | ✅ Fixed (P0-A) — sector WACC table added |
 | Macro score identical for all stocks in same pipeline run | HIGH | `scheduler/orchestrator.py` | ✅ Fixed (P0-B) — `get_sector_adjusted_macro_score()` wired |
 | DCF owner earnings uses full capex (not 0.6× maintenance) in `valuation_scenarios.py` | MEDIUM | `agents/valuation_scenarios.py` | ✅ Fixed (P0-D) — `0.6 * capex` |
@@ -847,7 +878,7 @@ API endpoint: `GET /api/warren_bot/{symbol}` — 24-hr Supabase cache (`warren_b
 | ARIA partial sell removes entire position instead of reducing qty | HIGH | `dashboard/src/App.jsx`, `api/main.py` | ✅ Fixed (BF-6) — partial sell support + backend field-clobber fix |
 | Telegram not configured — STOPLOSS_HIT / CRITICAL alerts not delivered | HIGH | `scheduler/portfolio_monitor.py` | 🔲 Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars on Railway |
 | `recommendation_outcomes` table empty — no forward tracking | MEDIUM | `agents/outcome_tracker.py` | ✅ P5-C seeded; P5-D live poller fills alpha_live daily at 16:30 IST; `p5d_live_performance_columns.sql` migration ✅ applied 2026-05-20. |
-| ICICI Breeze primary IP update due ~May 18 | MEDIUM | Railway env | 🔲 Update primary IP to `52.5.155.132` on ICICI Direct portal |
+| ICICI Breeze primary IP update | — | — | ✅ Obsolete — Breeze removed 2026-11-21 (WP-024) |
 | No portfolio-level concentration alerts (sector overlap, macro cluster) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P2-C) — SECTOR_CONCENTRATION + MACRO_CLUSTER alerts added |
 | No correlation-aware alerts (hidden concentration in same-direction movers) | MEDIUM | `scheduler/portfolio_monitor.py` | ✅ Fixed (P3-B) — CORR_CLUSTER alert: 60-day Pearson r>0.75, ≥2 pairs, 7-day dedup |
 | screener.in + Trendlyne blocked from Railway (Errno 101 ENETUNREACHABLE / HTTP 405) | CRITICAL | `data/fetchers.py`, `data/trendlyne_analyst_fetcher.py` | ✅ Fixed BF-15 — `data/proxy_session.py` proxy abstraction built; SCRAPERAPI_KEY / FIXIE_URL env vars; ScraperAPI SSL cert fixed (BF-15b: `session.verify=False` for CONNECT tunnel). Direct connection currently working from Railway IP `152.55.180.59`. Proxy fires automatically if direct is blocked. **⏳ OPS-1: Review 2026-05-18/19 runs, buy ScraperAPI $29/month plan if needed.** |

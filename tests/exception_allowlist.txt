@@ -64,7 +64,6 @@ api/main.py::get_symbol_news::0
 api/main.py::get_symbol_news::1
 api/main.py::resolve_symbol._get_name::0
 api/main.py::websocket_alerts::0
-data/breeze_auth.py::_auto_refresh::0
 data/earnings_fetcher.py::_heuristic_earnings_date::0
 data/earnings_fetcher.py::_trendlyne_earnings_date::0
 data/earnings_fetcher.py::_yfinance_earnings_date::0
@@ -97,16 +96,11 @@ data/insider_signal.py::get_promoter_signal::0
 data/insider_signal.py::get_promoter_signal::1
 data/insider_signal.py::get_promoter_signal::2
 data/llm_utils.py::record_usage::0
-data/options_fetcher.py::_breeze_call_with_retry::0
 data/options_fetcher.py::_compute_max_pain::0
 data/options_fetcher.py::_compute_pcr::0
 data/options_fetcher.py::_fallback_metrics::0
-data/options_fetcher.py::_fetch_breeze_option_chain::0
 data/options_fetcher.py::_fetch_nse_option_chain::0
-data/options_fetcher.py::_fetch_one_breeze_strike::0
-data/options_fetcher.py::_get_underlying_price::0
 data/options_fetcher.py::_nse_session::0
-data/options_fetcher.py::_parse_breeze_chain::0
 data/options_fetcher.py::get_option_metrics::0
 data/run_cache.py::_make_key::0
 data/run_cache.py::scope.__exit__::0

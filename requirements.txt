@@ -15,11 +15,6 @@ uvicorn[standard]>=0.29.0
 websockets>=12.0
 PyGithub>=2.3.0
 openpyxl>=3.1.0        # DB-10: screener.in Excel export fallback for get_screener_history
-# ── Options data — ICICI Breeze Connect (P1-B) ────────────────────────────────
-# Optional: only needed when BREEZE_API_KEY / BREEZE_SESSION_TOKEN are configured.
-# Install manually: pip install breeze-connect pyotp
-breeze-connect>=1.0.59
-pyotp>=2.9.0
 # ── P6-D-6: Hindi RSS translation (no API key needed) ─────────────────────────
 deep-translator>=1.11.0
 # ── P6-D-5: spaCy NER entity resolution (optional — graceful fallback if absent)

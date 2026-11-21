@@ -16,7 +16,6 @@ Schedule (all times IST / Asia/Kolkata)
   08:00  Earnings calendar    — refresh earnings dates for portfolio + discovery symbols
   08:15  RAG refresh (1st)    — monthly RAG corpus auto-refresh
   08:30  GIFT Nifty signal    — pre-market futures premium (P6-D-7)
-  08:35  Breeze token refresh — ICICI session token (DEPRECATED, P4-D)
   09:15, 11:30, 13:30, 15:15  Portfolio monitor — danger/alert checks (market hours)
   10:30  Discovery screener   — proactive stock discovery with live market prices
   15:45  Options snapshot     — F&O metrics (PCR, max pain, ATM IV)
@@ -620,28 +619,6 @@ def job_gift_nifty_fetch() -> dict:
     return {"count": 1 if ok else 0, **signal, "errors": errors}
 
 
-@tracked_job("breeze_token_refresh")
-def job_breeze_token_refresh() -> dict:
-    """08:30 IST — refresh ICICI Breeze session token before market open."""
-    log.info("-" * 50)
-    log.info("  JOB START: Breeze Token Refresh (08:30 IST)")
-    log.info("-" * 50)
-    from data.breeze_auth import refresh_session
-    result = refresh_session(dry_run=False)
-    mode = result.get("mode", "?")
-    if result.get("success"):
-        log.info(
-            "Breeze token refresh OK — mode=%s hours_remaining=%s",
-            mode, result.get("hours_remaining"),
-        )
-        return {"count": 1, **result}
-    log.warning(
-        "Breeze token refresh FAILED — mode=%s: %s",
-        mode, result.get("message"),
-    )
-    return {"count": 0, **result, "errors": [str(result.get("message") or "refresh failed")]}
-
-
 @tracked_job("discovery", logs_own_row=True)
 def job_discovery_screener() -> dict:
     """10:30 IST — proactive discovery screener (P6 schedule redesign).
@@ -831,19 +808,6 @@ def build_scheduler():
         CronTrigger(hour=8, minute=30, timezone=IST),
         id="gift_nifty_fetch",
         name="GIFT Nifty Pre-Market Signal (08:30 IST)",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=1800,
-    )
-
-    # ── Breeze token refresh — before market open ─────────────────────────────
-    # Runs at 08:35 IST (slightly after GIFT Nifty).
-    # DEPRECATED (P4-D) — will be removed when Angel One SmartAPI is integrated.
-    scheduler.add_job(
-        job_breeze_token_refresh,
-        CronTrigger(hour=8, minute=35, timezone=IST),
-        id="breeze_token_refresh",
-        name="Breeze Token Refresh",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=1800,
@@ -1195,7 +1159,6 @@ def main() -> None:
     log.info("    05:45  Regime Detector")
     log.info("    06:00  Daily Orchestrator")
     log.info("    08:00  Earnings Calendar")
-    log.info("    08:30  Breeze Token Refresh")
     log.info("    07:00  Performance Tracker")
     log.info("    07:30  Research Agent")
     log.info("    09:15  Portfolio Monitor")
