@@ -3644,8 +3644,8 @@ function BacktestPanel({ backtestData, apiLoaded }) {
             {[
               { label:"Avg Hit Rate", value: avgHR!=null ? avgHR.toFixed(1)+"%":"-", good: avgHR!=null&&avgHR>=55, icon:"🎯" },
               { label:"Avg Alpha 90d", value: avgAlpha!=null ? (avgAlpha>=0?"+":"")+avgAlpha.toFixed(2)+"%":"-", good: avgAlpha!=null&&avgAlpha>=3, icon:"📈" },
-              { label:"Avg Sharpe", value: avgSharpe!=null ? avgSharpe.toFixed(2):"-", good: avgSharpe!=null&&avgSharpe>=1.0, icon:"⚡" },
-              { label:"Avg Max DD", value: avgDD!=null ? (avgDD*100).toFixed(1)+"%":"-", good: avgDD!=null&&avgDD>-0.15, icon:"🛡️" },
+              { label:"Avg alpha ÷ σ (per trade)", value: avgSharpe!=null ? avgSharpe.toFixed(2):"-", good: avgSharpe!=null&&avgSharpe>=1.0, icon:"" },
+              { label:"Avg worst single trade", value: avgDD!=null ? (avgDD*100).toFixed(1)+"%":"-", good: avgDD!=null&&avgDD>-0.15, icon:"" },
             ].map(({label,value,good,icon})=>(
               <div key={label} style={{background:C.bg,borderRadius:7,padding:9,textAlign:"center",border:`1px solid ${good?C.green+"44":C.border}`}}>
                 <div style={{fontSize:13,fontWeight:800,color:good?C.green:value==="-"?C.muted:C.orange,fontFamily:MONO}}>{value}</div>
@@ -3658,7 +3658,7 @@ function BacktestPanel({ backtestData, apiLoaded }) {
           <div style={{fontSize:11,fontWeight:700,color:C.muted,marginBottom:6}}>Monthly runs ({splitRows.length})</div>
           <div style={{background:C.bg,borderRadius:6,overflow:"auto",maxHeight:"60vh"}}>
             <div style={{display:"grid",gridTemplateColumns:"80px 100px 60px 70px 70px 60px 70px",gap:0,padding:"5px 10px",borderBottom:`1px solid ${C.border}`,background:C.bg,position:"sticky",top:0,zIndex:1}}>
-              {["Run Date","Period","Signals","Hit Rate","Alpha 90d","Sharpe","Max DD"].map(h=>(
+              {["Run Date","Period","Signals","Hit Rate","Alpha 90d","Alpha÷σ","Worst trade"].map(h=>(
                 <span key={h} style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase"}}>{h}</span>
               ))}
             </div>
@@ -3688,7 +3688,11 @@ function BacktestPanel({ backtestData, apiLoaded }) {
             })}
           </div>
           <div style={{marginTop:8,fontSize:10,color:C.muted}}>
-            Target: hit rate &gt;55% · avg alpha &gt;+3% · Sharpe &gt;1.0 · max drawdown &lt;-20%
+            Target: hit rate &gt;55% · avg alpha &gt;+3% · alpha÷σ &gt;1.0 · worst trade above -20%
+          </div>
+          {/* WP-022: say what this backtest is — and is not */}
+          <div style={{marginTop:6,fontSize:10.5,color:C.textDim,lineHeight:1.5}}>
+            ⚠ {backtestData?.caveat || "Technical rule only, survivorship-biased universe — not a test of the live system."}
           </div>
         </>
       )}

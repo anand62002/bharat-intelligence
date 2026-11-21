@@ -13,6 +13,22 @@ Methodology
 4. Walk-forward : TRAIN 2020–2022 (in-sample) | TEST 2023–2024 (out-of-sample)
 5. Output       : Saved to `backtest_results` Supabase table; returned as summary dict
 
+What this backtest is NOT (WP-022, ADR-006) — read before quoting its numbers
+-----------------------------------------------------------------------------
+- It is NOT a test of the live system. It replays one TECHNICAL rule (RSI +
+  EMA200 + MACD). The live pipeline's fundamental / sentiment / institutional /
+  macro agents, synthesis, judges and discovery filters are not in it.
+- It is SURVIVORSHIP-BIASED. The universe is TODAY's NIFTY 500 list applied
+  backwards to 2020, so companies that fell out of the index (or were delisted)
+  are missing and the past looks better than it was.
+- `max_drawdown` is the WORST SINGLE TRADE's return, not a portfolio drawdown.
+  The API also returns it as `worstTrade`.
+- `sharpe_ratio` is mean(alpha_90d) / std(alpha_90d) across trades. It is not
+  annualised and not a time-series Sharpe ratio. The API also returns it as
+  `alphaMeanOverStd`.
+The 62–66 % hit rates it reports must not be cited as system validation.
+Column names are unchanged (the dashboard reads them).
+
 DB migration (run once in Supabase SQL Editor before first run):
     db/migrations/create_backtest_results.sql
 
@@ -33,6 +49,16 @@ from datetime import datetime
 from typing import Optional
 
 log = logging.getLogger(__name__)
+
+# ── Honest labelling (WP-022) — surfaced by GET /api/backtest/summary ─────────
+BACKTEST_STRATEGY  = "technical_rule_only"
+SURVIVORSHIP_BIAS  = True
+BACKTEST_CAVEAT    = (
+    "Technical rule only (RSI 40-65 + price > EMA200 + MACD cross), not the live "
+    "multi-agent system. Survivorship-biased: today's NIFTY 500 applied back to 2020. "
+    "'worstTrade' is the worst single trade, not a portfolio drawdown; "
+    "'alphaMeanOverStd' is mean/std of per-trade 90d alpha, not an annualised Sharpe."
+)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 _DEFAULT_START   = "2020-01-01"
@@ -389,7 +415,8 @@ def _aggregate(trades: list[dict]) -> dict:
     hit_rate   = sum(hits) / n * 100
     avg_a90    = sum(alphas_90) / n
 
-    # Sharpe: mean(alpha_90d) / std(alpha_90d)  — cross-trade, not time-series
+    # Stored as "sharpe_ratio" but NOT a Sharpe ratio: mean(alpha_90d) / std(alpha_90d)
+    # across trades — no annualisation, no time series. API alias: alphaMeanOverStd.
     if n > 1:
         var_a90 = sum((x - avg_a90) ** 2 for x in alphas_90) / (n - 1)
         std_a90 = math.sqrt(var_a90)
@@ -397,7 +424,8 @@ def _aggregate(trades: list[dict]) -> dict:
     else:
         sharpe = None
 
-    # Max drawdown: worst single trade return (as decimal fraction, not %)
+    # Stored as "max_drawdown" but NOT a portfolio drawdown: the worst single trade's
+    # return (decimal fraction, not %). API alias: worstTrade.
     max_dd = min(returns) / 100 if returns else None
 
     # Win / loss ratio

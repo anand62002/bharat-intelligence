@@ -28,7 +28,7 @@ Plan: `workplan.yaml` · Review: `REVIEW.md` · Target: `TARGET_ARCHITECTURE.md`
 | WP-019 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-16 | `size_from_probability`: BASE for every call until a band's 90% Wilson lower bound > 55% with n ≥ 30, then CONVICTION for that band; discovery + portfolio pipeline sized from calibrated bands. Today: every band BASE (LB 15–39%). NEEDS-PROD: new paper positions labelled BASE |
 | WP-020 | TODO | — | — | Cut the judge panel to grounding plus one shadow judge (evidence precondition) |
 | WP-021 | TODO | — | — | Publish a daily holdings review from the portfolio pipeline |
-| WP-022 | TODO | — | — | Label the backtest honestly in the API |
+| WP-022 | IN_PROGRESS | — (branch `wp/WP-022-honest-backtest`, local) | 2026-11-21 | `/api/backtest/summary` returns strategy=technical_rule_only, survivorship_bias, caveat, worstTrade, alphaMeanOverStd (old keys kept); backtester docstrings corrected; dashboard panel relabelled + caveat shown |
 | WP-023 | TODO | — | — | Report ADR signals and ledger evaluation in the evidence pack |
 | WP-024 | TODO | — | — | Refresh the docs and remove the deprecated Breeze job |
 

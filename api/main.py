@@ -3082,6 +3082,13 @@ async def get_forward_estimates_endpoint(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+def _label_backtest_row(row: dict) -> dict:
+    """WP-022: honest aliases next to the misleading column names (kept for one release)."""
+    return {**row,
+            "worstTrade": row.get("max_drawdown"),
+            "alphaMeanOverStd": row.get("sharpe_ratio")}
+
+
 @app.get("/api/backtest/summary", tags=["performance"])
 async def get_backtest_summary(
     split:   str  = Query("TEST", description="TRAIN | TEST | FULL | ALL — TEST is the out-of-sample period"),
@@ -3100,6 +3107,12 @@ async def get_backtest_summary(
 
     Run automatically by worker.py on the 1st of each month at 07:45 IST.
     Trigger manually: python -m agents.backtester --dry-run (test without saving)
+
+    Honest labelling (WP-022, ADR-006): this replays ONE technical rule on a
+    survivorship-biased universe — not the live system. The response says so
+    (strategy, survivorship_bias, caveat). Each row also carries worstTrade
+    (= max_drawdown, the worst single trade) and alphaMeanOverStd (= sharpe_ratio,
+    not annualised). The original keys stay for one release.
     """
     if not _supabase:
         raise HTTPException(status_code=503, detail="Database not configured")
@@ -3119,7 +3132,14 @@ async def get_backtest_summary(
                 .limit(limit)
                 .execute()
             ).data or []
-        return {"split": split.upper(), "count": len(rows), "results": rows}
+        from agents.backtester import BACKTEST_CAVEAT, BACKTEST_STRATEGY, SURVIVORSHIP_BIAS
+        return {
+            "split": split.upper(), "count": len(rows),
+            "results": [_label_backtest_row(r) for r in rows],
+            "strategy": BACKTEST_STRATEGY,
+            "survivorship_bias": SURVIVORSHIP_BIAS,
+            "caveat": BACKTEST_CAVEAT,
+        }
     except Exception as exc:
         log.error("backtest/summary error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
