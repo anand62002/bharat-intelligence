@@ -1775,6 +1775,139 @@ def _insert_tolerating_schema_drift(client, table: str, row: dict, errors: list[
     return client.table(table).insert(row).execute()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Holdings review (WP-021, ADR-007)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _base_sym(sym: str) -> str:
+    return (sym or "").strip().upper().replace(".NS", "").replace(".BO", "")
+
+
+def _load_open_holdings(client) -> list[dict]:
+    """Open holdings, full rows (stop/target/ratchet/dates for exit_signal). Read-only."""
+    try:
+        return client.table("portfolio_holdings").select("*").eq("status", "OPEN").execute().data or []
+    except Exception as exc:
+        log.warning("Holdings review: could not load open holdings: %s", exc)
+        return []
+
+
+def _match_holding(symbol: str, holdings: list[dict]) -> Optional[dict]:
+    """The holding a pipeline symbol came from (by yf_symbol, then by base ticker)."""
+    base = _base_sym(symbol)
+    for h in holdings:
+        if _base_sym(h.get("yf_symbol") or "") == base:
+            return h
+    for h in holdings:
+        if _base_sym(h.get("symbol") or "") == base:
+            return h
+    try:
+        from data.symbol_map import resolve_yf
+        for h in holdings:
+            if _base_sym(resolve_yf(f"{_base_sym(h.get('symbol') or '')}.NS") or "") == base:
+                return h
+    except Exception as exc:
+        log.warning("Holdings review: symbol map lookup failed for %s: %s", symbol, exc)
+    return None
+
+
+def _review_fields(rec: dict, holding: dict, review: dict) -> dict:
+    """Overlay a review on a rec dict: no entry zone, levels from the holding."""
+    from scheduler.decision import KIND_HOLDING_REVIEW
+    price, target = review.get("price"), review.get("target")
+    sym = rec.get("symbol") or holding.get("yf_symbol") or holding.get("symbol")
+    out = dict(rec)
+    out.update({
+        "action": review["action"],
+        "entry_low": None, "entry_high": None,
+        "stoploss": review.get("stop"), "target": target,
+        "upside_pct": round((target / price - 1) * 100, 2) if (target and price) else 0.0,
+        "headline": f"{review['review_action']}: {sym} — {review['review_reason']}"[:200],
+        "summary": (f"Holding review: {review['review_action']} — {review['review_reason']}. "
+                    f"Thesis {review['thesis_status']}: {review['thesis_reason']}.\n\n"
+                    + (rec.get("summary") or "")).strip(),
+        # a review is not a sizing call
+        "suggested_position_pct": None, "position_label": None,
+        "review_meta": {
+            "kind": KIND_HOLDING_REVIEW,
+            "review_action": review["review_action"],
+            "review_reason": review["review_reason"],
+            "thesis_status": review["thesis_status"],
+            "thesis_reason": review["thesis_reason"],
+            "holding_id": holding.get("id"),
+            "review_price": price,
+            "fair_value": review.get("fair_value"),
+        },
+    })
+    return out
+
+
+def _to_holding_review(rec: dict, holding: dict, agent_results: Optional[dict]) -> dict:
+    from scheduler.decision import review_holding
+    wb = (agent_results or {}).get("warren_bot") or rec.get("warren_bot") or {}
+    basis = (rec.get("decision_meta") or {}).get("decision") or {}
+    review = review_holding(holding, agent_results, wb.get("intrinsic_value_per_share"),
+                            price=_current_price(agent_results or {}) or basis.get("price"),
+                            rule_action=basis.get("rule_action") or rec.get("action"))
+    return _review_fields(rec, holding, review)
+
+
+def _minimal_review_rec(holding: dict) -> dict:
+    """A review for a holding the pipeline produced nothing for (agents failed): exit rule only."""
+    from scheduler.decision import review_holding
+    review = review_holding(holding, None, None)
+    sym = holding.get("yf_symbol") or f"{_base_sym(holding.get('symbol') or '')}.NS"
+    base = {"symbol": sym, "confidence": 50.0, "risk_score": 50.0, "horizon_days": 1,
+            "upside_confidence": 50.0, "danger_drop_pct": 0.0, "danger_confidence": 0.0,
+            "summary": "No agent analysis today — review from the holding's stop/target only.",
+            "agent_signals": {}, "is_discovery": False, "gov_check": {},
+            "decision_meta": {"data_quality": "UNKNOWN"}}
+    return _review_fields(base, holding, review)
+
+
+def _supersede_reviews(client, symbols: list[str], errors: list[str]) -> None:
+    """Retire each holding's previous live review so exactly one is live per holding."""
+    if not symbols:
+        return
+    from scheduler.decision import KIND_HOLDING_REVIEW
+    try:
+        (client.table("recommendations")
+         .update({"valid_till": str(date.today() - timedelta(days=1))})
+         .in_("symbol", sorted(set(symbols)))
+         .eq("metadata->>kind", KIND_HOLDING_REVIEW)
+         .gte("valid_till", str(date.today()))
+         .execute())
+    except Exception as exc:
+        log.warning("Holdings review: superseding previous reviews failed: %s", exc)
+        errors.append(f"holdings review: supersede failed: {exc}")
+
+
+def _as_holding_reviews(recommendations: list[dict], holdings: list[dict],
+                        symbol_results: dict) -> list[dict]:
+    """
+    Every rec for a held stock becomes its HOLDING_REVIEW; every open holding with
+    no rec gets a minimal one. Recs for non-held symbols (WATCHLIST) pass through.
+    """
+    out, used = [], set()
+    for rec in recommendations:
+        h = _match_holding(rec.get("symbol", ""), holdings)
+        if h is None:
+            out.append(rec)
+            continue
+        used.add(id(h))
+        try:
+            out.append(_to_holding_review(rec, h, symbol_results.get(rec["symbol"])))
+        except Exception as exc:
+            log.warning("[%s] holding review failed — exit rule only: %s", rec.get("symbol"), exc)
+            out.append(_minimal_review_rec(h))
+    for h in holdings:
+        if id(h) not in used:
+            log.warning("[%s] no analysis today — publishing a stop/target-only review",
+                        h.get("symbol"))
+            out.append(_minimal_review_rec(h))
+    return out
+
+
 async def save_recs_node(state: OrchestratorState) -> dict:
     """
     Persist recommendations to the Supabase recommendations table.
@@ -1880,11 +2013,22 @@ async def save_recs_node(state: OrchestratorState) -> dict:
         "metadata",                                   # discovery context bag (price, sector, risks, etc.)
     }
 
+    # ── WP-021 (ADR-007): held stocks get a HOLDING_REVIEW, one live per holding ──
+    holdings = _load_open_holdings(client)
+    if holdings:
+        recommendations = _as_holding_reviews(
+            recommendations, holdings, state.get("symbol_results") or {})
+        _supersede_reviews(client, [r["symbol"] for r in recommendations if r.get("review_meta")],
+                           errors)
+        log.info("Holdings review: %d reviews for %d open holdings",
+                 sum(1 for r in recommendations if r.get("review_meta")), len(holdings))
+
     saved_ids: list[str] = []
     for rec in recommendations:
         try:
             row = {k: v for k, v in rec.items() if k in _DB_COLUMNS}
             row["valid_till"] = str(
+                date.today() + timedelta(days=1) if rec.get("review_meta") else
                 date.today() + timedelta(days=int(rec.get("horizon_days", 180)))
             )
             # Nest market_constraints inside metadata JSONB (no separate column needed)
@@ -1903,6 +2047,8 @@ async def save_recs_node(state: OrchestratorState) -> dict:
                 # daily seeder and backfill can copy it onto the outcome row.
                 if rec.get("composite_score") is not None:
                     row["metadata"]["composite_score"] = rec["composite_score"]
+                if rec.get("review_meta"):
+                    row["metadata"].update(rec["review_meta"])
             # Nest warren_bot output inside agent_signals JSONB before saving.
             # warren_bot is not a top-level DB column — it lives under agent_signals["warren_bot"].
             if "agent_signals" in row and isinstance(row["agent_signals"], dict):
@@ -1930,6 +2076,9 @@ async def save_recs_node(state: OrchestratorState) -> dict:
                             entry_price = float(entry_low)
                         elif entry_high:
                             entry_price = float(entry_high)
+                        elif (rec.get("review_meta") or {}).get("review_price"):
+                            # a review is measured from the price on the review date (ADR-007)
+                            entry_price = float(rec["review_meta"]["review_price"])
                         else:
                             entry_price = None
                         from agents.rec_outcome_seeder import outcome_scores

@@ -330,3 +330,77 @@ def fallback_narrative(symbol: str, decision: dict, agent_results: dict, reason:
     merged["decision_basis"] = {**merged.get("decision_basis", {}), "narrative": "template",
                                 "narrative_reason": reason}
     return merged
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Holdings review (WP-021, ADR-007)
+# ─────────────────────────────────────────────────────────────────────────────
+# For a stock already owned the question is keep / trim / sell, not "where to
+# enter". The review answers it from two deterministic rules: the target
+# updater's exit_signal() (EXIT / BOOK_PARTIAL / TRAIL / REVIEW / HOLD) and a
+# thesis status from the discovery re-check's thesis_check(). Stop and target
+# are READ from portfolio_holdings: the 17:00 target updater stays their only writer.
+
+KIND_HOLDING_REVIEW = "HOLDING_REVIEW"
+# The recommendations.action column only allows BUY/HOLD/SELL/AVOID/SUPPRESSED.
+# A review is never a BUY — so it can never open a paper position.
+REVIEW_TO_ACTION = {"EXIT": "SELL", "BOOK_PARTIAL": "HOLD", "TRAIL": "HOLD",
+                    "REVIEW": "HOLD", "HOLD": "HOLD"}
+
+
+def thesis_status(agent_results: Optional[dict], rule_action: Optional[str] = None) -> tuple[str, str]:
+    """
+    INTACT / WEAKENED / BROKEN (or UNKNOWN with no agent data).
+
+    INTACT   — still passes discovery on fundamental + technical (the same
+               test agents/discovery_rescorer.py applies to live calls)
+    WEAKENED — no longer passes it
+    BROKEN   — no longer passes it AND the composite rule says SELL/AVOID
+    """
+    if not agent_results:
+        return "UNKNOWN", "no agent results today"
+    try:
+        from agents.discovery_rescorer import thesis_check
+        intact, _signal, _upside, _gap, why = thesis_check(agent_results)
+    except Exception as exc:
+        log.warning("thesis_check failed: %s", exc)
+        return "UNKNOWN", f"thesis check failed: {exc}"
+    if intact:
+        return "INTACT", why
+    if (rule_action or "").upper() in ("SELL", "AVOID"):
+        return "BROKEN", f"{why}; composite rule says {rule_action.upper()}"
+    return "WEAKENED", why
+
+
+def review_holding(
+    holding: dict,
+    agent_results: Optional[dict],
+    fair_value: Optional[float] = None,
+    *,
+    price: Optional[float] = None,
+    rule_action: Optional[str] = None,
+) -> dict:
+    """
+    One review for one held stock. `price` (today's agent price) overrides the
+    holding's stored current_price when given. Never raises.
+    """
+    from agents.target_updater import HOLD, REVIEW, exit_signal
+
+    h = dict(holding)
+    if _f(price):
+        h["current_price"] = _f(price)
+    review_action, reason = exit_signal(h, _f(fair_value))
+    thesis, thesis_reason = thesis_status(agent_results, rule_action)
+    if thesis == "BROKEN" and review_action == HOLD:
+        review_action, reason = REVIEW, f"thesis broken — {thesis_reason}"
+    return {
+        "review_action": review_action,
+        "review_reason": reason,
+        "thesis_status": thesis,
+        "thesis_reason": thesis_reason,
+        "action": REVIEW_TO_ACTION.get(review_action, "HOLD"),
+        "stop": _f(holding.get("stoploss_price")),
+        "target": _f(holding.get("target_price")),
+        "price": _f(h.get("current_price")),
+        "fair_value": _f(fair_value),
+    }

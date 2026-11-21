@@ -674,7 +674,20 @@ def _transform_holding(row: dict) -> dict:
         "exitSignal":            (row.get("_exit") or {}).get("signal"),
         "exitReason":            (row.get("_exit") or {}).get("reason"),
         "fairValue":             (row.get("_exit") or {}).get("fair_value"),
+        # Holdings review (WP-021) — the 06:00 pipeline's live review; exitSignal stays
+        "reviewAction":          (row.get("_review") or {}).get("action"),
+        "thesisStatus":          (row.get("_review") or {}).get("thesis"),
+        "reviewReason":          (row.get("_review") or {}).get("reason"),
+        "reviewDate":            (row.get("_review") or {}).get("date"),
     }
+
+
+def _base_ticker(sym: Any) -> str:
+    return str(sym or "").strip().upper().replace(".NS", "").replace(".BO", "")
+
+
+def _is_review(row: dict) -> bool:
+    return (row.get("metadata") or {}).get("kind") == "HOLDING_REVIEW"
 
 
 def _gate_score(gov: Any) -> Optional[float]:
@@ -1062,6 +1075,7 @@ async def health():
 @app.get("/api/recommendations", tags=["recommendations"])
 async def get_recommendations(
     limit: int     = Query(50, ge=1, le=200),
+    include_reviews: bool = Query(False, description="Include HOLDING_REVIEW rows (WP-021)"),
     _:    None     = Depends(require_api_key),
 ):
     """
@@ -1083,6 +1097,14 @@ async def get_recommendations(
             .data or [])
     rows = [r for r in rows
             if (r.get("metadata") or {}).get("call_status") not in CLOSED_STATUSES]
+
+    # WP-021 (ADR-007): held stocks are answered by their HOLDING_REVIEW on the
+    # Portfolio tab. Excluded here by default — and so are the older portfolio
+    # recs for those symbols, which would otherwise resurface as the newest row.
+    if not include_reviews:
+        reviewed = {_base_ticker(r["symbol"]) for r in rows if _is_review(r)}
+        rows = [r for r in rows if not _is_review(r)
+                and (r.get("is_discovery") or _base_ticker(r["symbol"]) not in reviewed)]
 
     # One card per stock — rows arrive newest first, so the first seen wins.
     seen: dict[str, dict] = {}
@@ -1344,6 +1366,29 @@ async def get_portfolio(
             r["_exit"] = {"signal": sig, "reason": why, "fair_value": round(fv, 2) if fv else None}
     except Exception as exc:
         log.warning("exit signal enrichment skipped: %s", exc)
+
+    # ── Live holdings review (WP-021, ADR-007): the 06:00 pipeline's answer ────
+    try:
+        if _supabase and rows:
+            live = (_supabase.table("recommendations")
+                    .select("symbol,created_at,metadata")
+                    .eq("metadata->>kind", "HOLDING_REVIEW")
+                    .gte("valid_till", str(date.today()))
+                    .order("created_at", desc=True)
+                    .execute().data or [])
+            by_base: dict[str, dict] = {}
+            for rv in live:
+                by_base.setdefault(_base_ticker(rv.get("symbol")), rv)
+            for r in rows:
+                rv = (by_base.get(_base_ticker(r.get("yf_symbol")))
+                      or by_base.get(_base_ticker(r.get("symbol"))))
+                if rv:
+                    m = rv.get("metadata") or {}
+                    r["_review"] = {"action": m.get("review_action"), "thesis": m.get("thesis_status"),
+                                    "reason": m.get("review_reason"),
+                                    "date": str(rv.get("created_at") or "")[:10]}
+    except Exception as exc:
+        log.warning("holdings review enrichment skipped: %s", exc)
 
     holdings = [_transform_holding(r) for r in rows]
     # Critical danger holdings first

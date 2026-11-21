@@ -42,6 +42,7 @@ ALERT_TYPE = "JOB_INVARIANT"
 @dataclass
 class Context:
     open_holdings: Optional[int] = None
+    live_reviews: Optional[int] = None     # WP-021: live HOLDING_REVIEW rows on the run date
 
 
 @dataclass
@@ -94,6 +95,11 @@ def _orchestrator(row: dict, ctx: Context) -> Optional[str]:
     if ctx.open_holdings and (recs is None or recs < 1):
         return (f"0 recommendations published with {ctx.open_holdings} open holdings "
                 f"(reasons: {reasons})")
+    # WP-021 (ADR-007): exactly one live review per open holding.
+    if ctx.open_holdings is not None and ctx.live_reviews is not None \
+            and ctx.live_reviews != ctx.open_holdings:
+        return (f"{ctx.live_reviews} live holding reviews for {ctx.open_holdings} open holdings "
+                f"(expected one each)")
     return None
 
 
@@ -143,7 +149,7 @@ def _target_updater(row: dict, ctx: Context) -> Optional[str]:
 
 INVARIANTS: list[Invariant] = [
     Invariant("orchestrator", "daily", _orchestrator,
-              "published ≥1 recommendation when holdings exist"),
+              "published ≥1 recommendation and one live review per open holding"),
     Invariant("discovery", "trading", _status_ok, "screener completed"),
     Invariant("forward_poller", "trading", _forward_poller, "≥90% of open recs repriced"),
     Invariant("paper_portfolio_update", "trading", _paper_update,
@@ -179,14 +185,23 @@ def is_trading_day(d: date) -> bool:
 
 # ── main entry points ────────────────────────────────────────────────────────
 
-def _load_context(client) -> Context:
+def _load_context(client, run_date: Optional[date] = None) -> Context:
+    ctx = Context()
     try:
         n = (client.table("portfolio_holdings").select("id", count="exact")
              .eq("status", "OPEN").limit(1).execute().count)
-        return Context(open_holdings=int(n or 0))
+        ctx.open_holdings = int(n or 0)
     except Exception as exc:
         log.warning("invariants: could not count open holdings: %s", exc)
-        return Context()
+    try:
+        d = (run_date or date.today()).isoformat()
+        n = (client.table("recommendations").select("id", count="exact")
+             .eq("metadata->>kind", "HOLDING_REVIEW").gte("valid_till", d)
+             .limit(1).execute().count)
+        ctx.live_reviews = int(n or 0)
+    except Exception as exc:
+        log.warning("invariants: could not count live holding reviews: %s", exc)
+    return ctx
 
 
 def _rows_by_job(client, run_date: date) -> dict[str, dict]:
@@ -222,7 +237,7 @@ def check_invariants(
         log.warning("invariants: could not read daily_runs for %s: %s", run_date, exc)
         return [Breach("watchdog", run_date.isoformat(), "FAILED",
                        f"could not read daily_runs: {exc}")]
-    ctx = context or _load_context(client)
+    ctx = context or _load_context(client, run_date)
 
     open_today: Optional[bool] = None
     breaches: list[Breach] = []
