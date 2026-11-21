@@ -3,7 +3,7 @@
 // api/main.py::_transform_research() (see tests/test_transform_research.py).
 import React from "react";
 import { renderToString } from "react-dom/server";
-import App, { GovernanceResearchTab } from "./App";
+import App, { GovernanceResearchTab, HoldingDetail } from "./App";
 
 // Exact shape _transform_research() returns today.
 const FULL = {
@@ -63,4 +63,31 @@ test("empty feed and every tag colour render", () => {
   for (const tag of ["Architecture", "Signal Quality", "Governance", "Performance"]) {
     expect(renderTab([{ ...FULL, tag }])).toContain(tag);
   }
+});
+
+
+// WP-021: the 06:00 holdings review on the Portfolio tab's holding detail.
+const HOLDING = {
+  id: "h1", symbol: "TITAN", sector: "Consumer", qty: 10, avgBuy: 3000, currentPrice: 3300,
+  targetPrice: 3900, stoplossPrice: 2800, exitSignal: "HOLD", exitReason: "within plan",
+  dangerDropPct: 0, dangerConfidence: 0,
+};
+const NUMS = { cost: 30000, value: 33000, price: 3300, toStop: 15.2, toTarget: 18.2 };
+const renderHolding = (h) => renderToString(
+  <HoldingDetail h={h} n={NUMS} rec={null} onAsk={() => {}} onViewRec={() => {}} narrow={false} />
+);
+
+test("holding detail shows the morning review and thesis status", () => {
+  const html = renderHolding({ ...HOLDING, reviewAction: "REVIEW", thesisStatus: "WEAKENED",
+    reviewReason: "thesis weakened — upside to fair value now 8%", reviewDate: "2026-11-22" });
+  expect(html).toContain("Thesis");
+  expect(html).toContain("Weakened");
+  expect(html).toContain("Morning review");
+  expect(html).toContain("Review — thesis weakened");
+});
+
+test("holding detail without a review renders as before", () => {
+  const html = renderHolding(HOLDING);
+  expect(html).not.toContain("Morning review");
+  expect(html).not.toContain(">Thesis<");
 });

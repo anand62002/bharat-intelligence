@@ -2114,6 +2114,14 @@ function PortfolioRiskPanel({risk}){
 // ─── PORTFOLIO ────────────────────────────────────────────────────────────────
 const EXIT_TONE={EXIT:"sell",BOOK_PARTIAL:"warn",REVIEW:"hold",TRAIL:"buy",HOLD:"mute"};
 const EXIT_LABEL={EXIT:"Exit",BOOK_PARTIAL:"Book partial",REVIEW:"Review",TRAIL:"Trail",HOLD:"Hold"};
+// Holdings review (WP-021): thesis status from the 06:00 pipeline
+const THESIS_TONE={INTACT:"buy",WEAKENED:"warn",BROKEN:"sell",UNKNOWN:"mute"};
+const THESIS_HINT={
+  INTACT:"Still passes the discovery test on fundamentals and technicals",
+  WEAKENED:"No longer passes the discovery test",
+  BROKEN:"No longer passes the discovery test, and the composite rule says sell",
+  UNKNOWN:"No agent analysis this morning",
+};
 const RATCHET_LABEL={
   TRAIL:["Trailing stop","Follows 15% below the price and only moves up"],
   LOCK_20:["Stop locks +20%","Stop-loss raised to lock in a 20% gain"],
@@ -2260,7 +2268,7 @@ function AddHoldingForm({portfolio,onSubmit,onCancel}){
   );
 }
 
-function HoldingDetail({h,n,rec,onAsk,onViewRec,narrow}){
+export function HoldingDetail({h,n,rec,onAsk,onViewRec,narrow}){
   const has=h.targetPrice>0&&h.stoplossPrice>0&&n.price>0;
   let nowPos=50;
   if(has) nowPos=Math.max(2,Math.min(98,4+(n.price-h.stoplossPrice)/(h.targetPrice-h.stoplossPrice)*92));
@@ -2269,6 +2277,8 @@ function HoldingDetail({h,n,rec,onAsk,onViewRec,narrow}){
     ["Sector",h.sector||"—"],
     ["Invested",inr(n.cost,0)],["Value now",inr(n.value,0)],
     ["Plan",h.exitReason||(EXIT_META[h.exitSignal]?.hint)||"—"],
+    ...(h.thesisStatus?[["Thesis",<span title={THESIS_HINT[h.thesisStatus]}><EdTag tone={THESIS_TONE[h.thesisStatus]||"mute"}>{h.thesisStatus.charAt(0)+h.thesisStatus.slice(1).toLowerCase()}</EdTag></span>]]:[]),
+    ...(h.reviewAction?[["Morning review",`${EXIT_LABEL[h.reviewAction]||h.reviewAction}${h.reviewReason?` — ${h.reviewReason}`:""}${h.reviewDate?` (${fmtDate(h.reviewDate)})`:""}`]]:[]),
     ...(ratchet?[["Stop-loss",ratchet[1]]]:[]),
     ...(h.targetUpdateCount>0?[["Target",`Raised ${h.targetUpdateCount}× by the target updater${h.originalTarget?` (was ${inr(h.originalTarget)})`:""}`]]:[]),
     ...(h.protectGainsFlag?[["Protect gains","Valuation looks stretched. Target locked; consider protecting profits."]]:[]),
