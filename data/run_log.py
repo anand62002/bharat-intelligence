@@ -99,10 +99,9 @@ def _jsonable(value: Any) -> Any:
     """Best-effort conversion of a job's return value to JSON-safe data."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         value = dataclasses.asdict(value)
-    try:
-        return json.loads(json.dumps(value, default=str))
-    except Exception:
-        return str(value)
+    # Was json.loads(json.dumps(value, default=str)): that keeps NaN (which the
+    # HTTP client then refuses) and turns numpy numbers into strings.
+    return _json_safe(value)
 
 
 def _output_dict(result: Any) -> dict:
@@ -115,8 +114,32 @@ def _output_dict(result: Any) -> dict:
     return data if isinstance(data, dict) else {"value": data}
 
 
+def _json_safe(o: Any) -> Any:
+    """
+    A copy Supabase can store: NaN/±inf → None, numpy scalars → Python, unknown
+    objects → str. The portfolio_risk job's correlation matrix carried NaN, so
+    json encoding failed at insert and the job never left a single ledger row
+    (found by the WP-023 evidence pack's job-ledger coverage).
+    """
+    if isinstance(o, dict):
+        return {str(k): _json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple, set)):
+        return [_json_safe(v) for v in o]
+    if hasattr(o, "item") and type(o).__module__ == "numpy":
+        try:
+            o = o.item()
+        except (ValueError, TypeError):
+            return str(o)
+    if isinstance(o, float):
+        return o if o == o and o not in (float("inf"), float("-inf")) else None
+    if o is None or isinstance(o, (str, int, bool)):
+        return o
+    return str(o)
+
+
 def _trim(output: dict) -> dict:
-    """Keep the stored output under _OUTPUT_MAX_CHARS; drop the largest values first."""
+    """JSON-safe copy, kept under _OUTPUT_MAX_CHARS; drop the largest values first."""
+    output = _json_safe(output)
     text = json.dumps(output, default=str)
     if len(text) <= _OUTPUT_MAX_CHARS:
         return output

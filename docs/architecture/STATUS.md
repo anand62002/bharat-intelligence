@@ -29,7 +29,7 @@ Plan: `workplan.yaml` · Review: `REVIEW.md` · Target: `TARGET_ARCHITECTURE.md`
 | WP-020 | TODO | — | — | Cut the judge panel to grounding plus one shadow judge (evidence precondition) |
 | WP-021 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-21 | 06:00 pipeline saves one HOLDING_REVIEW per open holding (exit_signal + thesis INTACT/WEAKENED/BROKEN, stop/target read from holdings, never BUY), supersedes yesterday's; /api/portfolio adds reviewAction/thesisStatus; reviews excluded from /api/recommendations; invariant live reviews = open holdings. NEEDS-PROD: counts after next run |
 | WP-022 | MERGED | — (merged directly to main by owner; no PR) | 2026-11-21 | `/api/backtest/summary` returns strategy=technical_rule_only, survivorship_bias, caveat, worstTrade, alphaMeanOverStd (old keys kept); backtester docstrings corrected; dashboard panel relabelled + caveat shown |
-| WP-023 | TODO | — | — | Report ADR signals and ledger evaluation in the evidence pack |
+| WP-023 | IN_PROGRESS | — (branch `wp/WP-023-evidence-pack`, local) | 2026-11-21 | Pack reads runs by pipeline (orchestrator 9 / discovery 288, matches group-by), suppression per symbol analysed, Job ledger + Candidate ledger sections, paper book by source, n + 90% interval on every rate. Found + fixed: portfolio_risk never logged (NaN in output broke the ledger insert) |
 | WP-024 | TODO | — | — | Refresh the docs and remove the deprecated Breeze job |
 
 ## WP-001 — production check output

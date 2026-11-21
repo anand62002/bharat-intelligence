@@ -240,3 +240,33 @@ def test_log_daily_run_falls_back_to_base_columns():
     assert log_daily_run(c, "x", symbols_processed=1, errors=0, duration_seconds=1.0, status="OK")
     second = c.table.return_value.insert.call_args_list[1].args[0]
     assert "pipeline" not in second and "details" not in second
+
+
+def test_tracked_job_output_with_nan_and_numpy_is_storable(monkeypatch):
+    """portfolio_risk's NaN correlation matrix made every ledger insert fail (WP-023 finding)."""
+    import json
+    import numpy as np
+    from data import run_log
+    stored = {}
+
+    class C:
+        def table(self, name):
+            return self
+        def insert(self, row):
+            json.dumps(row, allow_nan=False)          # what the HTTP client requires
+            stored.update(row)
+            return self
+        def execute(self):
+            return self
+
+    monkeypatch.setattr(run_log, "_supabase_client", lambda: C())
+
+    @run_log.tracked_job("nan_job")
+    def job():
+        return {"count": np.int64(3), "corr": {"A": {"B": float("nan"), "C": np.float64(0.4)}},
+                "vol": float("inf")}
+
+    job()
+    out = stored["details"]["output"]
+    assert stored["pipeline"] == "nan_job" and out["count"] == 3
+    assert out["corr"]["A"] == {"B": None, "C": 0.4} and out["vol"] is None
