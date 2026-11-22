@@ -59,3 +59,40 @@ def test_worker_no_longer_schedules_a_breeze_job():
     assert not hasattr(worker, "job_breeze_token_refresh")
     ids = {j.id for j in worker.build_scheduler().get_jobs()}
     assert "breeze_token_refresh" not in ids and "orchestrator" in ids
+
+
+# ── Trendlyne F&O credentials: environment only, failures named ──────────────
+
+def test_trendlyne_missing_cookies_fail_clearly(monkeypatch):
+    import pytest
+    from data import trendlyne_fno_fetcher as tl
+    monkeypatch.delenv("TRENDLYNE_SESSION", raising=False)
+    monkeypatch.delenv("TRENDLYNE_CSRF", raising=False)
+    with pytest.raises(RuntimeError, match="Trendlyne cookies not set"):
+        tl._make_fno_session()
+
+
+def test_trendlyne_html_reply_is_named_not_a_zip_error():
+    import pytest
+    from data import trendlyne_fno_fetcher as tl
+    with pytest.raises(RuntimeError, match="session cookie is missing or expired"):
+        tl._require_excel(b"<!DOCTYPE html><html>login</html>", "text/html; charset=utf-8")
+    tl._require_excel(b"PK\x03\x04rest-of-xlsx")          # a real .xlsx passes
+
+
+def test_cookies_are_read_from_the_environment(monkeypatch):
+    from data import trendlyne_fno_fetcher as tl
+    monkeypatch.setenv("TRENDLYNE_SESSION", "sess-x")
+    monkeypatch.setenv("TRENDLYNE_CSRF", "csrf-y")
+    s = tl._make_fno_session()
+    assert s.cookies.get(".trendlyne") == "sess-x" and s.cookies.get("csrftoken") == "csrf-y"
+
+
+def test_no_hard_coded_trendlyne_cookie_in_tracked_code():
+    import subprocess
+    leaked = ("bce34ncrlhwelezjn884vaxvyh0g543w", "8pNPblqCbfTikxjVbCLRZwDbQq6cdZZw")
+    tracked = subprocess.run(["git", "ls-files", "*.py", "*.js", "*.jsx", "*.json", "*.toml"],
+                             cwd=ROOT, capture_output=True, text=True).stdout.split()
+    hits = [f for f in tracked if f != "tests/test_options_fetcher.py"
+            and any(v in (ROOT / f).read_text(encoding="utf-8", errors="ignore") for v in leaked)]
+    assert not hits, hits

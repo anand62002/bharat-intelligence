@@ -39,9 +39,21 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# ── credentials (set as env vars, or update here for local dev) ────────────
-_TL_SESS = os.getenv("TRENDLYNE_SESSION", "bce34ncrlhwelezjn884vaxvyh0g543w")
-_TL_CSRF = os.getenv("TRENDLYNE_CSRF",   "8pNPblqCbfTikxjVbCLRZwDbQq6cdZZwSWRsNjBE5AXZGgDVcZMNZNzNhtycXVDS")
+# ── credentials: environment only ────────────────────────────────────────────
+# There used to be a real session cookie and CSRF token hard-coded here as
+# defaults. They were committed to git, and when the env vars were missing the
+# code silently used an expired session — Trendlyne then served its login page
+# and every call failed with the misleading "File is not a zip file", so options
+# metrics ran on the VIX fallback every day. Now a missing cookie is reported as
+# such, and a non-Excel reply is named for what it is.
+_SESSION_HELP = ("log in to trendlyne.com, open DevTools → Application → Cookies → "
+                 "https://trendlyne.com and copy the '.trendlyne' and 'csrftoken' values "
+                 "into TRENDLYNE_SESSION and TRENDLYNE_CSRF")
+
+
+def _cookies() -> tuple[str, str]:
+    """(session, csrf) from the environment, read at call time."""
+    return os.getenv("TRENDLYNE_SESSION", "").strip(), os.getenv("TRENDLYNE_CSRF", "").strip()
 
 _FNO_PAGE_URL      = "https://trendlyne.com/futures-options/contracts-excel-download/"
 _FNO_ALT_URLS: list[str] = [
@@ -77,13 +89,23 @@ _CACHE_TTL = 3600 * 6     # 6 hours — data is EOD, no point re-downloading int
 
 def _make_fno_session() -> requests.Session:
     """Build a requests.Session with full browser-like headers + Trendlyne cookies."""
+    sess, csrf = _cookies()
+    if not sess or not csrf:
+        raise RuntimeError(f"Trendlyne cookies not set — {_SESSION_HELP}")
     s = requests.Session()
     s.headers.update(_FNO_HEADERS)
-    if _TL_SESS:
-        s.cookies.set(".trendlyne", _TL_SESS, domain="trendlyne.com")
-    if _TL_CSRF:
-        s.cookies.set("csrftoken",  _TL_CSRF, domain="trendlyne.com")
+    s.cookies.set(".trendlyne", sess, domain="trendlyne.com")
+    s.cookies.set("csrftoken",  csrf, domain="trendlyne.com")
     return s
+
+
+def _require_excel(content: bytes, content_type: str = "") -> None:
+    """An .xlsx file is a zip ('PK' header). Anything else is usually Trendlyne's login page."""
+    if not content.startswith(b"PK"):
+        raise RuntimeError(
+            f"Trendlyne returned {content_type or 'a non-Excel response'} "
+            f"({len(content)} bytes), not the F&O Excel — the session cookie is missing or "
+            f"expired: {_SESSION_HELP}")
 
 
 def _extract_s3_url(r: requests.Response, url: str) -> str:
@@ -140,8 +162,8 @@ def _get_presigned_url() -> str:
                 url,
                 timeout=15,
                 allow_redirects=False,
-                headers={"X-CSRFToken": _TL_CSRF, "Content-Type": "application/x-www-form-urlencoded"},
-                data={"csrfmiddlewaretoken": _TL_CSRF},
+                headers={"X-CSRFToken": _cookies()[1], "Content-Type": "application/x-www-form-urlencoded"},
+                data={"csrfmiddlewaretoken": _cookies()[1]},
             )
             last_status = f"POST_{r.status_code}"
             if r.status_code in (301, 302):
@@ -206,11 +228,13 @@ def _download_excel() -> tuple[pd.DataFrame, pd.DataFrame]:
         s = _make_fno_session()
         r = s.get(direct_url, timeout=60, allow_redirects=True)
         r.raise_for_status()
+        _require_excel(r.content, r.headers.get("Content-Type", ""))
         wb_bytes = io.BytesIO(r.content)
     else:
         logger.info("Downloading Trendlyne F&O Excel from S3 …")
         r = requests.get(url_or_sentinel, timeout=60)
         r.raise_for_status()
+        _require_excel(r.content, r.headers.get("Content-Type", ""))
         wb_bytes = io.BytesIO(r.content)
 
     fno_data   = pd.read_excel(wb_bytes, sheet_name="F&O Data",   engine="openpyxl")

@@ -2077,26 +2077,21 @@ async def get_system_health(
     tl_csrf = os.getenv("TRENDLYNE_CSRF", "")
     tl_user = os.getenv("TRENDLYNE_USER", "")
     tl_pass = os.getenv("TRENDLYNE_PASS", "")
-    _tl_placeholder = "bce34ncrlhwelezjn884vaxvyh0g543w"
-
-    if tl_sess and tl_csrf and tl_sess != _tl_placeholder:
-        # Auto-refresh configured?
+    # (The F&O fetcher no longer carries hard-coded default cookies, so there is no
+    # placeholder value to detect. Whether the cookies still WORK shows up in the
+    # options snapshot: source "trendlyne_fno" vs "fallback".)
+    if tl_sess and tl_csrf:
         if tl_user and tl_pass:
             checks.append(_ok(
                 "Trendlyne",
-                "Session cookies + auto-refresh credentials configured ✓ (F&O Excel + analyst targets)"
+                "Session cookies configured ✓ — auto-refresh credentials cover analyst targets only; "
+                "the F&O Excel needs the cookies refreshed by hand when they expire"
             ))
         else:
             checks.append(_ok(
                 "Trendlyne",
-                "Session cookies configured ✓ — set TRENDLYNE_USER + TRENDLYNE_PASS for auto-refresh on expiry"
+                "Session cookies configured ✓ — refresh TRENDLYNE_SESSION + TRENDLYNE_CSRF when they expire"
             ))
-    elif tl_sess == _tl_placeholder:
-        checks.append(_warn(
-            "Trendlyne",
-            "Using placeholder/default session cookies — F&O Excel and analyst targets may fail",
-            "Login to trendlyne.com, copy .trendlyne + csrftoken cookies, set TRENDLYNE_SESSION + TRENDLYNE_CSRF"
-        ))
     else:
         checks.append(_warn(
             "Trendlyne",

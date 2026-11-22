@@ -499,7 +499,7 @@ python -m agents.discovery_screener --coverage-only          # print stats and e
 ```
 
 ### Orchestrator integration
-Discovery is **no longer part of the LangGraph pipeline** (moved out in the P6 schedule redesign). It now runs as a standalone `worker.py` job at **10:30 IST** (`job_discovery_screener` → `run_discovery`), ~75 min after NSE open, so it screens on live intraday prices/RSI/EMA instead of yesterday's close. `run_discovery_node` still exists in `scheduler/orchestrator.py` as dead code (excluded from `build_graph()`'s edges — see the `# NOTE: run_discovery_node removed from pipeline (P6 schedule redesign)` comment) and can be deleted in a future cleanup.
+Discovery is **no longer part of the LangGraph pipeline** (moved out in the P6 schedule redesign). It now runs as a standalone `worker.py` job at **10:30 IST** (`job_discovery_screener` → `run_discovery`), ~75 min after NSE open, so it screens on live intraday prices/RSI/EMA instead of yesterday's close. The dead `run_discovery_node` was deleted from `scheduler/orchestrator.py` on 2026-11-21 (WP-024).
 
 ---
 
@@ -596,7 +596,7 @@ Uses `ANTHROPIC_API_KEY` env var server-side (never exposed to browser).
 | `JUDGE_MAX_TOKENS` | *(Optional)* Per-judge ceiling. Default **2000** (`scheduler/synthesis_validator.py`) — 500 truncated ~every Opus reply and dropped that judge's vote. |
 | `TRENDLYNE_SESSION` | `.trendlyne` cookie value — required for F&O Excel download + analyst targets scraper |
 | `TRENDLYNE_CSRF` | `csrftoken` cookie value — required alongside TRENDLYNE_SESSION |
-| `TRENDLYNE_USER` | *(Optional)* Trendlyne login email — enables auto-cookie-refresh when session expires |
+| `TRENDLYNE_USER` | *(Optional)* Trendlyne login email — auto-cookie-refresh for the **analyst-targets** scraper only; the F&O Excel download uses `TRENDLYNE_SESSION`/`TRENDLYNE_CSRF` and needs them refreshed by hand (DevTools → Application → Cookies → trendlyne.com) |
 | `SCREENER_SESSION` | *(Optional)* screener.in `sessionid` cookie — enables Excel export fallback in `get_screener_history` (DB-10). Get it: log in at screener.in via Google → DevTools → Application → Cookies → screener.in → copy `sessionid` value. Refreshed manually when it expires. |
 | `TRENDLYNE_PASS` | *(Optional)* Trendlyne login password — enables auto-cookie-refresh |
 | `SCRAPERAPI_KEY` | **Recommended for Railway** — ScraperAPI rotating residential proxy ($29/month, 250k req). Bypasses screener.in + Trendlyne IP blocks. Get key at scraperapi.com. Applied automatically to all screener.in + Trendlyne requests via `data/proxy_session.py`. |
